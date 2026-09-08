@@ -536,6 +536,10 @@ class Fixture:
             "Graphics/Faces": ["Actor1.png"],
             "Graphics/Battlers": ["Slime.png"],
             "Graphics/Parallaxes": ["BlueSky.png"],
+            # The animation in the database names this, so the fixture has to
+            # ship it: a fixture project should be internally consistent, or
+            # every asset test has to work around its own gaps.
+            "Graphics/Animations": ["Slash1.png"],
             "Audio/BGM": ["Town1.ogg", "Theme1.ogg", "Battle1.ogg"],
             "Audio/SE": ["Move1.ogg"],
             "Audio/ME": ["Victory1.ogg", "Gameover1.ogg"],

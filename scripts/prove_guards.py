@@ -87,6 +87,13 @@ SEARCHED = "tests/test_tools.py::TestSearchReportsWhatItSearched::"
 READ = "tests/test_tools.py::TestSearchDoesNotClaimToHaveRead::"
 CREATE = "tests/test_tools.py::TestMapCreateIsStaged::"
 SCRIPTAT = "tests/test_tools.py::TestScriptHitsSayWhere::"
+SHAPE = "tests/test_tools.py::TestArgumentShapeIsEnforced::"
+ATFIELD = "tests/test_tools.py::TestAtPrefixedFieldsAreRefused::"
+EVERY = "tests/test_tools.py::TestGuardsRunOnEveryPath::"
+TALLY = "tests/test_tools.py::TestFindingCountsAreTrustworthy::"
+REDOS = "tests/test_tools.py::TestSearchRefusesTheHangingPattern::"
+DELSTALE = "tests/test_tools.py::TestDeletingRespectsStaleness::"
+CANON = "tests/test_tools.py::TestMapIdsAreCanonical::"
 
 GUARDS = [
     Guard(
@@ -514,8 +521,8 @@ GUARDS = [
     ),
     Guard(
         "map ids are ones a filename can express", PROJECT,
-        "            if digits.isdigit() and 1 <= int(digits) <= MAX_MAP_ID:",
-        "            if digits.isdigit():",
+        '            if digits.isdigit() and 1 <= int(digits) <= MAX_MAP_ID \\',
+        '            if digits.isdigit() and True \\',
         [HOSTILE + "test_an_unaddressable_map_file_does_not_stop_the_server"],
         "a Map0 or Map10000 in the Data folder reaches map_filename, which "
         "raises for an id it cannot express, and the server will not start",
@@ -531,10 +538,8 @@ GUARDS = [
     ),
     Guard(
         "restore validates every name before it copies", PROJECT,
-        """        wanted = [safe_component(f, "file name")
-                  for f in (files or available_files)]""",
-        """        wanted = [safe_component(f, "file name") for f in files] if files \\
-            else available_files""",
+        '            safe_component(name, "file name")',
+        '            pass  # check removed',
         [RESTORE + "test_a_bad_name_in_the_snapshot_stops_before_anything_is_copied"],
         "a name is rejected inside the copy loop, after the safety snapshot "
         "and after some files have already been written",
@@ -597,11 +602,10 @@ GUARDS = [
     ),
     Guard(
         "echoed values are truncated", SERVER,
-        """    shown = repr(value)
-    if len(shown) > MAX_ECHO_CHARS:""",
-        """    shown = repr(value)
-    if False:""",
-        [HARD + "test_a_rejected_method_is_not_echoed_in_full"],
+        'MAX_ECHO_CHARS = 120',
+        'MAX_ECHO_CHARS = 100_000_000',
+        [HARD + "test_a_rejected_method_is_not_echoed_in_full",
+         HARD + "test_a_rejected_non_string_is_not_echoed_in_full"],
         "a rejected 32 MB method name is quoted back in full",
     ),
     Guard(
@@ -668,9 +672,10 @@ GUARDS = [
     ),
     Guard(
         "quoted project text is length-capped", ANALYSIS,
-        "    if len(text) > MAX_TEXT_CHARS:",
-        "    if False:",
-        [VHOST + "test_an_event_name_of_absurd_length"],
+        'MAX_TEXT_CHARS = 200',
+        'MAX_TEXT_CHARS = 100_000_000',
+        [VHOST + "test_an_event_name_of_absurd_length",
+         VHOST + "test_a_long_event_name_is_capped_in_the_message"],
         "one crafted event name is repeated in full into every finding about it, "
         "so a small file produces a response too large to return",
     ),
@@ -713,8 +718,8 @@ GUARDS = [
     ),
     Guard(
         "database entry ids are bounded", DB_TOOLS,
-        "                    _check_id(table, entry_id, container, kind)",
-        "                    pass  # check removed",
+        '        _check_id(table, entry_id, request.container, request.kind)',
+        '        pass  # check removed',
         [DBID + "test_a_negative_create_id_is_refused",
          DBID + "test_a_huge_create_id_is_refused",
          DBID + "test_slot_zero_is_refused"],
@@ -724,8 +729,8 @@ GUARDS = [
     ),
     Guard(
         "a created entry carries its own id", DB_TOOLS,
-        "                if isinstance(entry, RubyObject) and _carries_id(kind):",
-        "                if False:",
+        '    if isinstance(entry, RubyObject) and _carries_id(request.kind):',
+        '    if False:',
         [DBID + "test_a_created_entry_carries_its_own_id"],
         "the one field every RGSS data class needs is the one field a blank "
         "create leaves out, and the engine reads it",
@@ -740,8 +745,8 @@ GUARDS = [
     ),
     Guard(
         "an unscanned table says it was unscanned", DB_TOOLS,
-        "                scanned = table in REFERENCE_RULES",
-        "                scanned = True",
+        '    scanned = table in REFERENCE_RULES',
+        '    scanned = True',
         [DBID + "test_deleting_an_unscanned_table_says_it_was_not_scanned"],
         "a reference count of zero reads as \"nothing points at this\" when "
         "in fact nothing looked: only some tables have rules to scan for",
@@ -769,8 +774,8 @@ GUARDS = [
     ),
     Guard(
         "a map patch cannot change its size", MAP_TOOLS,
-        "    for field in STRUCTURAL_MAP_FIELDS:",
-        "    for field in ():",
+        '    refuse_fields(',
+        '    _skip = (',
         [MAPW + "test_a_patch_cannot_change_the_map_size",
          MAPW + "test_width_is_refused_on_update"],
         "setting @width alone leaves the map claiming a size its tile table "
@@ -853,6 +858,107 @@ GUARDS = [
         [SCRIPTAT + "test_a_script_hit_names_its_slot_and_line"],
         "every script hit's location renders as the bare word \"script\", with "
         "no slot and no line number",
+    ),
+    Guard(
+        "a dry run does not commit", REGISTRY,
+        "        if not dry_run:",
+        "        if True:",
+        [STAGE + "test_a_dry_run_leaves_nothing_behind",
+         STAGE + "test_a_resize_dry_run_does_not_discard_cached_tiles"],
+        "StagedWrite.save keeps the staged mutation even when nothing was "
+        "written, so a preview is left in the cache for the next real write "
+        "of that file to put on disk",
+    ),
+    Guard(
+        "the declared schema is enforced", REGISTRY,
+        '        check_args(self.schema, args)',
+        '        pass  # gate removed',
+        [SHAPE + "test_a_misspelled_dry_run_does_not_write",
+         SHAPE + "test_a_declared_bound_is_enforced",
+         SHAPE + "test_a_declared_maxitems_is_enforced"],
+        'a misspelled argument -- "dryrun" for "dry_run" -- is dropped '
+        'rather than applied, so a tool performs a real write while the '
+        'caller believes it asked for a preview',
+    ),
+    Guard(
+        "a refusal list sees the @ spelling", REGISTRY,
+        '        if bare_name(key) in fields:',
+        '        if key in fields:',
+        [ATFIELD + "test_a_map_patch_cannot_reach_a_structural_field",
+         ATFIELD + "test_a_page_patch_cannot_reach_the_command_list"],
+        'a Ruby ivar can be written "@width" as well as "width", and these '
+        'patches accept either, so every refusal list is bypassed by '
+        'spelling the field the other way',
+    ),
+    Guard(
+        "raw_data sees the @ spelling too", MISC_TOOLS,
+        '    if len(path) == 1 and _bare_name(path[0]) in STRUCTURAL_MAP_PATHS:',
+        '    if len(path) == 1 and path[0] in STRUCTURAL_MAP_PATHS:',
+        [ATFIELD + "test_raw_data_cannot_reach_a_structural_field"],
+        'the same bypass on the escape hatch: path "@width" reaches the '
+        'field this refuses',
+    ),
+    Guard(
+        "creating a map checks its patch", MAP_TOOLS,
+        """    # The same refusal the update path makes. Creating used to return before
+    # that check ran, so a create could write a map whose @width disagreed
+    # with its tile table -- the shape the editor will not open.
+    _refuse_structural(patch)""",
+        "    pass  # check removed",
+        [EVERY + "test_creating_a_map_refuses_a_structural_patch"],
+        "the create path returned before the update path's check ran, so a "
+        'create could write a map whose declared size disagreed with its '
+        'tile table',
+    ),
+    Guard(
+        "an update cannot move an entry id", DB_TOOLS,
+        '    request.refuse_id_patch(patch, entry_id)',
+        '    pass  # check removed',
+        [EVERY + "test_updating_an_entry_cannot_move_its_id"],
+        "the refusal existed only on the create path, though the tool's own "
+        'docstring said a patch could not move an id',
+    ),
+    Guard(
+        "findings are counted before they are dropped", ANALYSIS,
+        "    counts = {level: sum(1 for f in findings if f.severity == level)",
+        "    counts = {level: sum(1 for f in findings[:limit] if f.severity == level)",
+        [TALLY + "test_counts_survive_truncation"],
+        'truncating by arrival order before sorting let a flood of warnings '
+        "from one check push out a later check's errors, and the counts "
+        'then reported zero errors while errors existed',
+    ),
+    Guard(
+        "the hanging pattern shape is refused", MISC_TOOLS,
+        '    _refuse_nested_quantifier(query)',
+        '    pass  # check removed',
+        [REDOS + "test_a_nested_quantifier_is_refused"],
+        'a repeated group that itself repeats backtracks exponentially and '
+        'cannot be interrupted, so one search wedges this single-threaded '
+        'server for good',
+    ),
+    Guard(
+        "a command_code search needs somewhere to look", MISC_TOOLS,
+        '        if "events" not in scopes:',
+        '        if False:',
+        [REDOS + "test_a_command_code_search_needs_the_events_scope"],
+        'the search runs against no scope at all and reports zero hits, '
+        'which reads as "this project has no such command"',
+    ),
+    Guard(
+        "deleting checks staleness like every write", PROJECT,
+        '            self._assert_not_stale(filename, path, cached)',
+        '            pass  # check removed',
+        [DELSTALE + "test_a_map_file_that_changed_is_not_deleted"],
+        'the most destructive operation here is the one exempt from "refuse '
+        'to act on a file that changed underneath us"',
+    ),
+    Guard(
+        "map ids come from canonical filenames", PROJECT,
+        '                    and digits == "%03d" % int(digits):',
+        '                    and True:',
+        [CANON + "test_an_id_always_names_a_file_that_exists"],
+        'Map1, Map01 and Map001 all parse as id 1, so one cached map is '
+        'walked once per file and an id names a file that is not there',
     ),
 ]
 

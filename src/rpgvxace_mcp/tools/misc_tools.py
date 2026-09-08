@@ -36,6 +36,7 @@ from ..schema import (
     TILE_ID_RANGES_NOTE,
 )
 from .registry import (
+    int_list,
     echo,
     ARR,
     BOOL,
@@ -61,8 +62,17 @@ from .registry import (
 # One search's ceiling on hits, on how much of a hit's text comes back, and on
 # the size of a caller-supplied pattern.
 MAX_HITS = 1000
+
+# How many database rows one listing returns. Paging is what `offset`
+# is for; a listing larger than this is not one a caller reads.
+MAX_ROWS = 500
 MAX_HIT_CHARS = 300
 MAX_PATTERN_CHARS = 512
+
+# How much of one candidate string a pattern is matched against. A minified
+# script line can be tens of thousands of characters, and match cost grows with
+# the subject; a hit past this point is not one a person was looking for.
+MAX_SUBJECT_CHARS = 2000
 
 
 SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
@@ -76,17 +86,6 @@ MAX_SCRIPT_NAME_CHARS = 200
 # How many maps one validate call will look at. A caller asking for more
 # than a project could hold is asking by mistake.
 MAX_MAP_IDS = 4096
-
-
-def need_map_id(value: Any) -> int:
-    """A map id from a caller, refusing anything that would silently move.
-
-    ``int(1.9)`` is 1, so coercing a float here would check a different map
-    than the caller asked about and report the answer as if it were theirs.
-    """
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ToolError("map id %r is not a whole number" % (value,))
-    return value
 
 
 @tool(
@@ -206,8 +205,12 @@ def _schema_report(ctx: Context, refresh: bool) -> dict[str, Any]:
         "scopes": prop(ARR, "Which checks to run (default all): "
                             + ", ".join(VALIDATE_SCOPES),
                        items={"type": STR, "enum": VALIDATE_SCOPES}),
-        "map_ids": prop(ARR, "Only check these maps -- this narrows the map-based\n                             checks only, since common events and troop pages\n                             belong to the project rather than to a map. At\n                             most %d." % MAX_MAP_IDS, items={"type": INT},
-                        maxItems=MAX_MAP_IDS),
+        "map_ids": prop(ARR, "Only check these maps. This narrows the "
+                             "map-based checks only: common events and "
+                             "troop pages belong to the project rather "
+                             "than to a map, so they are always "
+                             "included. At most %d." % MAX_MAP_IDS,
+                        items={"type": INT}, maxItems=MAX_MAP_IDS),
         "limit": prop(INT, "Maximum findings to return (default %d)."
                       % DEFAULT_LIMIT, minimum=1, maximum=MAX_FINDINGS),
     }),
@@ -215,13 +218,11 @@ def _schema_report(ctx: Context, refresh: bool) -> dict[str, Any]:
 def validate(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     """Run the cross-reference checks. Reads only."""
     scopes = _scopes_arg(args, "scopes", VALIDATE_SCOPES)
-    requested = opt_list(args, "map_ids")
-    if len(requested) > MAX_MAP_IDS:
-        raise ToolError("map_ids lists %d maps; this server checks at most "
-                        "%d at a time" % (len(requested), MAX_MAP_IDS))
-    # Not int(m): a float would truncate silently and check a different
-    # map than the caller named.
-    map_ids = [need_map_id(m) for m in requested] or None
+    # int_list, so a map id here is read exactly as it is everywhere else:
+    # the local reader this replaced refused the integral 2.0 that every other
+    # tool accepts, so sibling tools answered the same JSON differently.
+    map_ids = int_list(args, "map_ids", MAX_MAP_IDS,
+                       minimum=1, maximum=MAX_MAP_ID) or None
     return run_validate(ctx.project, scopes, map_ids,
                         opt_int(args, "limit", DEFAULT_LIMIT) or DEFAULT_LIMIT)
 
@@ -257,6 +258,16 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     query = opt_str(args, "query")
     if code_filter is None and not query:
         raise ToolError("pass query (text to find) or command_code")
+    if code_filter is not None:
+        if query:
+            raise ToolError(
+                "pass query or command_code, not both: a command_code search "
+                "matches on the code and ignores text.")
+        if "events" not in scopes:
+            raise ToolError(
+                "a command_code search only has anything to look at in the "
+                "events scope, because only event command lists hold commands. "
+                "Include \"events\" in scopes.")
 
     matcher = _matcher(args, query)
 
@@ -401,6 +412,35 @@ def _script_at(script: dict[str, Any], line: int) -> Location:
     return location
 
 
+# A quantified group that itself contains an unbounded quantifier -- (a+)+,
+# (a*)*, (\w+)* and so on. Python's `re` backtracks exponentially on these and
+# cannot be interrupted once it starts, so one of them against a long script
+# line wedges this single-threaded server for good. Length was never the
+# control: "(a+)+$" is six characters.
+_NESTED_QUANTIFIER = re.compile(r"\((?:[^()\\]|\\.)*[+*]\)\s*[+*{]")
+
+
+def _refuse_nested_quantifier(pattern: str) -> None:
+    """Refuse the pattern shape that backtracks exponentially.
+
+    A conservative shape test, not an analysis: it refuses some patterns that
+    would in fact have been fine. That is the right trade here, because the
+    failure it prevents is unrecoverable -- the process stops answering, and
+    the caller cannot cancel -- while a refusal costs one rephrased search.
+
+    It is also not complete, and saying so matters more than implying it is:
+    an alternation of overlapping branches (``(a|a)+``) backtracks badly and is
+    not caught by this shape. What bounds that case is the subject cap in
+    :func:`_matcher`, not this check.
+    """
+    if _NESTED_QUANTIFIER.search(pattern):
+        raise ToolError(
+            "that pattern has a repeated group that itself repeats, like "
+            "\"(a+)+\". Those can take exponential time to match and cannot "
+            "be interrupted, so this server refuses them. Rewrite it without "
+            "the inner repeat, or search for a plain substring.")
+
+
 def _matcher(args: dict[str, Any], query: str | None):
     """The text test one search uses, compiled once.
 
@@ -419,13 +459,23 @@ def _matcher(args: dict[str, Any], query: str | None):
             "the pattern is %d characters, above the %d this server compiles. "
             "Search for a plain substring instead, or narrow the pattern."
             % (len(query), MAX_PATTERN_CHARS))
+    _refuse_nested_quantifier(query)
     try:
         pattern = re.compile(query, re.IGNORECASE)
     except re.error as exc:
         raise ToolError("invalid regular expression: %s" % exc)
     except RecursionError:
         raise ToolError("that pattern nests too deeply to compile")
-    return pattern.search
+
+    # Matched against a bounded prefix of each candidate. Refusing nested
+    # quantifiers above removes the common blow-up, but it is a shape test, not
+    # a proof -- an alternation of overlapping branches can still backtrack
+    # badly -- so the subject is capped as well. Together these bound one
+    # match; the scan loops bound how many.
+    def search(text: str):
+        return pattern.search(text[:MAX_SUBJECT_CHARS])
+
+    return search
 
 
 def _scopes_arg(args: dict[str, Any], key: str,
@@ -526,11 +576,9 @@ def scripts(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     filename = ctx.project.filename_for("scripts")
     with ctx.staged(filename) as write_landed:
         ctx.project.set_script(index, name, code)
-        write = ctx.project.save_file(
+        write = write_landed.save(
             filename, dry_run=dry_run, tool="scripts",
             summary="updated script %d" % index)
-        if not dry_run:
-            write_landed.done()
     return {"index": index, "name": name, "write": write}
 
 
@@ -647,6 +695,11 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             or "value" not in args["value"]:
         raise ToolError('set needs value as {"value": <the new value>}')
 
+    if table == "scripts":
+        raise ToolError(
+            "the scripts table cannot be written through raw_data: a slot body "
+            "is zlib-compressed Ruby, and writing it as anything else stops "
+            "the game booting. Use the scripts tool, which compresses it.")
     if map_id is not None:
         _check_structural(path)
     parent = _resolve(root, path[:-1], ctx.codec)
@@ -658,12 +711,10 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 
     dry_run = opt_bool(args, "dry_run")
     with ctx.staged(filename) as write_landed:
-        _assign(parent, key, new_value)
-        write = ctx.project.save_file(filename, dry_run=dry_run,
-                                      tool="raw_data",
-                                      summary="set %s" % "/".join(path))
-        if not dry_run:
-            write_landed.done()
+        _assign(parent, key, new_value, ctx.codec)
+        write = write_landed.save(filename, dry_run=dry_run,
+                                  tool="raw_data",
+                                  summary="set %s" % "/".join(path))
     return {"file": filename, "path": "/".join(path), "before": before,
             "after": to_json(new_value, ctx.codec, "summary"), "write": write}
 
@@ -676,12 +727,14 @@ STRUCTURAL_MAP_PATHS = ("data", "width", "height", "events")
 
 
 def _check_structural(path: list[str]) -> None:
-    if len(path) == 1 and path[0] in STRUCTURAL_MAP_PATHS:
+    # Bare, because `_resolve` accepts either spelling of an ivar and so did
+    # this check's raw comparison: path "@width" reached the field this refuses.
+    if len(path) == 1 and _bare_name(path[0]) in STRUCTURAL_MAP_PATHS:
         raise ToolError(
             "%s cannot be replaced through raw_data, because the rest of the "
             "map has to agree with it. Use map_edit op=\"resize\" for the "
             "size, map_tiles for tiles, and event_edit for events."
-            % path[0])
+            % _bare_name(path[0]))
 
 
 def _check_same_kind(existing: Any, replacement: Any, path: str) -> None:
@@ -696,12 +749,16 @@ def _check_same_kind(existing: Any, replacement: Any, path: str) -> None:
     kinds = ((RubyObject, "an object"), (RubyHash, "a hash"),
              (Table, "an RGSS Table"), (list, "an array"))
     for kind, described in kinds:
-        if isinstance(existing, kind) and not isinstance(replacement, kind):
+        # Both directions: putting a structure where a scalar was produces the
+        # same file the editor will not open as the reverse.
+        if isinstance(existing, kind) != isinstance(replacement, kind):
+            held, given = ((described, type(replacement).__name__)
+                           if isinstance(existing, kind)
+                           else (type(existing).__name__, described))
             raise ToolError(
                 "%s currently holds %s, and replacing it with %s would leave a "
                 "file the editor cannot open. Set a field inside it instead, or "
-                "use the tool that owns this structure."
-                % (path, described, type(replacement).__name__))
+                "use the tool that owns this structure." % (path, held, given))
 
 
 def _resolve(value: Any, path: list[str], codec: TextCodec) -> Any:
@@ -729,10 +786,10 @@ def _resolve(value: Any, path: list[str], codec: TextCodec) -> Any:
             current = current.get(lookup)
         elif isinstance(current, RubyIvars):
             # A value the codec wrapped to keep an instance-variable record it
-            # could not store inline. Descending into what it wraps is what the
-            # caller meant.
-            current = current.value
-            continue
+            # could not store inline. Unwrap and retry the SAME key: the
+            # wrapper is not a level of the path.
+            current = current.inner
+            return _resolve(current, path[depth:], codec)
         elif isinstance(current, Table):
             raise ToolError("%s is an RGSS Table; use map_tiles to read or write "
                             "its cells" % trail)
@@ -752,7 +809,8 @@ def _index_list(items: list[Any], key: str, trail: str) -> Any:
     return items[index]
 
 
-def _assign(parent: Any, key: str, value: Any) -> None:
+def _assign(parent: Any, key: str, value: Any,
+            codec: TextCodec) -> None:
     if isinstance(parent, RubyObject):
         if not parent.has(key):
             raise ToolError(
@@ -769,7 +827,11 @@ def _assign(parent: Any, key: str, value: Any) -> None:
             raise ToolError("index %d is out of range for %d items" % (index, len(parent)))
         parent[index] = value
     elif isinstance(parent, RubyHash):
-        parent.set(int(key) if _is_int(key) else key, value)
+        # The same resolution the read side uses. Keying differently here meant
+        # a set on a RubyString-keyed hash appended a new bare-str key beside
+        # the pair that had just been read, so the reported before/after was a
+        # lie and the write then failed in the codec.
+        parent.set(_hash_key(parent, key, codec), value)
     else:
         raise ToolError("cannot assign into a %s" % type(parent).__name__)
 

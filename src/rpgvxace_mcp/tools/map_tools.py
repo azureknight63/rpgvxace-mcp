@@ -11,6 +11,7 @@ from ..project import MAX_MAP_ID, ProjectError
 from ..rubytypes import CELL_MASK, RubyHash, RubyObject, RubyString, Table
 from ..schema import TILE_ID_RANGES, new_map_info
 from .registry import (
+    refuse_fields,
     StagedWrite,
     as_int,
     ARR,
@@ -197,6 +198,12 @@ def map_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tile_counts(data: Table) -> dict[str, Any]:
+    """How often each tile id appears on each layer.
+
+    Bounded like every other whole-table walk: this is a per-cell Python loop,
+    and a crafted map can declare millions of cells.
+    """
+    _check_budget(data.xsize * data.ysize * data.zsize, "count the tiles of")
     out = {}
     for z in range(data.zsize):
         counter: Counter[int] = Counter()
@@ -361,6 +368,10 @@ def _apply_map_edit(ctx: Context, op: str, args: dict[str, Any], map_id: int,
                          minimum=1, maximum=MAX_MAP_SIDE)
         if width is None or height is None:
             raise ToolError("resize needs a width and a height")
+        if args.get("width") is None and args.get("height") is None:
+            raise ToolError(
+                "resize needs a width, a height, or both. Passing neither "
+                "would rewrite the map to the size it already has.")
         data = game_map.get("data")
         if not isinstance(data, Table):
             raise ToolError("map %d has no tile table to resize" % map_id)
@@ -394,15 +405,13 @@ def _apply_map_edit(ctx: Context, op: str, args: dict[str, Any], map_id: int,
     # Only the file that actually changed: a rename touches the tree, not the
     # map, and writing both made a rename look like a map edit in the log.
     if map_changed:
-        writes.append(ctx.project.save_file(ctx.project.map_file(map_id),
-                                            dry_run=dry_run, tool="map_edit",
-                                            summary="; ".join(changes)))
+        writes.append(write_landed.save(ctx.project.map_file(map_id),
+                                        dry_run=dry_run, tool="map_edit",
+                                        summary="; ".join(changes)))
     if info is not None:
-        writes.append(ctx.project.save_file(ctx.project.filename_for("map_infos"),
-                                            dry_run=dry_run, tool="map_edit",
-                                            summary="renamed map %d" % map_id))
-    if not dry_run:
-        write_landed.done()
+        writes.append(write_landed.save(ctx.project.filename_for("map_infos"),
+                                        dry_run=dry_run, tool="map_edit",
+                                        summary="renamed map %d" % map_id))
     return {"map_id": map_id, "op": op, "changes": changes, "writes": writes}
 
 
@@ -431,6 +440,20 @@ REFERENCE_PREVIEW = 25
 LAYER_CEILINGS = {2: 15, 3: 63}
 
 
+def _check_budget(cells: int, what: str) -> None:
+    """Refuse a cell walk larger than this server will spend time on.
+
+    Every one of these is a per-cell Python loop on a single-threaded server,
+    and a map's declared extents come out of a file that need not be one the
+    editor wrote.
+    """
+    if cells > MAX_CELLS_PER_READ:
+        raise ToolError(
+            "that would %s %d cells, above the %d this tool handles at once. "
+            "Ask for a smaller x/y/width/height window."
+            % (what, cells, MAX_CELLS_PER_READ))
+
+
 def _check_tile(ctx: Context, tile_id: int, z: int, what: str) -> None:
     """Refuse a value the layer cannot hold.
 
@@ -446,14 +469,17 @@ def _check_tile(ctx: Context, tile_id: int, z: int, what: str) -> None:
             % (what, tile_id, layer, ceiling))
 
 
+def _refuse_structural(patch: dict[str, Any]) -> None:
+    """Refuse a patch naming a field the rest of the map has to agree with."""
+    refuse_fields(
+        patch, STRUCTURAL_MAP_FIELDS,
+        "It has to stay in step with the rest of the map: use op \"resize\" "
+        "for the size, map_tiles for tiles, and event_edit for events.")
+
+
 def _check_map_patch(op: str, args: dict[str, Any], patch: dict[str, Any]) -> None:
     """Refuse a patch that would leave the map disagreeing with itself."""
-    for field in STRUCTURAL_MAP_FIELDS:
-        if field in patch:
-            raise ToolError(
-                "%s cannot be set with a patch, because it has to stay in step "
-                "with the tile table. Use op \"resize\" to change the size of "
-                "a map, or map_tiles to change its tiles." % field)
+    _refuse_structural(patch)
     if op != "resize" and (args.get("width") is not None
                            or args.get("height") is not None):
         raise ToolError(
@@ -465,6 +491,7 @@ def _cells_outside(data: Table, width: int, height: int) -> int:
     """How many painted cells a resize to this size would discard."""
     if width >= data.xsize and height >= data.ysize:
         return 0
+    _check_budget(data.xsize * data.ysize * data.zsize, "resize")
     dropped = 0
     for z in range(data.zsize):
         for y in range(data.ysize):
@@ -527,12 +554,23 @@ def _create_map(ctx: Context, args: dict[str, Any], dry_run: bool) -> dict[str, 
     game_map = normalize_strings(ctx.project.profile.new_map(
         width, height, tileset_id), ctx.codec)
     patch = opt_dict(args, "patch")
+    # The same refusal the update path makes. Creating used to return before
+    # that check ran, so a create could write a map whose @width disagreed
+    # with its tile table -- the shape the editor will not open.
+    _refuse_structural(patch)
     changes = apply_patch(game_map, patch, ctx.codec) if patch else []
 
     order = max([info.get("order") or 0 for _, info in ctx.project.entries("map_infos")]
                 or [0]) + 1
+    parent_id = opt_int(args, "parent_id", 0, minimum=0) or 0
+    if parent_id and parent_id not in {i for i, _ in
+                                       ctx.project.entries("map_infos")}:
+        raise ToolError(
+            "parent_id %d is not a map in the tree, so the editor would have "
+            "nowhere to show the new map. Pass 0 for the top level, or an "
+            "existing map id." % parent_id)
     info = normalize_strings(
-        new_map_info(name, opt_int(args, "parent_id", 0) or 0, order), ctx.codec)
+        new_map_info(name, parent_id, order), ctx.codec)
     # Rewrite the name through the project codec so a Japanese install gets
     # Shift_JIS rather than the template's UTF-8.
     apply_patch(info, {"name": name}, ctx.codec)
@@ -554,12 +592,11 @@ def _create_map(ctx: Context, args: dict[str, Any], dry_run: bool) -> dict[str, 
             }
         ctx.project.create_file(filename, game_map)
         writes = [
-            ctx.project.save_file(filename, tool="map_edit",
-                                  summary="created map %d (%s)" % (map_id, name)),
-            ctx.project.save_file(infos_file, tool="map_edit",
-                                  summary="added map %d to the tree" % map_id),
+            write_landed.save(filename, tool="map_edit",
+                              summary="created map %d (%s)" % (map_id, name)),
+            write_landed.save(infos_file, tool="map_edit",
+                              summary="added map %d to the tree" % map_id),
         ]
-        write_landed.done()
     return {"op": "create", "map_id": map_id, "name": name,
             "size": [width, height], "changes": changes, "writes": writes}
 
@@ -588,14 +625,23 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     # staleness check exists for -- left the map deleted and the tree still
     # pointing at it, while the caller was told nothing had happened.
     infos_file = ctx.project.filename_for("map_infos")
+    # Checked before the tree is touched: the file can legitimately be absent
+    # (map_list reports that as file_present: false), and removing the tree
+    # entry first meant the caller was told the call failed after it had in
+    # fact landed.
+    has_file = ctx.project.exists(filename)
     with ctx.staged(infos_file) as tree_landed:
         infos.delete(map_id)
-        write = ctx.project.save_file(infos_file, tool="map_edit",
-                                      summary="removed map %d from the tree"
-                                              % map_id)
-        tree_landed.done()
-    deleted = ctx.project.delete_file(filename, tool="map_edit")
-    result = {"op": "delete", "map_id": map_id, "deleted": deleted, "write": write}
+        write = tree_landed.save(infos_file, tool="map_edit",
+                                 summary="removed map %d from the tree"
+                                         % map_id)
+    deleted = (ctx.project.delete_file(filename, tool="map_edit")
+               if has_file else None)
+    result: dict[str, Any] = {"op": "delete", "map_id": map_id,
+                              "deleted": deleted, "write": write}
+    if not has_file:
+        result["note"] = ("there was no %s to delete, so only the tree entry "
+                          "was removed" % filename)
     if incoming:
         result["warning"] = (
             "%d Transfer Player command(s) still point at map %d and will now send "
@@ -668,11 +714,8 @@ def map_tiles(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             "the rectangle (%d, %d) %dx%d does not fit inside this %dx%d map"
             % (x, y, width, height, data.xsize, data.ysize)
         )
-    if op == "read" and width * height > MAX_CELLS_PER_READ:
-        raise ToolError(
-            "that rectangle is %d cells, above the %d this tool returns at "
-            "once. Ask for a smaller x/y/width/height window."
-            % (width * height, MAX_CELLS_PER_READ))
+    if op == "read":
+        _check_budget(width * height, "read")
 
     region = {"map_id": map_id, "x": x, "y": y, "width": width, "height": height,
               "z": z, "layer": ctx.project.profile.map_layers.get(
@@ -694,7 +737,8 @@ def map_tiles(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         if tile_id is None:
             raise ToolError("fill needs a tile_id")
         _check_tile(ctx, tile_id, z, "tile_id")
-        cells = [tile_id] * (width * height)
+        _check_budget(width * height, "fill")
+        cells = None  # written straight through, without a list of copies
         summary = "filled %dx%d at (%d, %d) layer %d with tile %d" % (
             width, height, x, y, z, tile_id)
     else:
@@ -702,6 +746,7 @@ def map_tiles(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         if len(rows) != height:
             raise ToolError("rows has %d rows but the rectangle is %d tall"
                             % (len(rows), height))
+        _check_budget(width * height, "write")
         cells = []
         for dy, row in enumerate(rows):
             if not isinstance(row, list) or len(row) != width:
@@ -716,12 +761,11 @@ def map_tiles(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     dry_run = opt_bool(args, "dry_run")
     filename = ctx.project.map_file(map_id)
     with ctx.staged(filename) as write_landed:
-        for index, tile_id in enumerate(cells):
-            data.set(x + index % width, y + index // width, z, tile_id)
-        write = ctx.project.save_file(filename, dry_run=dry_run,
-                                      tool="map_tiles", summary=summary)
-        if not dry_run:
-            write_landed.done()
+        for index in range(width * height):
+            value = tile_id if cells is None else cells[index]
+            data.set(x + index % width, y + index // width, z, value)
+        write = write_landed.save(filename, dry_run=dry_run,
+                                  tool="map_tiles", summary=summary)
     region["changed"] = summary
     region["write"] = write
     return region

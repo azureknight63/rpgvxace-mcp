@@ -449,9 +449,19 @@ class TestTransportHardening(unittest.TestCase):
         self.assertIn("result", self.server.request("ping"))
 
     def test_a_rejected_method_is_not_echoed_in_full(self):
+        """A long string is sliced before it is quoted."""
         self.handshake()
         response = self.server.send_raw(json.dumps(
             {"jsonrpc": "2.0", "id": 3, "method": "x" * 5000}))
+        self.assertLess(len(response["error"]["message"]), 400)
+
+    def test_a_rejected_non_string_is_not_echoed_in_full(self):
+        """And anything else is capped after it: a params object is not a
+        string, so it takes the other path through the same helper."""
+        self.handshake()
+        response = self.server.send_raw(json.dumps(
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+             "params": list(range(5000))}))
         self.assertLess(len(response["error"]["message"]), 400)
 
 if __name__ == "__main__":

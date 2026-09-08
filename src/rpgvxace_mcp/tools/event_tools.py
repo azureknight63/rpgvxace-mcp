@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..commands import (
+    CODE_BLANK,
     CONTINUATION_CODES,
     CommandError,
     MOVE_COMMAND_NAMES,
@@ -20,6 +21,8 @@ from ..project import MAX_MAP_ID
 from ..rubytypes import RubyHash, RubyObject, RubyString
 from ..schema import new_event, new_event_command, new_page
 from .registry import (
+    refuse_fields,
+    ops_arg,
     StagedWrite,
     int_list,
     echo,
@@ -241,18 +244,13 @@ def event_edit(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     that sets a page's command list directly -- use set_commands, which
     builds a list the interpreter can run.
     """
-    ops = opt_list(args, "ops")
-    if not ops:
-        raise ToolError("ops must contain at least one operation")
+    # ops_arg checks both targets' op lists in one place: the common-event
+    # branch used to skip the shape check and turn a non-object op into an
+    # internal error.
+    ops = ops_arg(args)
     dry_run = opt_bool(args, "dry_run")
     common_id = opt_int(args, "common_event_id", minimum=1)
     map_id = opt_int(args, "map_id", minimum=1, maximum=MAX_MAP_ID)
-
-    # Checked here, once, for both targets: the common-event branch used to
-    # skip it and turn a non-object op into an internal error.
-    for raw_op in ops:
-        if not isinstance(raw_op, dict):
-            raise ToolError("each op must be an object, got %s" % echo(raw_op))
 
     if common_id is not None and map_id is not None:
         raise ToolError(
@@ -275,6 +273,14 @@ def _apply_event_ops(ctx: Context, map_id: int, filename: str,
     game_map = ctx.project.load_map(map_id)
     events = game_map.get("events")
     if not isinstance(events, RubyHash):
+        if events is not None:
+            # Replacing it would throw away whatever is there, which on a
+            # damaged or unmodelled-engine file is the user's events.
+            raise ToolError(
+                "map %d holds its events as %s rather than a Hash, so this "
+                "tool cannot edit them without discarding what is there. Run "
+                "validate to see what is wrong with the file."
+                % (map_id, type(events).__name__))
         events = RubyHash()
         game_map.set("events", events)
     width, height = game_map.get("width") or 0, game_map.get("height") or 0
@@ -283,12 +289,10 @@ def _apply_event_ops(ctx: Context, map_id: int, filename: str,
     for raw_op in ops:
         applied.append(_apply_event_op(ctx, events, raw_op, width, height))
 
-    write = ctx.project.save_file(
+    write = write_landed.save(
         filename, dry_run=dry_run, tool="event_edit",
         summary="; ".join(str(a.get("summary", a.get("op"))) for a in applied),
     )
-    if not dry_run:
-        write_landed.done()
     return {"map_id": map_id, "applied": applied, "write": write}
 
 
@@ -322,12 +326,10 @@ def _check_page_patch(patch: dict[str, Any]) -> None:
     straight through to the file, so it could leave a page the interpreter
     misreads. `set_commands` is the way to change a command list.
     """
-    for field in UNPATCHABLE_PAGE_FIELDS:
-        if field in patch:
-            raise ToolError(
-                "%s cannot be set with a patch. Use op \"set_commands\" or "
-                "\"append_commands\" to change what a page runs, so the "
-                "command list is built correctly." % field)
+    refuse_fields(
+        patch, UNPATCHABLE_PAGE_FIELDS,
+        "Use op \"set_commands\" or \"append_commands\" to change what a "
+        "page runs, so the command list is built correctly.")
 
 
 def _check_bounds(x: Any, y: Any, width: int, height: int) -> None:
@@ -470,6 +472,7 @@ def _apply_event_op(ctx: Context, events: RubyHash, raw_op: dict[str, Any],
 
     if op == "set_page":
         patch = opt_dict(raw_op, "patch")
+        _check_page_patch(patch)
         changes = apply_patch(page, patch, ctx.codec) if patch else []
         if raw_op.get("commands") is not None:
             page.set("list", _build_list(ctx, raw_op["commands"]))
@@ -542,20 +545,29 @@ def _apply_common_ops(ctx: Context, common_id: int, common: RubyObject,
         if op == "set_commands":
             common.set("list", _build_list(ctx, entries))
         else:
-            existing = list(common.get("list") or [])
-            while existing and isinstance(existing[-1], RubyObject) and \
-                    (existing[-1].get("code", 0) or 0) == 0:
-                existing.pop()
-            common.set("list", existing + _build_list(ctx, entries))
+            common.set("list", _appended(ctx, common.get("list"), entries))
         applied.append({"op": op, "commands": len(common.get("list"))})
 
-    write = ctx.project.save_file(
+    write = write_landed.save(
         filename, dry_run=dry_run, tool="event_edit",
         summary="edited common event %d" % common_id,
     )
-    if not dry_run:
-        write_landed.done()
     return {"common_event_id": common_id, "applied": applied, "write": write}
+
+
+def _appended(ctx: Context, existing: Any, entries: list[Any]) -> list[Any]:
+    """``existing`` with its trailing blank command dropped, then ``entries``.
+
+    New commands go before the terminator, never after it: the interpreter
+    reads a blank command as "this page is finished", so anything past one is
+    unreachable. Written once, because the two append paths that need it would
+    otherwise have to be fixed together whenever the convention changes.
+    """
+    kept = list(existing or [])
+    while kept and isinstance(kept[-1], RubyObject) and \
+            (kept[-1].get("code", CODE_BLANK) or CODE_BLANK) == CODE_BLANK:
+        kept.pop()
+    return kept + _build_list(ctx, entries)
 
 
 def _build_list(ctx: Context, entries: list[Any]) -> list[RubyObject]:

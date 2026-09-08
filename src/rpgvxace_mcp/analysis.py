@@ -190,6 +190,18 @@ def _int(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _brief(value: Any) -> str:
+    """A value quoted into a message, capped before it is repr'd.
+
+    For the places that show what was found rather than its text: a repr of an
+    un-decoded RubyString megabytes long would otherwise reach the response.
+    """
+    shown = repr(value)
+    if len(shown) > MAX_TEXT_CHARS:
+        return shown[:MAX_TEXT_CHARS] + "... (%d characters)" % len(shown)
+    return shown
+
+
 def _text(project: Project, value: Any) -> str:
     """Text from a project file, ready to put in a message.
 
@@ -197,7 +209,13 @@ def _text(project: Project, value: Any) -> str:
     crafted name would otherwise be repeated into every finding about it.
     """
     if isinstance(value, RubyString):
-        text = project.codec.decode(value.data)
+        # Sliced before decoding: the cap is meant to bound the work as well
+        # as the result, and a crafted name can be megabytes.
+        raw = value.data
+        text = project.codec.decode(raw[:MAX_TEXT_CHARS * 4])
+        if len(raw) > MAX_TEXT_CHARS * 4:
+            return printable_text(text[:MAX_TEXT_CHARS]) + \
+                "... (%d bytes)" % len(raw)
     elif value is None:
         return ""
     elif isinstance(value, (str, int, float, bool)):
@@ -347,7 +365,13 @@ def _requires_met(params: list[Any], requires: dict[int, Any] | None) -> bool:
         return True
     for position, expected in requires.items():
         position = int(position)
-        if len(params) <= position or params[position] != expected:
+        if len(params) <= position:
+            return False
+        given = params[position]
+        # `!=` alone would let False satisfy a requirement of 0, since Python
+        # counts them equal; a command's designation is an integer.
+        if isinstance(given, bool) != isinstance(expected, bool) \
+                or given != expected:
             return False
     return True
 
@@ -359,6 +383,9 @@ def _referenced_ids(code: Any, params: list[Any]) -> Iterator[tuple[str, int]]:
     used to exist and had already drifted apart on whether a non-integer
     parameter counted as a reference.
     """
+    code = _int(code)
+    if code is None:
+        return
     for table, rule in _RULES_BY_CODE.get(code, ()):
         if not _requires_met(params, rule.get("requires")):
             continue
@@ -551,6 +578,7 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
             "map %s was asked for but there is no map file with that id, so "
             "nothing about it was checked" % map_id, _map_at(map_id)))
 
+    walked_maps = bool({"maps", "events", "assets"} & set(scopes))
     if "maps" in scopes:
         ran.append("map tree, map properties and encounters")
         findings += check_map_tree(project)
@@ -572,17 +600,24 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
     # Last, so it covers every table any check actually asked for.
     findings += tables.findings()
 
-    stopped = len(findings) >= MAX_FINDINGS
-    if stopped:
-        findings = findings[:MAX_FINDINGS]
-
+    # Counted before anything is dropped, and sorted before it: truncating by
+    # arrival order first meant five thousand warnings from one check could
+    # push out the errors from a later one, and `counts` would then report zero
+    # errors while errors existed. A count the model cannot trust is worse than
+    # no count.
     order = {level: rank for rank, level in enumerate(SEVERITIES)}
     findings.sort(key=lambda f: (order.get(f.severity, len(SEVERITIES)), f.rule))
     counts = {level: sum(1 for f in findings if f.severity == level)
               for level in SEVERITIES}
+
+    stopped = len(findings) >= MAX_FINDINGS
+    if stopped:
+        # Most severe kept, since the sort has already run.
+        findings = findings[:MAX_FINDINGS]
+
     report = {
         "checks_run": ran,
-        "maps_examined": len(ids),
+        "maps_examined": len(ids) if walked_maps else 0,
         "counts": counts,
         "findings": [f.as_dict() for f in findings[:limit]],
         "truncated": len(findings) > limit,
@@ -611,7 +646,7 @@ def check_map_tree(project: Project) -> list[Finding]:
     findings = []
     try:
         infos = dict(project.entries("map_infos"))
-    except (ProjectError, ValueError, OSError) as exc:
+    except (ProjectError, ValueError, OSError, TypeError) as exc:
         return [Finding(ERROR, "map_infos_unreadable",
                         "MapInfos could not be read (%s), so the map tree could "
                         "not be checked. Restore that file, then validate again."
@@ -623,9 +658,10 @@ def check_map_tree(project: Project) -> list[Finding]:
         if _int(map_id) is None or not 1 <= map_id <= MAX_MAP_ID:
             findings.append(Finding(
                 ERROR, "bad_map_id",
-                "MapInfos has an entry keyed %r, which is not an id any map "
+                "MapInfos has an entry keyed %s, which is not an id any map "
                 "file can have (they run 1 to %d). Remove that entry in the "
-                "editor." % (map_id, MAX_MAP_ID), None, "MapInfos keys"))
+                "editor." % (_brief(map_id), MAX_MAP_ID), None,
+                "MapInfos keys"))
             continue
         if map_id not in on_disk:
             findings.append(Finding(
@@ -1165,6 +1201,11 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
                                 ("battleback2_name", "battlebacks2")):
                 checker.check(game_map.get(field), kind, _map_at(map_id, field))
         for field in ("bgm", "bgs"):
+            # Only when the map actually plays it. The editor keeps the name
+            # when autoplay is unchecked, so a stale one is not a problem the
+            # engine will ever hit.
+            if not game_map.get("autoplay_" + field):
+                continue
             track = game_map.get(field)
             if isinstance(track, RubyObject):
                 checker.check(track.get("name"), field, _map_at(map_id, field),
@@ -1201,7 +1242,7 @@ def _check_command_assets(project: Project, checker: _AssetChecker,
                 params = _seq(command.get("parameters"))
                 if params:
                     checker.check(params[0], "faces", location.at(index))
-            elif code in AUDIO_COMMAND_KINDS:
+            elif _int(code) in AUDIO_COMMAND_KINDS:
                 params = _seq(command.get("parameters"))
                 track = params[0] if params else None
                 if isinstance(track, RubyObject):
@@ -1210,6 +1251,12 @@ def _check_command_assets(project: Project, checker: _AssetChecker,
 
 
 def _check_database_assets(project: Project, checker: _AssetChecker) -> None:
+    for entry_id, animation in _safe_entries(project, "animations"):
+        if not isinstance(animation, RubyObject):
+            continue
+        for field in ("animation1_name", "animation2_name"):
+            checker.check(animation.get(field), "animations",
+                          _db_at("animations", entry_id, field))
     for entry_id, actor in _safe_entries(project, "actors"):
         if not isinstance(actor, RubyObject):
             continue
@@ -1256,8 +1303,8 @@ def check_database(project: Project, tables: _Tables) -> list[Finding]:
         for entry_id, actor in tables.rows_of("actors"):
             if not isinstance(actor, RubyObject) or not actor.has("class_id"):
                 continue
-            class_id = actor.get("class_id")
-            if class_id not in class_ids:
+            class_id = _int(actor.get("class_id"))
+            if class_id is not None and class_id not in class_ids:
                 findings.append(_missing(
                     "missing_class",
                     "actor %s has class_id %s" % (entry_id, class_id),
@@ -1275,8 +1322,8 @@ def check_database(project: Project, tables: _Tables) -> list[Finding]:
             for child in _seq(row.get(ref.field)):
                 if not isinstance(child, RubyObject):
                     continue
-                value = child.get(ref.child_field)
-                if value not in target_ids:
+                value = _int(child.get(ref.child_field))
+                if value is not None and value not in target_ids:
                     findings.append(_missing(
                         "missing_%s" % noun,
                         ref.sentence % (entry_id, value),
@@ -1300,8 +1347,9 @@ def _check_system(project: Project, actor_ids: set[int] | None) -> list[Finding]
     if not isinstance(system, RubyObject):
         return findings
     if actor_ids is not None:
-        for actor_id in _seq(system.get("party_members")):
-            if actor_id not in actor_ids:
+        for raw_id in _seq(system.get("party_members")):
+            actor_id = _int(raw_id)
+            if actor_id is not None and actor_id not in actor_ids:
                 findings.append(_missing(
                     "missing_party_member",
                     "the starting party includes actor %s" % actor_id,

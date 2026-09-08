@@ -6,6 +6,7 @@ import contextlib
 from typing import Any, Callable, Iterator
 
 from ..convert import TextCodec
+from ..rubytypes import _bare_name as bare_name
 from ..project import Project
 
 # How much of a caller's own value is quoted back in an error. Without this, a
@@ -54,15 +55,14 @@ class Context:
         So: on the way out, unless the block says the write completed, the
         cached file is dropped and re-read from disk next time.
 
-            with ctx.staged(filename) as write_landed:
+            with ctx.staged(filename) as staged:
                 ...mutate the cached value...
-                write = ctx.project.save_file(filename, dry_run=dry_run, ...)
-                if not dry_run:
-                    write_landed.done()
+                write = staged.save(filename, dry_run=dry_run, tool="...",
+                                    summary="...")
 
         Reading is unaffected -- dropping the cache costs one re-parse.
         """
-        keeper = StagedWrite()
+        keeper = StagedWrite(self.project)
         try:
             yield keeper
         finally:
@@ -84,6 +84,16 @@ class Tool:
         self.handler = handler
         self.writes = writes
 
+    def run(self, ctx: "Context", args: dict[str, Any]) -> Any:
+        """Check the arguments against this tool's own schema, then run it.
+
+        The check lives here rather than in the transport so that it travels
+        with the tool: put in one caller, every other entry point skipped it,
+        and a schema that is not enforced everywhere is not a contract.
+        """
+        check_args(self.schema, args)
+        return self.handler(ctx, args)
+
     def definition(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -101,15 +111,32 @@ class Tool:
 
 
 class StagedWrite:
-    """The handle :meth:`Context.staged` yields; call ``done()`` when written."""
+    """The handle :meth:`Context.staged` yields: write through it.
 
-    __slots__ = ("committed",)
+    :meth:`save` is the whole point, and is deliberately the only way to keep
+    what a tool staged. Deciding "commit only when the write actually happened"
+    used to be re-derived at all ten call sites, so a new tool could write and
+    simply forget to commit, reintroducing the leak the staging exists to stop.
+    Now the save and the commit are one call: writing correctly and forgetting
+    to commit are no longer two different things a tool can do.
+    """
 
-    def __init__(self) -> None:
+    __slots__ = ("committed", "_project")
+
+    def __init__(self, project: Project) -> None:
         self.committed = False
+        self._project = project
 
-    def done(self) -> None:
-        self.committed = True
+    def save(self, filename: str, *, dry_run: bool = False, tool: str = "",
+             summary: str = "") -> dict[str, Any]:
+        """Write one file, and keep the staged changes if it was written."""
+        write = self._project.save_file(filename, dry_run=dry_run, tool=tool,
+                                       summary=summary)
+        if not dry_run:
+            self.committed = True
+        return write
+
+
 
 
 REGISTRY: dict[str, Tool] = {}
@@ -121,13 +148,13 @@ def tool(name: str, title: str, description: str, schema: dict[str, Any],
 
     ``writes`` drives the readOnly and destructive hints in
     :meth:`Tool.definition`, and it marks the handlers that change a cached
-    file. Every one of those must wrap its mutation in
-    ``with ctx.staged(filename)`` and call ``done()`` only once the write has
-    actually landed -- otherwise a dry run or a refused write stays in the
-    cache for the next write of that file to put on disk. See
-    :meth:`Context.staged`.
+    file. Every one of those must mutate inside ``with ctx.staged(filename)``
+    and write through the handle it yields -- ``write_landed.save(filename,
+    dry_run=dry_run, ...)`` -- which saves and commits in one call. A mutation
+    that is never saved that way is dropped, so a dry run or a refused write
+    cannot stay in the cache for the next write of that file to put on disk.
+    See :meth:`Context.staged` and :class:`StagedWrite`.
     """
-    """Register a tool handler."""
 
     def decorate(handler: Callable[[Context, dict], Any]):
         if name in REGISTRY:
@@ -178,6 +205,66 @@ REFRESH = prop(BOOL, "Re-read the file from disk instead of using the copy alrea
 # ---------------------------------------------------------------------------
 
 
+def refuse_fields(patch: dict[str, Any], fields: "tuple[str, ...]",
+                  remedy: str) -> None:
+    """Refuse a patch naming any of ``fields``.
+
+    Keys are compared bare. Ruby ivars are written ``@width`` and this
+    codebase's patches accept either spelling, so a refusal list checked
+    against the raw key let ``{"@width": 999}`` straight through every one of
+    the three guards that shared this shape.
+    """
+    for key in patch:
+        if bare_name(key) in fields:
+            raise ToolError("%s cannot be set with a patch. %s"
+                            % (bare_name(key), remedy))
+
+
+def check_args(schema_def: dict[str, Any], args: dict[str, Any]) -> None:
+    """Hold a call to the schema its tool declares.
+
+    Every tool's schema says ``additionalProperties: False`` and most declare
+    numeric bounds, but nothing enforced either: the transport hands arguments
+    straight to the handler. So a misspelled ``dry_run`` -- ``dryrun``,
+    ``dry-run`` -- was silently dropped and the tool performed a real write
+    while the caller believed it had asked for a preview. That is the worst
+    shape of failure available here, because the caller is told what it
+    expected to hear.
+
+    Checked once at dispatch rather than in each handler, so a new tool is
+    covered by declaring its schema, which it has to do anyway.
+    """
+    known = schema_def.get("properties") or {}
+    unknown = [key for key in args if key not in known]
+    if unknown:
+        raise ToolError(
+            "unknown argument%s %s. This tool takes %s -- check the spelling, "
+            "because an argument this tool does not know is ignored rather "
+            "than applied."
+            % ("s" if len(unknown) > 1 else "",
+               ", ".join(echo(u) for u in sorted(unknown)),
+               ", ".join(sorted(known))))
+    for key, value in args.items():
+        _check_declared(key, value, known[key])
+
+
+def _check_declared(key: str, value: Any, spec: dict[str, Any]) -> None:
+    """Apply one property's declared bounds to the value given for it."""
+    if value is None:
+        return
+    if "maxItems" in spec and isinstance(value, list) \
+            and len(value) > spec["maxItems"]:
+        raise ToolError("%s takes at most %d entries, got %d"
+                        % (key, spec["maxItems"], len(value)))
+    if spec.get("type") == INT and isinstance(value, (int, float)) \
+            and not isinstance(value, bool):
+        as_int(value, key, spec.get("minimum"), spec.get("maximum"))
+    # Deliberately no enum check here. `one_of` and `_table_arg` already
+    # enforce those, and they can say which tables *this project* has and why
+    # one is absent -- a generic list of every engine's tables is a worse
+    # answer than the one already given.
+
+
 def need(args: dict[str, Any], key: str) -> Any:
     if key not in args or args[key] is None:
         raise ToolError("%s is required" % key)
@@ -225,6 +312,22 @@ def opt_int(args: dict[str, Any], key: str, default: int | None = None,
     if args.get(key) is None:
         return default
     return as_int(args[key], key, minimum, maximum)
+
+
+def ops_arg(args: dict[str, Any], key: str = "ops") -> list[dict[str, Any]]:
+    """The op list an editing tool was given, checked for being usable.
+
+    Both checks were written out in each editing tool, and the copies had
+    already drifted on whether they truncated the value they quoted back.
+    """
+    ops = opt_list(args, key)
+    if not ops:
+        raise ToolError("%s must contain at least one operation" % key)
+    for index, raw_op in enumerate(ops):
+        if not isinstance(raw_op, dict):
+            raise ToolError("%s[%d] must be an object, got %s"
+                            % (key, index, echo(raw_op)))
+    return ops
 
 
 def int_list(args: dict[str, Any], key: str, limit: int,

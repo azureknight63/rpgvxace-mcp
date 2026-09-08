@@ -58,6 +58,10 @@ ENCODING_SAMPLE_TABLES = ("system", "actors", "items", "map_infos")
 ENCODING_SAMPLE_LIMIT = 400
 MAX_STRING_SCAN_DEPTH = 12
 
+# How many values the encoding sampler will look at. It runs during
+# construction, so it has to finish on any file at all.
+MAX_STRING_SCAN_NODES = 200_000
+
 # The highest map id the editor's Map%03d naming can express.
 MAX_MAP_ID = 9999
 
@@ -316,10 +320,14 @@ class Project:
             except (ProjectError, ValueError, OSError):
                 pass
             finally:
-                # Detection runs before anything is served, and this is a file
-                # agents edit: leaving it cached would serve construction-time
-                # bytes until someone passed refresh.
                 self._cache.pop(self.map_file(first_map), None)
+        # Everything the sampler read is evicted, not just the map: detection
+        # runs before anything is served, and these are the files agents edit
+        # most, so leaving any of them cached would serve construction-time
+        # bytes until someone happened to pass refresh.
+        for key in sampled:
+            if not key.startswith("map "):
+                self._cache.pop(self.filename_for(key), None)
         name, reason = detect_encoding(samples)
         return TextCodec(name, style), "%s (sampled %s)" % (
             reason, ", ".join(sampled) if sampled else "nothing")
@@ -486,9 +494,14 @@ class Project:
             # the folder is not a map the editor made, and letting one through
             # here means every caller that turns an id back into a filename has
             # to handle a name that cannot exist.
-            if digits.isdigit() and 1 <= int(digits) <= MAX_MAP_ID:
+            # Only the canonical spelling. Map1, Map01 and Map0001 all
+            # parse as id 1, so accepting them let one cached map be walked
+            # once per file, and made an id whose name maps back to a file
+            # that is not there.
+            if digits.isdigit() and 1 <= int(digits) <= MAX_MAP_ID \
+                    and digits == "%03d" % int(digits):
                 ids.append(int(digits))
-        self._map_ids = sorted(ids)
+        self._map_ids = sorted(set(ids))
         return list(self._map_ids)
 
     # -- containers -----------------------------------------------------------
@@ -642,10 +655,6 @@ class Project:
                                              suffix=TMP_SUFFIX)
         temp_path = Path(temp_name)
         try:
-            if path.exists():
-                # mkstemp creates 0600; without this the rename would narrow a
-                # data file's permissions, which matters on a shared folder.
-                shutil.copymode(path, temp_path)
             with os.fdopen(handle, "wb") as stream:
                 stream.write(encoded)
                 stream.flush()
@@ -653,6 +662,12 @@ class Project:
                 # process; fsync is what makes it hold against the machine
                 # going down between the write and the rename.
                 os.fsync(stream.fileno())
+            if path.exists():
+                # After the content, not before: mkstemp's 0600 should hold for
+                # the duration of the write, and only the finished file needs
+                # to carry the mode the old one had -- otherwise the rename
+                # would narrow a data file's permissions on a shared folder.
+                shutil.copymode(path, temp_path)
             os.replace(temp_path, path)
         except OSError as exc:
             temp_path.unlink(missing_ok=True)
@@ -682,8 +697,14 @@ class Project:
             try:
                 current = hashlib.blake2b(path.read_bytes(),
                                           digest_size=16).digest()
-            except OSError:
-                current = None
+            except OSError as exc:
+                # On Windows this is precisely another process holding the
+                # file -- the case the digest exists to catch -- so it is a
+                # refusal, not a reason to fall back to the weaker test.
+                raise StaleFileError(
+                    "%s could not be re-read to check whether it changed (%s), "
+                    "which usually means another program has it open. Close "
+                    "the editor and try again." % (filename, exc)) from exc
             if current is not None:
                 if current == cached.digest:
                     # Same bytes; a rewritten timestamp is not a change.
@@ -732,6 +753,12 @@ class Project:
             raise ProjectError("%s does not exist" % filename)
         if dry_run:
             return {"file": filename, "would_delete": str(path), "dry_run": True}
+        # The same check every write makes. Deleting is the most destructive
+        # thing here, so exempting it from "refuse to act on a file that
+        # changed underneath us" was the wrong way round.
+        cached = self._cache.get(filename)
+        if cached is not None:
+            self._assert_not_stale(filename, path, cached)
         backup = self.backup_file(filename)
         path.unlink()
         self._cache.pop(filename, None)
@@ -802,8 +829,14 @@ class Project:
         target.mkdir(parents=True, exist_ok=True)
         copied = []
         for path in sorted(self.data_dir.glob("*" + self.extension)):
-            shutil.copy2(path, target / path.name)
-            copied.append(path.name)
+            if path.is_symlink():
+                # Copying one would put whatever it points at into the backup
+                # tree, where the read tools would serve it as project data.
+                continue
+            name = safe_component(path.name, "data file name")
+            _contained(target / name, target, "backup of %r" % name)
+            shutil.copy2(path, target / name)
+            copied.append(name)
         self.prune_backups(keep)
         return {"backup": stamp, "path": str(target), "files": copied}
 
@@ -842,8 +875,15 @@ class Project:
         available_files = self._backup_contents(source_dir)
         # Validated as a whole before anything is copied: a rejection partway
         # through the loop would leave Data/ half restored.
-        wanted = [safe_component(f, "file name")
-                  for f in (files or available_files)]
+        # Both checks in the same pass, before the safety snapshot: leaving
+        # the containment check in the copy loop meant a symlink planted in a
+        # backup aborted partway, with Data/ half old and half new.
+        wanted = []
+        for name in (files or available_files):
+            safe_component(name, "file name")
+            _contained(source_dir / name, self.backup_root(),
+                       "backup file %r" % name)
+            wanted.append(name)
         missing = [f for f in wanted if f not in available_files]
         if missing:
             raise ProjectError(
@@ -962,7 +1002,10 @@ class Project:
                     for entry in entries:
                         if entry.is_file():
                             names.add(os.path.splitext(entry.name)[0])
-            except (FileNotFoundError, NotADirectoryError):
+            except OSError:
+                # Any unreadable directory, not just a missing one: a
+                # permission error on a network RTP share used to abort the
+                # whole validate run.
                 continue
         frozen = frozenset(names)
         self._assets[kind] = frozen
@@ -1107,22 +1150,45 @@ def _engine_label(engine: str) -> str:
     return {"xp": "RPG Maker XP", "mv": "RPG Maker MV/MZ"}.get(engine, engine)
 
 
-def collect_strings(value: Any, out: list[bytes], limit: int = 200, depth: int = 0) -> None:
-    """Gather string samples for encoding detection."""
-    if len(out) >= limit or depth > 12:
+def collect_strings(value: Any, out: list[bytes], limit: int = 200,
+                    depth: int = 0, seen: set[int] | None = None,
+                    budget: list[int] | None = None) -> None:
+    """Gather string samples for encoding detection.
+
+    Memoised on container identity and bounded by a shared node budget, like
+    every other walk over decoded project data. Marshal registers a container
+    for back-reference before it fills it, so one file can legitimately name
+    the same child from many places -- and a crafted one can do so at every
+    level, which without a memo is exponential. This walk runs inside
+    ``Project.__init__``, so that would hang the server before it served
+    anything.
+    """
+    if seen is None:
+        seen = set()
+    if budget is None:
+        budget = [MAX_STRING_SCAN_NODES]
+    if len(out) >= limit or depth > MAX_STRING_SCAN_DEPTH or budget[0] <= 0:
         return
+    budget[0] -= 1
+
     if isinstance(value, RubyString):
         if value.data:
             out.append(value.data)
-    elif isinstance(value, RubyObject):
-        for item in value.ivars.values():
-            collect_strings(item, out, limit, depth + 1)
+        return
+    if id(value) in seen:
+        return
+    seen.add(id(value))
+
+    if isinstance(value, RubyObject):
+        children: Any = value.ivars.values()
     elif isinstance(value, list):
-        for item in value:
-            collect_strings(item, out, limit, depth + 1)
+        children = value
     elif isinstance(value, RubyHash):
-        for _, item in value.pairs:
-            collect_strings(item, out, limit, depth + 1)
+        children = [item for _, item in value.pairs]
+    else:
+        return
+    for item in children:
+        collect_strings(item, out, limit, depth + 1, seen, budget)
 
 
 

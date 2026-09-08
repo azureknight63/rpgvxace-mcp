@@ -32,7 +32,6 @@ from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyHash,
     RubyIvars,
     RubyObject,
-    RubyString,
     RubyStruct,
     RubyUClass,
     RubyUserMarshal,

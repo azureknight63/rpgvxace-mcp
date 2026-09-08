@@ -22,7 +22,12 @@ from .tools import db_tools, event_tools, map_tools, misc_tools  # noqa: F401
 # Imported for the side effect: each module's @tool decorators register its
 # tools in REGISTRY, which all_tools() then reads. Removing these as unused
 # imports empties the tool list.
-from .tools.registry import Context, ToolError, all_tools, REGISTRY
+from .tools.registry import (
+    Context,
+    REGISTRY,
+    ToolError,
+    all_tools,
+)
 
 SERVER_NAME = "rpgvxace-mcp"
 PROTOCOL_VERSION = "2025-06-18"
@@ -48,6 +53,12 @@ MAX_BATCH_MESSAGES = 100
 # an oversized protocol frame is not recoverable, so it is refused here.
 MAX_RESPONSE_CHARS = 4 * 1024 * 1024
 
+# What one tool result may contribute. Strictly smaller than the frame budget,
+# because the result is JSON-escaped into the frame and grows doing so: with
+# both set to the same number, a result that just fit came back as "this
+# server is broken" instead of the recoverable "narrow your request".
+MAX_TOOL_RESULT_CHARS = MAX_RESPONSE_CHARS // 2
+
 # How much of a caller's own string is quoted back in an error message. Without
 # this, a rejected 32 MB method name is echoed in full.
 MAX_ECHO_CHARS = 120
@@ -67,7 +78,9 @@ class Server:
     def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
         request_id = message.get("id")
-        params = message.get("params") or {}
+        params = message.get("params", {})
+        if params is None:
+            params = {}
 
         if "result" in message or "error" in message:
             # This is a response, not a request -- a client that echoed our own
@@ -77,6 +90,11 @@ class Server:
             return None
         if method is None:
             return _error(request_id, INVALID_REQUEST, "message has no method")
+        if not isinstance(method, str):
+            # Otherwise the handshake gate below reports the wrong problem.
+            return _error(request_id, INVALID_REQUEST,
+                          "method must be a string, not %s"
+                          % type(method).__name__)
 
         # Notifications carry no id and take no response.
         if request_id is None:
@@ -161,18 +179,27 @@ class Server:
                 "unknown tool %s; available tools are %s"
                 % (_echo(name), ", ".join(sorted(REGISTRY)))
             )
-        arguments = params.get("arguments") or {}
+        arguments = params.get("arguments", {})
+        if arguments is None:
+            arguments = {}
         if not isinstance(arguments, dict):
-            raise ToolError("arguments must be an object")
+            # `or {}` here would have coerced an empty list past this check.
+            raise ToolError("arguments must be an object, not %s"
+                            % type(arguments).__name__)
+
         # name is looked up above; an unhashable one would have raised there,
         # so the isinstance test in that lookup is what keeps this an
         # INVALID_PARAMS rather than an internal error.
 
         try:
-            payload = tool.handler(self.context, arguments)
+            # run() checks the arguments against the tool's declared schema
+            # first. Inside the try, because a wrong argument is the model's to
+            # fix: it comes back as a tool error it can read, not as "this
+            # server is broken".
+            payload = tool.run(self.context, arguments)
         except (ToolError, ProjectError, ConversionError, ValueError,
                 OSError, LookupError, TypeError, AttributeError,
-                StopIteration) as exc:
+                StopIteration, RecursionError, MemoryError) as exc:
             # Tool-level failures are reported inside the result so the model
             # can read the message and correct itself, per the MCP tool error
             # model. The list is wide on purpose: a disk that is full, a
@@ -183,8 +210,18 @@ class Server:
             # a handler lands here too, which is the right trade -- the model
             # sees a failure it can report rather than a dead tool.
             return _tool_error(exc, tool.name)
-        text = _dump_json(payload)
-        if len(text) > MAX_RESPONSE_CHARS:
+        try:
+            text = _dump_json(payload)
+        except (ValueError, RecursionError) as exc:
+            # Marshal object links make a loaded value a graph, so a raw
+            # include_raw payload can be cyclic. That is the tool's problem to
+            # report, not evidence the server is broken.
+            return _tool_error(ToolError(
+                "produced a result that could not be serialised (%s). Ask for "
+                "less of it -- most tools take a limit, and the raw forms of "
+                "the map and event tools are the ones that can be cyclic."
+                % exc), tool.name)
+        if len(text) > MAX_TOOL_RESULT_CHARS:
             # Returned, not raised: raising would reach handle()'s ToolError
             # branch and come back as a protocol error, when this is exactly
             # the kind of failure the model can recover from by narrowing its
@@ -193,7 +230,7 @@ class Server:
                 "produced %d characters, above the %d this server returns. "
                 "Narrow the request -- most tools take a limit, and the map and "
                 "event tools take an id -- then call it again."
-                % (len(text), MAX_RESPONSE_CHARS)), tool.name)
+                % (len(text), MAX_TOOL_RESULT_CHARS)), tool.name)
         return {
             "content": [{"type": "text", "text": text}],
             "isError": False,
@@ -268,12 +305,7 @@ class Server:
                 # A non-object member is answered rather than dropped: a client
                 # that sent nothing but malformed entries would otherwise wait
                 # for a reply that never comes.
-                answers = [self.handle(m) if isinstance(m, dict) else
-                           _error(None, INVALID_REQUEST,
-                                  "a batch member must be an object, not %s"
-                                  % type(m).__name__)
-                           for m in message]
-                responses = [r for r in answers if r is not None]
+                responses = _answer_batch(self, message)
                 if responses:
                     _write(stdout, responses)
                 continue
@@ -283,6 +315,38 @@ class Server:
             response = self.handle(message)
             if response is not None:
                 _write(stdout, response)
+
+
+def _answer_batch(server: "Server", message: list[Any]) -> list[dict[str, Any]]:
+    """Answer every member of a batch, within one frame's worth of room.
+
+    A batch reply is a single frame, so an oversized one used to be replaced by
+    one error carrying ``id: null`` -- which left every request in the batch
+    unanswered, the exact failure the substitution exists to prevent. Instead
+    the budget is spent as the batch is answered, and a member that does not
+    fit is answered with its own error under its own id.
+    """
+    responses: list[dict[str, Any]] = []
+    spent = 0
+    for entry in message:
+        if not isinstance(entry, dict):
+            answer = _error(None, INVALID_REQUEST,
+                            "a batch member must be an object, not %s"
+                            % type(entry).__name__)
+        else:
+            answer = server.handle(entry)
+        if answer is None:
+            continue        # a notification takes no response
+        size = len(json.dumps(answer, ensure_ascii=False, default=str))
+        if spent + size > MAX_RESPONSE_CHARS:
+            answer = _error(
+                answer.get("id"), INTERNAL_ERROR,
+                "the answers to this batch do not fit in one response. Send "
+                "these requests separately, or ask for less in each.")
+            size = len(json.dumps(answer))
+        spent += size
+        responses.append(answer)
+    return responses
 
 
 def _tool_error(exc: Exception, tool_name: str) -> dict[str, Any]:
@@ -327,7 +391,13 @@ def _read_line(stdin: TextIO) -> tuple[str | None, bool]:
 
 
 def _echo(value: Any) -> str:
-    """Quote a caller's own value back at it, without quoting all of it."""
+    """Quote a caller's own value back at it, without quoting all of it.
+
+    Sliced before the repr for a string, because the whole point is not to
+    materialise a value that may be megabytes.
+    """
+    if isinstance(value, str) and len(value) > MAX_ECHO_CHARS:
+        return repr(value[:MAX_ECHO_CHARS]) + "... (%d characters)" % len(value)
     shown = repr(value)
     if len(shown) > MAX_ECHO_CHARS:
         shown = shown[:MAX_ECHO_CHARS] + "... (%d characters)" % len(shown)
@@ -362,10 +432,15 @@ def _write(stdout: TextIO, payload: Any) -> None:
                              % (len(frame), MAX_RESPONSE_CHARS))
     except (TypeError, ValueError, RecursionError) as exc:
         request_id = payload.get("id") if isinstance(payload, dict) else None
+        frame = ""
         try:
             frame = json.dumps(_error(request_id, INTERNAL_ERROR,
                                       "could not serialise the response: %s" % exc))
         except (TypeError, ValueError, RecursionError):
+            frame = ""
+        if not frame or len(frame) > MAX_RESPONSE_CHARS:
+            # The id itself can be the oversized part, so the substitute is
+            # measured too rather than assumed small.
             frame = json.dumps(_error(None, INTERNAL_ERROR,
                                       "could not serialise the response"))
     try:

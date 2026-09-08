@@ -15,6 +15,7 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from build_project import build  # noqa: E402
 
 from rpgvxace_mcp import marshal_rb  # noqa: E402
+from rpgvxace_mcp.analysis import validate as run_validate  # noqa: E402
 from rpgvxace_mcp.project import (  # noqa: E402
     Project,
     ProjectError,
@@ -52,7 +53,9 @@ class ToolTest(unittest.TestCase):
         return ".rvdata2" if self.ace else ".rvdata"
 
     def call(self, tool_name, /, **arguments):
-        return REGISTRY[tool_name].handler(self.ctx, arguments)
+        # run(), not handler(): a real call goes through the argument check,
+        # so the tests should too.
+        return REGISTRY[tool_name].run(self.ctx, arguments)
 
     def reopen(self):
         """A fresh Project, to prove a change actually reached the disk."""
@@ -1664,6 +1667,22 @@ class TestValidateSurvivesHostileData(ValidateTest):
         # to raise TypeError out of the whole run.
         self.assertIn("counts", self.call("validate", scopes=["maps"]))
 
+    def test_a_long_event_name_is_capped_in_the_message(self):
+        """Long enough to need capping, short enough that the byte-slice
+        shortcut does not fire: the other path through the same helper."""
+        game_map, event_id, event = self.first_event()
+        event.set("name", self.project.codec.make_string("y" * 400))
+        event.get("pages")[0].get("list").insert(0, RubyObject(
+            "RPG::EventCommand",
+            {"@code": 201, "@indent": 0, "@parameters": [0, 4321, 0, 0, 0, 0]}))
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="long-ish name")
+        self.ctx = Context(Project(self.tmp / "project"))
+        rows = self.call("validate", scopes=["events"])
+        self.assertTrue(rows["findings"])
+        for finding in rows["findings"]:
+            self.assertLess(len(json.dumps(finding)), 1200)
+
     def test_an_event_name_of_absurd_length(self):
         game_map, event_id, event = self.first_event()
         event.set("name", self.project.codec.make_string("x" * 500000))
@@ -1694,9 +1713,17 @@ class TestValidateScoping(ValidateTest):
         self.assertEqual(rows["maps_examined"], 1)
         self.assertIn("no_such_map", [f["rule"] for f in rows["findings"]])
 
+    def test_a_negative_limit_is_refused_at_the_boundary(self):
+        """The schema declares minimum 1, and that is now enforced."""
+        with self.assertRaises(ToolError) as caught:
+            self.call("validate", scopes=["database"], limit=-5)
+        self.assertIn("at least 1", str(caught.exception))
+
     def test_a_negative_limit_does_not_drop_findings(self):
+        """The clamp inside validate is the backstop for any other caller:
+        a negative slice would take findings from the wrong end."""
         self.corrupt("Troops")
-        rows = self.call("validate", scopes=["database"], limit=-5)
+        rows = run_validate(self.project, ["database"], limit=-5)
         self.assertTrue(rows["findings"], "a negative limit sliced the list")
 
 class TestValidateChecksTheStartPosition(ValidateTest):
@@ -2034,6 +2061,177 @@ class TestScriptHitsSayWhere(ToolTest):
         where = result["hits"][0]["where"]
         self.assertIn("script ", where)
         self.assertIn("line ", where)
+
+class TestArgumentShapeIsEnforced(ToolTest):
+    """The declared schema has to be the enforced one.
+
+    Every tool's schema says additionalProperties: False and most declare
+    numeric bounds, but nothing checked either -- the transport handed
+    arguments straight to the handler. So a misspelled dry_run performed a
+    real write while the caller believed it had asked for a preview, which is
+    the worst shape of failure available here: the caller is told what it
+    expected to hear.
+    """
+
+    def test_a_misspelled_dry_run_does_not_write(self):
+        before = self.data_bytes("Items")
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_edit", table="items", dryrun=True,
+                      ops=[{"op": "update", "id": 1,
+                            "patch": {"name": "Written"}}])
+        self.assertIn("unknown argument", str(caught.exception))
+        self.assertEqual(self.data_bytes("Items"), before)
+
+    def test_the_message_lists_what_the_tool_takes(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("map_get", map_id=1, tilez="counts")
+        message = str(caught.exception)
+        self.assertIn("tiles", message)
+        self.assertIn("include_events", message)
+
+    def test_a_declared_bound_is_enforced(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_list", table="items", limit=10_000_000)
+        self.assertIn("at most", str(caught.exception))
+
+    def test_a_declared_maxitems_is_enforced(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_get", table="items", ids=list(range(1, 500)))
+        self.assertIn("at most", str(caught.exception))
+
+
+class TestAtPrefixedFieldsAreRefused(ToolTest):
+    """Ruby ivars are written @width, and these patches accept either
+    spelling, so a refusal list checked against the raw key let the @ form
+    through every one of the three guards that shared that shape."""
+
+    def test_a_map_patch_cannot_reach_a_structural_field(self):
+        for key in ("width", "@width", "data", "@data"):
+            with self.subTest(key=key):
+                with self.assertRaises(ToolError) as caught:
+                    self.call("map_edit", op="update", map_id=1,
+                              patch={key: 99})
+                self.assertIn("rest of the map", str(caught.exception))
+
+    def test_a_page_patch_cannot_reach_the_command_list(self):
+        game_map = self.project.load_map(1)
+        event_id = game_map.get("events").sorted_items()[0][0]
+        for key in ("list", "@list"):
+            with self.subTest(key=key):
+                with self.assertRaises(ToolError) as caught:
+                    self.call("event_edit", map_id=1, ops=[
+                        {"op": "set_page", "event_id": event_id, "page": 0,
+                         "patch": {key: []}}])
+                self.assertIn("set_commands", str(caught.exception))
+
+    def test_raw_data_cannot_reach_a_structural_field(self):
+        for path in ("width", "@width", "events", "@events"):
+            with self.subTest(path=path):
+                with self.assertRaises(ToolError) as caught:
+                    self.call("raw_data", op="set", map_id=1, path=path,
+                              value={"value": 0})
+                self.assertIn("agree with it", str(caught.exception))
+
+
+class TestGuardsRunOnEveryPath(ToolTest):
+    def test_creating_a_map_refuses_a_structural_patch(self):
+        """The create path returned before the update path's check ran."""
+        with self.assertRaises(ToolError) as caught:
+            self.call("map_edit", op="create", name="Bad", width=20, height=15,
+                      patch={"width": 500})
+        self.assertIn("rest of the map", str(caught.exception))
+
+    def test_updating_an_entry_cannot_move_its_id(self):
+        """The refusal existed only on the create path, though the tool's
+        docstring claimed it applied to a patch."""
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_edit", table="items",
+                      ops=[{"op": "update", "id": 1, "patch": {"id": 7}}])
+        self.assertIn("its position", str(caught.exception))
+        self.assertEqual(self.reopen().project.get_entry("items", 1).get("id"), 1)
+
+
+class TestFindingCountsAreTrustworthy(ValidateTest):
+    def test_counts_survive_truncation(self):
+        """Truncating by arrival order before counting meant a flood of
+        warnings from one check could push out a later check's errors, and
+        counts then reported zero errors while errors existed."""
+        self.corrupt("Troops")
+        self.ctx = self.reopen()
+        # An unreadable table (error) and a map id that is not there
+        # (warning), so there is more than one finding and they differ in
+        # severity.
+        rows = self.call("validate", scopes=["maps", "events", "database"],
+                         map_ids=[1, 4321], limit=1)
+        self.assertEqual(len(rows["findings"]), 1)
+        # The one returned is the most severe of the two.
+        self.assertEqual(rows["findings"][0]["severity"], "error")
+        # And the tally counts both, not just the row that came back.
+        self.assertGreaterEqual(rows["counts"]["error"], 1)
+        self.assertGreaterEqual(rows["counts"]["warning"], 1)
+        self.assertGreater(sum(rows["counts"].values()), len(rows["findings"]))
+
+
+class TestSearchRefusesTheHangingPattern(ToolTest):
+    def test_a_nested_quantifier_is_refused(self):
+        """Python's re backtracks exponentially on these and cannot be
+        interrupted, so one would wedge this single-threaded server."""
+        for pattern in ("(a+)+$", "(a*)*b", "(x|y+)+z"):
+            with self.subTest(pattern=pattern):
+                with self.assertRaises(ToolError) as caught:
+                    self.call("search", query=pattern, regex=True)
+                self.assertIn("repeated group", str(caught.exception))
+
+    def test_an_ordinary_pattern_still_works(self):
+        result = self.call("search", query="Welcome|Potion", regex=True)
+        self.assertTrue(result["hits"])
+
+    def test_a_command_code_search_needs_the_events_scope(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("search", command_code=101, scopes=["database"])
+        self.assertIn("events", str(caught.exception))
+
+
+class TestDeletingRespectsStaleness(ToolTest):
+    def test_a_map_file_that_changed_is_not_deleted(self):
+        """Deleting is the most destructive thing here, and was the one write
+        exempt from "refuse to act on a file that changed underneath us"."""
+        import os
+        self.project.load_map(1)  # cache it
+        path = self.project.path_for(self.project.map_file(1))
+        stat = path.stat()
+        edited = bytearray(path.read_bytes())
+        edited[-1] = (edited[-1] + 1) % 256
+        path.write_bytes(bytes(edited))
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        with self.assertRaises(StaleFileError):
+            self.project.delete_file(self.project.map_file(1), tool="test")
+        self.assertTrue(path.is_file(), "the file was deleted anyway")
+
+
+class TestMapIdsAreCanonical(ToolTest):
+    def test_an_id_always_names_a_file_that_exists(self):
+        """Map7 parses as id 7, but the name an id maps back to is Map007 --
+        so accepting the padded spelling put an id in the list whose file is
+        not there, and every caller that turned it back into a filename got a
+        file it could not open."""
+        data = self.data_bytes("Map001")
+        (self.tmp / "project" / "Data" /
+         ("Map7" + self.extension)).write_bytes(data)
+        project = Project(self.tmp / "project")
+        for map_id in project.map_ids_on_disk():
+            self.assertTrue(
+                project.exists(project.map_file(map_id)),
+                "id %d is listed but %s is not on disk"
+                % (map_id, project.map_file(map_id)))
+
+    def test_a_padded_filename_is_not_a_second_map(self):
+        data = self.data_bytes("Map001")
+        for name in ("Map1", "Map01", "Map0001"):
+            (self.tmp / "project" / "Data" /
+             (name + self.extension)).write_bytes(data)
+        ids = Project(self.tmp / "project").map_ids_on_disk()
+        self.assertEqual(ids.count(1), 1, ids)
 
 if __name__ == "__main__":
     unittest.main()
