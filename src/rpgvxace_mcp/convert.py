@@ -632,10 +632,30 @@ def apply_patch(target: Any, patch: dict[str, Any], codec: TextCodec,
                 "object with a matching \"__class__\"."
                 % (field_path, _brief(existing, codec), _brief(converted, codec))
             )
+        # The replacement's own field names, which nothing checked: the patch's
+        # keys are checked by `refuse_unknown_fields` and a nested merge by
+        # `_refuse_invented_fields`, and a value carrying `__class__` goes
+        # through neither.
+        refuse_invented_in_replacement(existing, converted, field_path)
         before = _brief(existing, codec) if has_field else "<unset>"
         target.set(lookup, converted)
         changes.append("%s: %s -> %s" % (field_path, before, _brief(converted, codec)))
     return changes
+
+
+# How many field names a refusal lists. The names come out of the file, so
+# their number is not this module's to choose. Kept here rather than imported
+# from the tools layer, which sits above this one.
+MAX_NAMES_LISTED = 40
+
+
+def _named(names: Any) -> str:
+    """Field names for a message, capped and counted."""
+    names = list(names)
+    if len(names) <= MAX_NAMES_LISTED:
+        return ", ".join(names)
+    return "%s and %d more" % (", ".join(names[:MAX_NAMES_LISTED]),
+                               len(names) - MAX_NAMES_LISTED)
 
 
 def _refuse_invented_fields(target: RubyObject, patch: dict[str, Any],
@@ -683,7 +703,65 @@ def _refuse_invented_fields(target: RubyObject, patch: dict[str, Any],
         "\"__class__\" to replace the whole object."
         % (path, target.cls, "s" if len(unknown) > 1 else "",
            ", ".join(repr(name) for name in unknown),
-           ", ".join(target.fields()) or "no fields at all"))
+           _named(target.fields()) or "no fields at all"))
+
+
+def refuse_invented_in_replacement(existing: Any, replacement: Any,
+                                   path: str, depth: int = 0) -> None:
+    """Refuse a field name in a replacement value that the thing it replaces lacks.
+
+    A value carrying ``__class__`` replaces an object outright rather than
+    merging into it, so it reaches the file through `from_json`, which checks
+    only that each name is a syntactically valid Ruby ivar. A typo inside one
+    -- ``{"bgm": {"__class__": "RPG::BGM", "naem": "Town1", ...}}`` -- was
+    therefore written, and reported as the change the caller asked for, by
+    every tool that takes a patch and by raw_data.
+
+    Compared against the value being replaced rather than a documented field
+    table, because this module sits below :mod:`schema` and because the object
+    already there is the better authority anyway: it is what the editor wrote.
+    A list is compared element-wise against any existing element of the same
+    class, which is what catches a typo in one entry of an @learnings array.
+
+    Where there is nothing to compare against -- an empty array, a class not
+    already present -- nothing is refused. That is the same escape
+    `refuse_unknown_fields` makes, and for the same reason: this narrows what a
+    write may say, and never blocks one it cannot judge.
+    """
+    if depth > MAX_JSON_DEPTH:
+        return
+    if isinstance(replacement, RubyObject):
+        if not isinstance(existing, RubyObject) or existing.cls != replacement.cls:
+            return
+        if not existing.ivars:
+            return
+        unknown = sorted(name for name in replacement.fields()
+                         if not existing.has(name))
+        if unknown:
+            raise ConversionError(
+                "%s would be replaced by %s carrying field%s %s, which the %s "
+                "already there does not have. It carries %s. Nothing here "
+                "invents a field, because the editor rejects an object with "
+                "instance variables it does not expect -- check the spelling."
+                % (path or "the value", replacement.cls,
+                   "s" if len(unknown) > 1 else "",
+                   ", ".join(repr(name) for name in unknown),
+                   existing.cls, _named(existing.fields())))
+        for name in replacement.fields():
+            refuse_invented_in_replacement(
+                existing.get(name), replacement.get(name),
+                "%s.%s" % (path, name) if path else name, depth + 1)
+        return
+    if isinstance(replacement, list) and isinstance(existing, list):
+        for index, item in enumerate(replacement):
+            if not isinstance(item, RubyObject):
+                continue
+            twin = next((old for old in existing
+                         if isinstance(old, RubyObject) and old.cls == item.cls),
+                        None)
+            if twin is not None:
+                refuse_invented_in_replacement(
+                    twin, item, "%s[%d]" % (path, index), depth + 1)
 
 
 def normalize_strings(value: Any, codec: TextCodec, depth: int = 0) -> Any:

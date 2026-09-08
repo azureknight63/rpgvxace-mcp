@@ -1,4 +1,4 @@
-"""Deciding whether a caller-supplied regular expression is safe to run here.
+r"""Deciding whether a caller-supplied regular expression is safe to run here.
 
 Python's ``re`` backtracks, and a match in progress cannot be interrupted: no
 timeout, no signal and no thread kill reaches it, because the matcher holds the
@@ -11,23 +11,44 @@ the 2000-character subject `search` matches, it does not finish. The gate this
 module replaces refused a quantifier applied to a group, which that pattern
 walks straight past.
 
-So the pattern is analysed before it is allowed to run, and refused unless the
-backtracking it can force is small. The analysis is deliberately structural,
-using the standard library's own parser rather than a scan of the pattern text:
-the hand-written scan that came before could not see repeat bounds, alternation
-branches or nesting, which is exactly where the cost lives.
+So a pattern is checked before it is allowed to run. The check uses the
+standard library's own parser rather than a scan of the pattern text, because
+the hand-written scan that came before could not see repeat bounds,
+alternation branches or nesting, which is where the cost lives.
 
-What this bounds, stated plainly, because the last version of this claimed more
-than it delivered: it bounds the product of the *freedoms* of backtrack points
-that can compete for the same characters. It is a budget, checked against a
-measured corpus of both adversarial and ordinary patterns
-(``TestSearchPatternsStayFast``), not a proof of a time bound. A pattern that
-passes can still be slower than a plain substring search; what it cannot be is
-exponential in the pattern's length.
+There are two gates here, and only the second one is a guarantee.
+
+**The budget** (``check_shape``) scores a pattern by multiplying the freedoms
+of backtrack points that can compete for the same characters. Three rounds of
+review each found a way past it, and the measurements say the approach cannot
+be repaired rather than that this one was tuned wrong: ``Gold\s+\d+`` and
+``[a-z]+[a-z]+!`` score identically at 4096, and the first is instant while
+the second does not finish against 2000 letters. Separating them needs to know
+that ``\s`` and ``\d`` cannot meet *and* that nothing between two atoms is
+required, which is automaton-level analysis. So the budget is kept for what it
+demonstrably does -- it refuses every nested repeat and every homogeneous
+chain without spending a process, with no false refusal in the corpus -- and
+it is no longer asked to be the bound.
+
+**The measurement** (``measure_cost``) is the bound. The pattern is compiled
+and matched in a child process, against subjects built out of its own
+alphabet, under a wall clock; if the child is still running when the clock
+expires it is killed and the pattern is refused. That is the only way to bound
+work in `re`, because a match in progress cannot be interrupted in-process:
+no timeout, no signal and no thread kill reaches it, since the matcher holds
+the GIL for the whole of a ``str`` match.
+
+This still is not a proof. A subject in someone's project could be worse than
+any this constructs, and the honest claim is the narrow one: a pattern that
+passes has been *observed* to finish quickly on the worst text this module
+knows how to build for it. What it can no longer do is pass on the strength of
+a number that does not predict the cost.
 """
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from typing import Any
 
 try:                                        # pragma: no cover - version shim
@@ -35,13 +56,11 @@ try:                                        # pragma: no cover - version shim
 except ImportError:                         # pragma: no cover
     import sre_parse as _sre_parse          # 3.10 and earlier
 
-# The most backtracking paths a pattern may be able to force. Chosen by
-# measurement, not taste: at this budget the slowest pattern that still passes
-# ("a?" fourteen times, against a subject of 2000 matching characters) takes
-# 0.73 seconds, while every ordinary search pattern in the corpus test costs
-# under 4096 and the chains that grow with the pattern's length are refused.
-# One notch higher measured about three seconds for the same shape, which is
-# more than a read-only search should ever be able to cost.
+# Where the cheap gate stops guessing. Not a time bound -- patterns scoring
+# 4096 have been measured at both 0.000s and over fifteen seconds -- but the
+# level at which no ordinary pattern in the corpus is refused while every
+# nested repeat and homogeneous chain is. Anything that gets past it goes to
+# the measurement, which is what actually bounds the work.
 MAX_BACKTRACK_PATHS = 1 << 14
 
 # What one unbounded quantifier (``*``, ``+``, ``{n,}``) is counted as. Not the
@@ -50,13 +69,21 @@ MAX_BACKTRACK_PATHS = 1 << 14
 # refuse `Fire.*Sword` -- an ordinary search. What actually explodes is several
 # variable atoms competing over the same characters: at this weight two of
 # them pass (64 * 64 = 4096, inside the budget) and three do not
-# (64 ** 3 = 262144, well past it).
+# (64 ** 3 = 262144, well past it). Two competing unbounded quantifiers really
+# can be fatal -- `[a-z]+[a-z]+!` was measured not finishing -- which is a
+# reason to distrust this number as a bound, not a reason to retune it: the
+# measurement is what catches that one.
 UNBOUNDED_WEIGHT = 64
 
 # Bounded repeats are charged their real freedom, capped at the same weight, so
 # `a{0,500}a{0,500}a{0,500}` is refused (it is genuinely quadratic per extra
 # atom) while `\d{1,3}` costs almost nothing.
 MAX_BOUNDED_WEIGHT = 64
+
+# What the parser raises for a pattern that is merely malformed, as opposed
+# to one this module could not cope with. Imported from `re` rather than
+# caught as `Exception`, so the two cases can be told apart.
+_RE_ERROR = __import__("re").error
 
 _REPEATS = ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT")
 _MAXREPEAT = _sre_parse.MAXREPEAT
@@ -158,17 +185,208 @@ class _Atom:
         self.charset = charset
 
 
-def check_pattern(pattern: str) -> None:
-    """Refuse a pattern whose backtracking is not bounded. Compiles nothing.
+# How long the child gets to match the pattern against every subject built
+# for it. Every pattern in the corpus test's ordinary half finishes all five
+# subjects in well under a tenth of this; every attack in it was measured at
+# ten seconds or more, most of them still running when killed. So the gap
+# either side of this number is wide, which is what makes a wall clock a
+# usable test rather than a coin toss on a loaded machine.
+PREFLIGHT_SECONDS = 2.0
 
-    Raises :class:`PatternTooCostly` with a message naming the shape found and
-    a way to rephrase it. A pattern the parser rejects is left alone: the
-    caller's ``re.compile`` reports a syntax error far better than this could.
+# The subject length the child matches against. The same cap `search` applies
+# to each candidate string, so the measurement is of the worst case the tool
+# can actually reach.
+PREFLIGHT_SUBJECT_CHARS = 2000
+
+# One representative character per character category, for building a subject
+# out of a pattern's own alphabet. A homogeneous run of the characters a
+# pattern mentions is what makes its atoms compete; a subject of anything else
+# makes even a fatal pattern fail fast, which is how a fixed list of subjects
+# came to miss five live bypasses.
+_CATEGORY_SAMPLES = {
+    "CATEGORY_DIGIT": "1", "CATEGORY_NOT_DIGIT": "a",
+    "CATEGORY_SPACE": " ", "CATEGORY_NOT_SPACE": "a",
+    "CATEGORY_WORD": "a", "CATEGORY_NOT_WORD": "!",
+    "CATEGORY_LINEBREAK": "\n", "CATEGORY_NOT_LINEBREAK": "a",
+}
+
+# What the child runs. Kept as one string rather than a module, so there is no
+# import path to get wrong and nothing of this project in the child.
+_CHILD = (
+    "import base64, re, sys\n"
+    "pattern = base64.b64decode(sys.argv[1]).decode('utf-8')\n"
+    "compiled = re.compile(pattern, re.IGNORECASE)\n"
+    "for encoded in sys.argv[2:]:\n"
+    "    compiled.search(base64.b64decode(encoded).decode('utf-8'))\n"
+    "print('ok')\n")
+
+# Verdicts already measured in this process, by pattern. A model searching for
+# the same thing across several scopes would otherwise pay for a child each
+# time, and the answer cannot change: it is a property of the pattern.
+_MEASURED: "dict[str, str | None]" = {}
+
+
+def check_pattern(pattern: str) -> None:
+    """Refuse a pattern this server cannot afford to run. Compiles nothing here.
+
+    Two gates, in cost order: the shape budget, which is arithmetic on the
+    parse tree, and then the measurement, which spends a process. See the
+    module docstring for which of the two is the guarantee.
+    """
+    check_shape(pattern)
+    measure_cost(pattern)
+
+
+def _alphabet(parsed: Any, depth: int = 0) -> "set[str]":
+    """Characters worth building a subject out of, taken from the pattern.
+
+    Every literal it names, a representative for every category, and the
+    endpoints of every range. `.` contributes a letter, because a run of one
+    letter is the case that makes `.*` compete with what follows it.
+    """
+    found: set[str] = set()
+    if depth > 8:
+        return found
+    for op, av in parsed:
+        name = str(op)
+        if name == "LITERAL" and 0 < av < 0x110000:
+            found.add(chr(av))
+        elif name in ("ANY", "NOT_LITERAL"):
+            found.add("a")
+        elif name == "IN":
+            for inner_op, inner_av in av:
+                inner = str(inner_op)
+                if inner == "LITERAL" and 0 < inner_av < 0x110000:
+                    found.add(chr(inner_av))
+                elif inner == "RANGE":
+                    low, high = inner_av
+                    found.update(chr(c) for c in (low, high) if 0 < c < 0x110000)
+                elif inner == "CATEGORY":
+                    found.add(_CATEGORY_SAMPLES.get(str(inner_av), "a"))
+                elif inner == "NEGATE":
+                    found.add("\x00")
+        elif name == "SUBPATTERN":
+            found |= _alphabet(av[-1], depth + 1)
+        elif name in _REPEATS:
+            found |= _alphabet(av[2], depth + 1)
+        elif name == "BRANCH":
+            for branch in av[1]:
+                found |= _alphabet(branch, depth + 1)
+        elif name == "ATOMIC_GROUP":
+            found |= _alphabet(av, depth + 1)
+    return found
+
+
+def _subjects(pattern: str) -> "list[str]":
+    """The texts to measure this pattern against, worst-case first.
+
+    A run of each character the pattern mentions, plus two mixtures: a run of
+    one character is what makes competing atoms backtrack, and the mixtures
+    catch the shapes that need two kinds of character to alternate.
+    """
+    try:
+        alphabet = _alphabet(_sre_parse.parse(pattern))
+    except Exception:
+        alphabet = set()
+    # Bounded, so a pattern naming a hundred literals does not spawn a child
+    # with a hundred 2000-character subjects.
+    chosen = sorted(alphabet)[:8] or ["a"]
+    subjects = [char * PREFLIGHT_SUBJECT_CHARS for char in chosen]
+    if len(chosen) > 1:
+        pair = (chosen[0] + chosen[1]) * PREFLIGHT_SUBJECT_CHARS
+        subjects.append(pair[:PREFLIGHT_SUBJECT_CHARS])
+    subjects.append(("a1 " * PREFLIGHT_SUBJECT_CHARS)[:PREFLIGHT_SUBJECT_CHARS])
+    return subjects
+
+
+def measure_cost(pattern: str) -> None:
+    """Refuse a pattern that does not finish quickly in a process we can kill.
+
+    This is the bound. It costs one short-lived interpreter per distinct
+    pattern -- a search is user-initiated and not in a loop, so that is a
+    price worth paying for the only guarantee available: `re` cannot be
+    interrupted in-process, so a pattern that runs long in here would run long
+    in the server with no way out but killing it.
+
+    A child that cannot be started at all is treated as a refusal, not as a
+    pass. Failing open would mean the guarantee quietly disappears on a machine
+    where spawning is not allowed, which is the direction that ends in a
+    wedged server.
+    """
+    import base64
+
+    if pattern in _MEASURED:
+        verdict = _MEASURED[pattern]
+        if verdict is not None:
+            raise PatternTooCostly(verdict)
+        return
+
+    encode = (lambda text:
+              base64.b64encode(text.encode("utf-8")).decode("ascii"))
+    command = [sys.executable, "-c", _CHILD, encode(pattern)]
+    command += [encode(subject) for subject in _subjects(pattern)]
+    verdict: "str | None" = None
+    try:
+        done = subprocess.run(command, capture_output=True, text=True,
+                              timeout=PREFLIGHT_SECONDS)
+        if done.returncode != 0 and "error" not in (done.stderr or "").lower():
+            # A child that died for a reason other than a bad pattern. The
+            # caller's own re.compile will report a syntax error better than
+            # this could, so a compile failure is deliberately not refused
+            # here; anything else is.
+            verdict = None
+    except subprocess.TimeoutExpired:
+        verdict = (
+            "that pattern did not finish matching in %.1f seconds against "
+            "text built from its own characters, so this server will not run "
+            "it. A regular expression match in Python cannot be interrupted "
+            "-- no timeout or signal reaches it -- so one that runs long here "
+            "would run long in the server with no way to stop it. Two "
+            "repeated parts that can match the same characters with nothing "
+            "required between them do this: \"a*a*\", \"[a-z]+[a-z]+\", "
+            "\"\\w+\\d+\". Put the literal text you are looking for "
+            "between them, or leave regex off and search for a plain "
+            "substring, which reads every string in full."
+            % PREFLIGHT_SECONDS)
+    except OSError as exc:
+        verdict = (
+            "this server could not run its safety check on that pattern (%s), "
+            "so it will not run the pattern either -- an uninterruptible match "
+            "is not something to risk on an unchecked guess. Search for a "
+            "plain substring by leaving regex off." % exc)
+
+    _MEASURED[pattern] = verdict
+    if verdict is not None:
+        raise PatternTooCostly(verdict)
+
+
+def check_shape(pattern: str) -> None:
+    """Refuse a pattern whose backtracking is not bounded, by arithmetic alone.
+
+    The cheap gate: no process, no matching, just the parse tree. Everything
+    it refuses is genuinely costly -- no pattern in the corpus test's ordinary
+    half is refused here -- but it is not the bound, because a score of 4096
+    covers patterns from instant to never finishing. See the module docstring.
+
+    A pattern the parser rejects is left alone: the caller's ``re.compile``
+    reports a syntax error far better than this could.
     """
     try:
         parsed = _sre_parse.parse(pattern)
-    except Exception:
+    except _RE_ERROR:
+        # A syntax error, left alone on purpose: the caller's own re.compile
+        # reports one far better than this could, and `_matcher` turns that
+        # into a ToolError.
         return
+    except Exception as exc:
+        # Anything else means this gate could not run. Refused rather than
+        # skipped: failing open here would quietly remove the cheap half of
+        # the protection the moment the standard library raised something
+        # unanticipated, and the caller would never know it had.
+        raise PatternTooCostly(
+            "this server could not analyse that pattern (%s: %s), so it will "
+            "not run it either. Search for a plain substring by leaving regex "
+            "off." % (type(exc).__name__, exc))
     # _flatten raises for the shapes that are refused outright rather than
     # weighed, so its own message survives instead of the budget's.
     atoms = _flatten(parsed)

@@ -98,6 +98,39 @@ TOP_TILE_IDS = 12
 LAYER_CEILINGS = {2: 15, 3: 63}
 
 
+# What each op reads. This replaces a hand-written check that named only
+# width and height and ran only after the create and delete paths had already
+# returned -- so op "delete" accepted a width, a name and a patch, ignored all
+# three, and reported the delete as a plain success.
+#
+# "resize" reads name and patch because renaming or patching alongside a
+# resize is one file write either way; "delete" reads nothing but the id.
+MAP_OP_ARGS = {
+    "create": {"op", "dry_run", "map_id", "name", "parent_id", "width",
+               "height", "tileset_id", "patch"},
+    "update": {"op", "dry_run", "map_id", "name", "patch"},
+    "delete": {"op", "dry_run", "map_id"},
+    "resize": {"op", "dry_run", "map_id", "name", "width", "height", "patch"},
+}
+
+
+# What each map_tiles op reads. "read" writes nothing, so it takes no
+# dry_run; "fill" paints one id everywhere and "write" takes a grid, and each
+# used to accept the other's argument and ignore it -- a fill carrying rows
+# reported "filled ..." and never looked at them.
+# How much tile data map_get includes. Named once, because the schema that
+# advertises it and the reader that enforces it are 40 lines apart.
+TILE_DETAIL = ("none", "counts")
+
+TILE_OP_ARGS = {
+    "read": {"op", "map_id", "x", "y", "width", "height", "z"},
+    "fill": {"op", "map_id", "x", "y", "width", "height", "z", "tile_id",
+             "dry_run"},
+    "write": {"op", "map_id", "x", "y", "width", "height", "z", "rows",
+              "dry_run"},
+}
+
+
 def _name(ctx: Context, value: Any) -> str:
     return ctx.codec.decode(value.data) if isinstance(value, RubyString) else ""
 
@@ -158,6 +191,12 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 row["width"] = game_map.get("width")
                 row["height"] = game_map.get("height")
                 row["events"] = len(events) if isinstance(events, RubyHash) else 0
+                unreadable = unreadable_events_note(events)
+                if unreadable:
+                    # Rather than the 0 above standing unexplained: a count of
+                    # zero from a field that could not be read is the one
+                    # reading a caller cannot check.
+                    row["events_note"] = unreadable
                 bgm = game_map.get("bgm")
                 if isinstance(bgm, RubyObject) and game_map.get("autoplay_bgm"):
                     row["bgm"] = _name(ctx, bgm.get("name"))
@@ -165,10 +204,17 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 row["error"] = str(exc)
         rows.append(row)
 
-    orphans = sorted(on_disk - {r["id"] for r in rows}) if parent_filter is None else []
+    # Over the whole tree, whatever the filter. This used to be an empty list
+    # whenever a filter was given, without looking, so a filtered call reported
+    # "no orphan map files" from a check that never ran -- and it is one set
+    # difference, so there was nothing to save.
+    orphans = sorted(on_disk - {i for i, _ in ctx.project.entries("map_infos")})
     return {
         "maps": rows,
-        "total": len(rows),
+        # Named for what it counted. "total" read as the size of the tree, so
+        # a filtered listing looked like the whole of a much smaller project --
+        # the same rename db_list already carries.
+        "matching_maps": len(rows),
         "map_files_without_tree_entry": orphans,
         "start_position": _start_position(ctx),
     }
@@ -202,7 +248,7 @@ def _start_position(ctx: Context) -> dict[str, Any] | None:
         "include_events": prop(BOOL, "Include a summary of each event (default true)."),
         "tiles": prop(STR, "Tile reporting: none (default), counts (which tile ids "
                            "appear on each layer, and how often).",
-                      enum=["none", "counts"]),
+                      enum=list(TILE_DETAIL)),
         "refresh": REFRESH,
     }, ["map_id"]),
 )
@@ -242,6 +288,16 @@ def map_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     }
 
     data = game_map.get("data")
+    # Resolved before the branch, so an invalid value is refused even on a
+    # map with no tile table -- and so asking for counts that cannot be
+    # produced is answered rather than dropped.
+    tiles = one_of(args, "tiles", list(TILE_DETAIL), TILE_DETAIL[0])
+    if not isinstance(data, Table):
+        if tiles == "counts":
+            result["tile_counts_note"] = (
+                "this map holds its tile data as %s rather than a Table, so "
+                "there was nothing to count. Run validate to see what is "
+                "wrong with the file." % type(data).__name__)
     if isinstance(data, Table):
         result["tile_table"] = {
             "xsize": data.xsize, "ysize": data.ysize, "zsize": data.zsize,
@@ -249,11 +305,14 @@ def map_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                            z, "layer %d (not used by this engine)" % z)
                        for z in range(data.zsize)},
         }
-        if one_of(args, "tiles", ["none", "counts"], "none") == "counts":
+        if tiles == "counts":
             result["tile_counts"] = _tile_counts(data)
 
     if opt_bool(args, "include_events", True):
         result["events"] = _event_summaries(ctx, game_map)
+        unreadable = unreadable_events_note(game_map.get("events"))
+        if unreadable:
+            result["events_note"] = unreadable
     warnings = ctx.project.file_warnings(ctx.project.map_file(map_id))
     if warnings:
         result["file_warnings"] = warnings
@@ -299,6 +358,22 @@ def _tile_sheet(tile_id: int) -> str:
         if low <= tile_id <= high:
             return sheet
     return "unknown"
+
+
+def unreadable_events_note(events: Any) -> "str | None":
+    """What to say about an @events that is not a Hash, or None if it is fine.
+
+    `event_edit` refuses such a map by name; the three read tools returned an
+    empty list, so "we could not read this" and "there are none" looked
+    identical and a model concluded the map has no events. One sentence, in
+    one place, because three tools were reporting the same fact three ways --
+    which is to say, not reporting it at all.
+    """
+    if events is None or isinstance(events, RubyHash):
+        return None
+    return ("this map holds its events as %s rather than a Hash, so none "
+            "could be read. Run validate to see what is wrong with the file."
+            % type(events).__name__)
 
 
 def _event_summaries(ctx: Context, game_map: RubyObject) -> list[dict[str, Any]]:
@@ -365,7 +440,7 @@ def _conditions(condition: Any) -> list[str]:
     "which is what the editor needs to show the map at all. Resizing preserves "
     "the tiles that still fit.",
     schema({
-        "op": prop(STR, "What to do.", enum=["update", "create", "delete", "resize"]),
+        "op": prop(STR, "What to do.", enum=list(MAP_OP_ARGS)),
         "map_id": prop(INT, "Which map. Omit for create to take the next free id."),
         "name": prop(STR, "Map name in the tree. Used by create, or to rename."),
         "parent_id": prop(INT, "Parent map id for create (0 for the tree root)."),
@@ -392,7 +467,7 @@ def map_edit(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     behind. Refuses a patch touching width, height or data -- those have
     to agree with the tile table, so they go through op "resize".
     """
-    op = one_of(args, "op", ["update", "create", "delete", "resize"])
+    op = one_of(args, "op", list(MAP_OP_ARGS))
     check_op_args(op, args, MAP_OP_ARGS, "map_edit")
     dry_run = opt_bool(args, "dry_run")
 
@@ -538,17 +613,6 @@ def _apply_map_edit(ctx: Context, op: str, args: dict[str, Any], map_id: int,
     return {"map_id": map_id, "op": op, "changes": changes, "writes": writes}
 
 
-# What each map_tiles op reads. "read" writes nothing, so it takes no
-# dry_run; "fill" paints one id everywhere and "write" takes a grid, and each
-# used to accept the other's argument and ignore it -- a fill carrying rows
-# reported "filled ..." and never looked at them.
-TILE_OP_ARGS = {
-    "read": {"op", "map_id", "x", "y", "width", "height", "z"},
-    "fill": {"op", "map_id", "x", "y", "width", "height", "z", "tile_id",
-             "dry_run"},
-    "write": {"op", "map_id", "x", "y", "width", "height", "z", "rows",
-              "dry_run"},
-}
 
 
 def _check_budget(cells: int, what: str, windowed: bool = True,
@@ -617,20 +681,6 @@ def _refuse_structural(patch: dict[str, Any]) -> None:
         "for the size, map_tiles for tiles, and event_edit for events.")
 
 
-# What each op reads. This replaces a hand-written check that named only
-# width and height and ran only after the create and delete paths had already
-# returned -- so op "delete" accepted a width, a name and a patch, ignored all
-# three, and reported the delete as a plain success.
-#
-# "resize" reads name and patch because renaming or patching alongside a
-# resize is one file write either way; "delete" reads nothing but the id.
-MAP_OP_ARGS = {
-    "create": {"op", "dry_run", "map_id", "name", "parent_id", "width",
-               "height", "tileset_id", "patch"},
-    "update": {"op", "dry_run", "map_id", "name", "patch"},
-    "delete": {"op", "dry_run", "map_id"},
-    "resize": {"op", "dry_run", "map_id", "name", "width", "height", "patch"},
-}
 
 
 def _cells_outside(data: Table, width: int, height: int) -> int:
@@ -844,10 +894,21 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     incoming = found[:REFERENCE_PREVIEW]
 
     filename = ctx.project.map_file(map_id)
+    # Asked here, so the preview and the act agree: the file can legitimately
+    # be absent, and reporting a deletion the real call will not perform is
+    # the divergence _create_map's comment and Project.snapshot's docstring
+    # both call worse than no preview.
+    has_file = ctx.project.exists(filename)
     if dry_run:
-        return {"op": "delete", "map_id": map_id, "dry_run": True,
-                "would_delete": filename, "incoming_transfers": incoming,
-                "incoming_transfers_truncated": more_than_shown}
+        preview: dict[str, Any] = {
+            "op": "delete", "map_id": map_id, "dry_run": True,
+            "would_delete": filename if has_file else None,
+            "incoming_transfers": incoming,
+            "incoming_transfers_truncated": more_than_shown}
+        if not has_file:
+            preview["note"] = ("there is no %s to delete, so only the tree "
+                               "entry would be removed" % filename)
+        return preview
     # The tree entry goes first. Removing the file first meant that a refused
     # MapInfos save -- the editor holding it open, which is exactly what the
     # staleness check exists for -- left the map deleted and the tree still
@@ -857,7 +918,6 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     # (map_list reports that as file_present: false), and removing the tree
     # entry first meant the caller was told the call failed after it had in
     # fact landed.
-    has_file = ctx.project.exists(filename)
     with ctx.staged(infos_file) as tree_landed:
         infos.delete(map_id)
         write = tree_landed.save(infos_file, tool="map_edit",
@@ -877,7 +937,7 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     result: dict[str, Any] = {"op": "delete", "map_id": map_id,
                               "deleted": deleted, "write": write}
     if not has_file:
-        result["note"] = ("there was no %s to delete, so only the tree entry "
+        result["note"] = ("there is no %s to delete, so only the tree entry "
                           "was removed" % filename)
     if incoming:
         result["warning"] = (
@@ -1012,7 +1072,8 @@ def _cells_from_rows(ctx: Context, args: dict[str, Any],
     "Rows come back as arrays of tile ids, top row first.",
     schema({
         "map_id": prop(INT, "Which map.", minimum=1, maximum=MAX_MAP_ID),
-        "op": prop(STR, "read (default), write, or fill.", enum=["read", "write", "fill"]),
+        "op": prop(STR, "read (default), write, or fill.",
+                   enum=list(TILE_OP_ARGS)),
         "x": prop(INT, "Left edge of the rectangle (default 0).", minimum=0),
         "y": prop(INT, "Top edge of the rectangle (default 0).", minimum=0),
         "width": prop(INT, "Rectangle width (default: to the map's right "

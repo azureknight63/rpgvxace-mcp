@@ -107,6 +107,15 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 "a command_code search only has anything to look at in the "
                 "events scope, because only event command lists hold commands. "
                 "Include \"events\" in scopes.")
+        if opt_bool(args, "regex"):
+            # `regex` says how to read `query`, and there is no query here.
+            # `_matcher` returns on the falsy query before it looks, so this
+            # was the one argument in the tools layer that no path reads and
+            # nothing refused.
+            raise ToolError(
+                "regex says how to read query, and a command_code search "
+                "matches on the code rather than on text, so it reads "
+                "neither. Drop regex, or search for text instead.")
 
     matcher = _matcher(args, query)
     found = _Hits(limit)

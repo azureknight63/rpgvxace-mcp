@@ -31,6 +31,7 @@ from ..schema import (
     new_event_command,
     new_page,
 )
+from .map_tools import unreadable_events_note
 from .registry import (
     MAX_OPS,
     check_op_args,
@@ -174,6 +175,24 @@ DSL_HELP = (
 )
 
 
+def refuse_inert(args: dict[str, Any], names: "tuple[str, ...]",
+                 because: str) -> None:
+    """Refuse an argument this branch does not read.
+
+    `check_op_args` does this for a tool that selects with an `op`. These two
+    select with something else -- which id was given, which of three switches
+    -- so the gate does not reach them, and each dropped the arguments its
+    branch has no use for. The rule is the same one and so is the reason: a
+    dropped argument reports the same success as one that was applied.
+    """
+    inert = sorted(name for name in names if args.get(name) is not None)
+    if inert:
+        raise ToolError(
+            "%s does not read %s. %s"
+            % (because, " or ".join(echo(name) for name in inert),
+               "Ask for one or the other."))
+
+
 def _one_target(args: dict[str, Any], verb: str) -> "tuple[int | None, int | None]":
     """Which of the two things this call names, refusing both or neither.
 
@@ -261,6 +280,10 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     common_id, map_id = _one_target(args, "read")
 
     if common_id is not None:
+        refuse_inert(
+            args, ("event_ids", "name_contains", "page"),
+            "a common event has no pages and is addressed by its own id, so "
+            "reading one")
         common = ctx.project.get_entry("common_events", common_id, refresh)
         if common is None:
             raise ToolError("there is no common event %d" % common_id)
@@ -286,13 +309,21 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     # page comes out of the file.
     walk = new_walk()
     events = game_map.get("events")
-    if not isinstance(events, RubyHash):
-        return {"map_id": map_id, "events": []}
+    unreadable = unreadable_events_note(events)
+    if unreadable:
+        return {"map_id": map_id, "events": [], "events_note": unreadable}
+    if events is None:
+        return {"map_id": map_id, "events": [], "total": 0}
 
     wanted = set(int_list(args, "event_ids", MAX_EVENT_IDS_PER_CALL,
                           minimum=1, maximum=MAX_EVENT_ID))
     needle = (opt_str(args, "name_contains") or "").lower()
-    only_page = opt_int(args, "page")
+    # Bounded, and reported when nothing has it. Used only as a filter, a
+    # page index no event has returned every event with an empty `pages` list
+    # and a non-zero `page_count` -- and `event_edit` refuses the same value
+    # while `raw_data` gives -1 the opposite meaning, so silence here was the
+    # one reading a caller could not check.
+    only_page = opt_int(args, "page", minimum=0)
 
     out = []
     for event_id, event in events.sorted_items():
@@ -315,6 +346,11 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             "page_count": len(event.get("pages") or []),
             "pages": pages,
         })
+    if only_page is not None and not any(e["pages"] for e in out):
+        return {"map_id": map_id, "events": out, "total": len(out),
+                "page_note": "no event on this map has a page %d; the pages "
+                             "each one does have are counted in page_count"
+                             % only_page}
     return {"map_id": map_id, "events": out, "total": len(out),
             "note": "VX runs the LAST page whose conditions are satisfied, so a "
                     "later page with no conditions hides the pages before it."}
@@ -944,17 +980,9 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         % engine)
 
     if opt_bool(args, "move_commands"):
-        inert = sorted(k for k in ("code", "search") if args.get(k) is not None)
-        if inert:
-            # The same rule the op-selecting tools apply, said by hand because
-            # this switch is a boolean rather than an `op`: a move-route
-            # listing has nothing to do with a command code or a name search,
-            # and accepting one and returning the move list anyway looks like
-            # an answer to the question that was asked.
-            raise ToolError(
-                "move_commands lists the move route codes, which are a "
-                "separate set, so it does not read %s. Ask for one or the "
-                "other." % " or ".join(echo(k) for k in inert))
+        refuse_inert(args, ("code", "search"),
+                     "move_commands lists the move route codes, which are a "
+                     "separate set from the command codes, so it")
         # Below `modelled`, not above it: this branch used to return first and
         # so was the one reply that omitted the key the description promises
         # every reply carries. A move route's codes are borrowed for an
@@ -973,6 +1001,8 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 
     code = opt_int(args, "code")
     if code is not None:
+        refuse_inert(args, ("search",),
+                     "a lookup of one code answers for that code alone, so it")
         entry: dict[str, Any] = {"code": code, "name": command_name(code)}
         # A list, because both notes can apply at once: a code this engine
         # does not dispatch AND whose layout is unrecorded used to lose the

@@ -24,11 +24,40 @@ class ToolError(ValueError):
 
 
 def echo(value: Any) -> str:
-    """Quote a caller's value back at it, without quoting all of it."""
+    """Quote a caller's value back at it, without quoting all of it.
+
+    A string is sliced *before* the repr, because the whole point is not to
+    materialise a value that may be megabytes -- and a caller's argument
+    reaches here straight off the wire. This function existed twice, here and
+    in server.py, and only the server's copy did that; the copy every tool
+    calls is the one that gets the raw arguments.
+    """
+    if isinstance(value, str) and len(value) > MAX_ECHO_CHARS:
+        return repr(value[:MAX_ECHO_CHARS]) + "... (%d characters)" % len(value)
     shown = repr(value)
     if len(shown) > MAX_ECHO_CHARS:
         shown = shown[:MAX_ECHO_CHARS] + "... (%d characters)" % len(shown)
     return shown
+
+
+# How many field names a refusal lists before it says how many more there are.
+# The names come out of the project file, so their number is not this server's
+# to choose: an entry carrying five thousand instance variables produced a
+# fifty-nine-kilobyte error message, and `_tool_error` does not truncate.
+MAX_NAMES_LISTED = 40
+
+
+def named(names: "Any", limit: int = MAX_NAMES_LISTED) -> str:
+    """A list of field names for a message, capped and counted.
+
+    Sorted by the caller where order matters; this only bounds it. The count
+    is kept because "it carries 40 fields" and "it carries 5000" are different
+    facts, and the one a caller needs is usually the second.
+    """
+    names = list(names)
+    if len(names) <= limit:
+        return ", ".join(names)
+    return "%s and %d more" % (", ".join(names[:limit]), len(names) - limit)
 
 
 class Context:
@@ -270,7 +299,7 @@ def refuse_unknown_fields(patch: dict[str, Any], known: "set[str]",
             "variables it does not expect -- check the spelling."
             % (what, "s" if len(unknown) > 1 else "",
                ", ".join(echo(u) for u in unknown),
-               ", ".join(sorted(known))))
+               named(sorted(known))))
 
 
 def check_args(schema_def: dict[str, Any], args: dict[str, Any],
@@ -297,7 +326,7 @@ def check_args(schema_def: dict[str, Any], args: dict[str, Any],
             "rather than applied."
             % ("s" if len(unknown) > 1 else "",
                ", ".join(echo(u) for u in sorted(unknown)), where,
-               ", ".join(sorted(known))))
+               named(sorted(known))))
     for key, value in args.items():
         _check_declared(key, value, known[key])
         item = (known[key].get("items") or {}) if isinstance(value, list) else {}
@@ -371,7 +400,18 @@ def check_op_args(op: str, args: dict[str, Any],
     """
     allowed = uses.get(op)
     if allowed is None:
-        return
+        # Refused, not returned. An op reaches here only after `one_of` has
+        # accepted it, so a missing entry means this server's own two lists
+        # disagree -- and returning quietly would drop the caller's arguments
+        # and report success, which is the failure this function exists to
+        # prevent, reached through the function itself. Named as a server bug
+        # rather than a caller's mistake, because that is what it is.
+        raise ToolError(
+            "op \"%s\" is accepted by %s but has no declared argument list, "
+            "so its arguments could not be checked. That is a bug in this "
+            "server rather than in the request; please report it. Refusing "
+            "rather than running it, because the alternative is dropping "
+            "arguments and calling that success." % (op, where))
     inert = sorted(key for key in args if key not in allowed)
     if not inert:
         return

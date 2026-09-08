@@ -338,7 +338,7 @@ def scripts(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     "snapshot.",
     schema({
         "op": prop(STR, "list, create (snapshot every data file), restore, or prune.",
-                   enum=["list", "create", "restore", "prune"]),
+                   enum=list(BACKUP_OP_ARGS)),
         "backup": prop(STR, "Which snapshot to restore, as named by list."),
         "files": prop(ARR, "For restore: only these files (default all in "
                            "the snapshot). At most %d." % MAX_RESTORE_FILES,

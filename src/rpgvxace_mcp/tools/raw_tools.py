@@ -11,7 +11,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..convert import TABLE_MODES, TextCodec, _hash_key, from_json, to_json
+from ..convert import (
+    TABLE_MODES,
+    TextCodec,
+    _hash_key,
+    from_json,
+    refuse_invented_in_replacement,
+    to_json,
+)
 from ..project import MAX_MAP_ID
 from ..rubytypes import (
     RubyHash,
@@ -24,6 +31,7 @@ from ..schema import ALL_TABLE_KEYS
 from .map_tools import STRUCTURAL_MAP_FIELDS
 from .registry import (
     Context,
+    named,
     DRY_RUN,
     INT,
     OBJ,
@@ -74,7 +82,7 @@ STRUCTURAL_MAP_PATHS = STRUCTURAL_MAP_FIELDS
     "structure for a scalar or the reverse; and a field the object does not "
     "already have.",
     schema({
-        "op": prop(STR, "get (default) or set.", enum=["get", "set"]),
+        "op": prop(STR, "get (default) or set.", enum=list(RAW_OP_ARGS)),
         "table": prop(STR, "A data table name, e.g. system, actors, map_infos.",
                       enum=ALL_TABLE_KEYS),
         "map_id": prop(INT, "A map to address instead of a table."),
@@ -151,6 +159,11 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     new_value = from_json(args["value"]["value"], ctx.codec)
     existing = _resolve(root, path, ctx.codec)
     _check_same_kind(existing, new_value, "/".join(path))
+    # The same check the validating tools make on a replacement. raw_data is
+    # deliberately permissive about *values* and has never been permissive
+    # about shapes: an invented field name is a shape the editor rejects, and
+    # this tool's own description says it refuses one.
+    refuse_invented_in_replacement(existing, new_value, "/".join(path))
     before = to_json(existing, ctx.codec, "summary")
 
     dry_run = opt_bool(args, "dry_run")
@@ -190,6 +203,12 @@ def _check_same_kind(existing: Any, replacement: Any, path: str) -> None:
     guard it keeps, because being able to write an odd *value* is the point,
     and being able to write an odd *shape* is not.
     """
+    if existing is None:
+        # A field or slot holding nil has no fields to set inside it, so the
+        # remedy below cannot be followed -- and filling one in is exactly
+        # what this tool is for. The reverse (an object back to nil) still
+        # goes through the checks: that is a removal, not a fill.
+        return
     kinds = ((RubyObject, "an object"), (RubyHash, "a hash"),
              (Table, "an RGSS Table"), (list, "an array"))
     for kind, described in kinds:
@@ -217,7 +236,7 @@ def _resolve(value: Any, path: list[str], codec: TextCodec) -> Any:
         if isinstance(current, RubyObject):
             if not current.has(key):
                 raise ToolError("%s has no field %r (it has: %s)"
-                                % (trail, key, ", ".join(current.fields())))
+                                % (trail, key, named(current.fields())))
             current = current.get(key)
         elif isinstance(current, list):
             current = _index_list(current, key, trail)

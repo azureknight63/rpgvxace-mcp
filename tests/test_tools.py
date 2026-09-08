@@ -31,7 +31,9 @@ from rpgvxace_mcp.tools import pattern_safety  # noqa: E402
 from rpgvxace_mcp.tools.pattern_safety import (  # noqa: E402
     PatternTooCostly,
     check_pattern,
+    check_shape,
 )
+from rpgvxace_mcp.tools.search_tools import _matcher  # noqa: E402
 from rpgvxace_mcp.tools import (  # noqa: E402,F401
     db_tools,
     event_tools,
@@ -39,7 +41,12 @@ from rpgvxace_mcp.tools import (  # noqa: E402,F401
     misc_tools,
     raw_tools,
 )
-from rpgvxace_mcp.tools.registry import Context, REGISTRY, ToolError  # noqa: E402
+from rpgvxace_mcp.tools.registry import (  # noqa: E402
+    Context,
+    REGISTRY,
+    ToolError,
+    check_op_args,
+)
 
 
 class ToolTest(unittest.TestCase):
@@ -2544,52 +2551,109 @@ class TestAddPageRefusesInsteadOfCrashing(ToolTest):
 class TestSearchPatternsStayFast(ToolTest):
     """The corpus pattern_safety's docstring points at.
 
-    A shape-based gate cannot be checked by reading it, so this measures: every
+    A cost model cannot be checked by reading it, so this measures. Every
     pattern the module allows must finish quickly against the worst subject it
-    will ever see, and every chain that can be made to backtrack must be
+    will ever see, and every pattern that can be made to backtrack must be
     refused. Python's `re` cannot be interrupted, so a pattern that is merely
-    slow here is a server that has to be killed in production.
+    slow here is a server the user has to kill.
+
+    **The subject is part of the case.** An earlier version of this test held
+    one fixed tuple of subjects, and that is why it passed while five bypasses
+    were live: `\d?\s?` repeated is 0.001s against letters and does not
+    finish against digits. Each attack below therefore names the text that
+    makes it fatal, measured.
     """
 
+    # A long run of one kind of character is what makes competing atoms
+    # backtrack, so the subjects are homogeneous by construction.
+    LETTERS = "a" * MAX_SUBJECT_CHARS
+    DIGITS = "1" * MAX_SUBJECT_CHARS
+    SPACES = " " * MAX_SUBJECT_CHARS
+    MIXED = ("a1 " * MAX_SUBJECT_CHARS)[:MAX_SUBJECT_CHARS]
+    ALTERNATING = "ab" * (MAX_SUBJECT_CHARS // 2)
+
+    SUBJECTS = (LETTERS, DIGITS, SPACES, MIXED, ALTERNATING)
+
+    # (pattern, the subject it is fatal against, how it evades a cost model).
+    # Every time here was measured in a killable child process; ">15s" means
+    # the child was still running when it was killed.
     ATTACKS = (
-        "a?" * 24 + "b",
-        "a?" * 40 + "b",
-        "(a|ab)" * 20 + "z",
-        "(a+)+b",
-        "((a+))+b",
-        "(?:a+)+b",
-        "(a|a)+b",
-        "(a{1,2})+b",
-        "(a*)*b",
-        "(a|b|ab)*c",
-        r"(\w+\s?)*$",
-        "a{0,500}a{0,500}a{0,500}b",
-        "[a-z]+[a-z]+[a-z]+[a-z]+!",
-        "(x+x+)+y",
+        # Classic nested repeats: a quantifier over a body that can itself
+        # match more than one way.
+        ("(a+)+b", LETTERS, "nested repeat"),
+        ("((a+))+b", LETTERS, "nested repeat, one group deeper"),
+        ("(?:a+)+b", LETTERS, "nested repeat, non-capturing"),
+        ("(a|a)+b", LETTERS, "repeat over an ambiguous branch"),
+        ("(a{1,2})+b", LETTERS, "repeat over a bounded repeat"),
+        ("(a*)*b", LETTERS, "repeat over a nullable repeat"),
+        ("(a|b|ab)*c", ALTERNATING, "repeat over an ambiguous branch"),
+        (r"(\w+\s?)*$", LETTERS, "repeat over a nullable body"),
+        ("(x+x+)+y", "x" * MAX_SUBJECT_CHARS, "repeat over two quantifiers"),
+
+        # Homogeneous chains: many atoms of one kind, all competing.
+        ("a?" * 24 + "b", LETTERS, "optional chain"),
+        ("a?" * 40 + "b", LETTERS, "optional chain, longer"),
+        ("(a|ab)" * 20 + "z", LETTERS, "alternation chain"),
+        ("a{0,500}a{0,500}a{0,500}b", LETTERS, "bounded repeat chain"),
+        ("[a-z]+[a-z]+[a-z]+[a-z]+!", LETTERS, "four quantifiers, one class"),
+
+        # Nullable atoms that a disjointness test reads as breaking the chain,
+        # while at match time each matches empty and they all stay adjacent.
+        # >15s each, measured.
+        (r"\w?\W?" * 24 + "\x00", LETTERS, "nullable word/non-word chain"),
+        ("a?b?" * 24 + "c", LETTERS, "nullable literal chain"),
+        (r"\d?\s?" * 24 + "\x00", DIGITS, "nullable digit/space chain"),
+
+        # Case: the match runs with IGNORECASE, so these compete even though
+        # their literals differ. >15s each, measured.
+        ("a+A+a+z", LETTERS, "three quantifiers, one letter in two cases"),
+        ("a+A+a+A+z", LETTERS, "four quantifiers, one letter in two cases"),
+        ("a?A?" * 24 + "z", LETTERS, "nullable chain, one letter in two cases"),
+
+        # Two blocks, each on its own inside a budget, multiplying together.
+        (r"\d?" * 14 + r"\s?" * 14 + "z", DIGITS, "two independent blocks"),
+
+        # Two quantifiers over one class, with nothing required between them.
+        # 14.3s and >15s, measured -- and both score the same as
+        # `Gold\s+\d+`, which is instant, so no score can separate them.
+        ("a*a*c", LETTERS, "two stars, one character"),
+        ("[a-z]+[a-z]+!", LETTERS, "two quantifiers, one class"),
+        (r"\w+\d+!", DIGITS, "two quantifiers, overlapping classes"),
+
+        # Lookaround: refused outright, because each runs its own match at
+        # every position and there is no way to bound that here.
+        (r"Fire(?=Sword)", LETTERS, "lookahead"),
+        (r"Gold(?!\d)", LETTERS, "negative lookahead"),
+        (r"(?<=Name: )\w+", LETTERS, "lookbehind"),
     )
 
+    # Patterns a caller would really write. Each must be allowed, and fast
+    # against every subject above.
     ORDINARY = (
         r"\bHP\b", "Sword|Blade|Axe", r"^\s*#", "[Ff]ire.*damage",
         r"Gold\s+\d+", r"(fire|ice)\s*bolt", "Fire.*Sword.*Shield",
         r"\d{1,3} damage", "Potion", r"actor_\d+", r"[A-Z][a-z]+",
-        r"\w+@\w+", "self_switch", r"item\s*=\s*\d+", ".*",
-        "(?:Elixir|Potion)s?", r"[0-9]+\.[0-9]+",
+        "self_switch", r"item\s*=\s*\d+", ".*",
+        "(?:Elixir|Potion)s?", r"[0-9]+\.[0-9]+", r"^\$game_",
+        r"Show Text.*\\v\[\d+\]",
     )
 
-    # Subjects chosen to be the worst case for the shapes above: a long run of
-    # one character is what makes a chain of optional atoms backtrack.
-    SUBJECTS = ("a" * MAX_SUBJECT_CHARS, "ab" * (MAX_SUBJECT_CHARS // 2),
-                "a" * (MAX_SUBJECT_CHARS - 1) + "!", " " * MAX_SUBJECT_CHARS)
-
     # Generous enough not to be flaky on a loaded machine, and far below the
-    # tens of seconds the refused patterns take.
+    # ten-plus seconds every refused pattern above was measured at.
     BUDGET_SECONDS = 2.0
 
-    def test_every_backtracking_chain_is_refused(self):
-        for pattern in self.ATTACKS:
-            with self.subTest(pattern=pattern[:30]):
-                with self.assertRaises(PatternTooCostly):
+    def test_every_costly_pattern_is_refused(self):
+        for pattern, _subject, why in self.ATTACKS:
+            with self.subTest(shape=why, pattern=pattern[:28]):
+                with self.assertRaises((PatternTooCostly, ToolError)):
                     check_pattern(pattern)
+
+    def test_the_tool_refuses_them_too(self):
+        """Through `search`, so the refusal reaches the caller as a ToolError."""
+        for pattern, _subject, why in self.ATTACKS[:6]:
+            with self.subTest(shape=why):
+                with self.assertRaises(ToolError):
+                    self.call("search", query=pattern, regex=True)
 
     def test_every_allowed_pattern_finishes_quickly(self):
         import re
@@ -2602,30 +2666,10 @@ class TestSearchPatternsStayFast(ToolTest):
                 for subject in self.SUBJECTS:
                     compiled.search(subject[:MAX_SUBJECT_CHARS])
                 elapsed = time.perf_counter() - start
-                self.assertLess(elapsed, self.BUDGET_SECONDS,
-                                "%r took %.2fs against %d subjects"
-                                % (pattern, elapsed, len(self.SUBJECTS)))
-
-    def test_the_worst_pattern_the_budget_allows_is_still_quick(self):
-        """The boundary, measured rather than assumed.
-
-        MAX_BACKTRACK_PATHS was chosen from this number: at 2**14 the slowest
-        pattern that passes takes well under a second, and one notch higher
-        measured about three seconds for the same shape.
-        """
-        import re
-        import time
-        worst = "a?" * 14 + "b"
-        check_pattern(worst)
-        compiled = re.compile(worst)
-        start = time.perf_counter()
-        compiled.search("a" * MAX_SUBJECT_CHARS)
-        self.assertLess(time.perf_counter() - start, self.BUDGET_SECONDS)
-
-    def test_the_tool_refuses_it_too(self):
-        with self.assertRaises(ToolError) as caught:
-            self.call("search", query="a?" * 24 + "b", regex=True)
-        self.assertIn("backtrack", str(caught.exception).lower())
+                self.assertLess(
+                    elapsed, self.BUDGET_SECONDS,
+                    "%r took %.2fs against %d subjects"
+                    % (pattern, elapsed, len(self.SUBJECTS)))
 
 
 class TestSearchSaysWhatItDidNotRead(ToolTest):
@@ -3447,3 +3491,441 @@ class TestLookaroundIsRefusedByName(ToolTest):
                 message = str(caught.exception)
                 self.assertIn("lookahead", message)
                 self.assertNotIn("repeats a group", message)
+
+
+class TestNoOpSlipsPastTheGate(ToolTest):
+    """The op names a tool accepts must be exactly the ops it gates.
+
+    `check_op_args` returns without checking when an op has no table entry,
+    reasoning that `one_of` has already said which ops exist. That holds only
+    while the two lists agree -- and map_edit spelled its op names three
+    times, in the schema enum, in `one_of`, and as the table's keys, 230 lines
+    apart. An op present in the first two and missing from the third switches
+    the argument gate off for exactly that op, silently, which is the failure
+    the gate was built to end.
+
+    So: no silent return for an unknown op, and the list `one_of` enforces is
+    read back out of its own refusal rather than trusted.
+    """
+
+    # Every op-selecting tool, and the table that must cover it. `ops` means
+    # the op sits inside each entry of an `ops` array.
+    TABLES = {
+        ("map_edit", None): map_tools.MAP_OP_ARGS,
+        ("map_tiles", None): map_tools.TILE_OP_ARGS,
+        ("db_edit", "ops"): db_tools.DB_OP_ARGS,
+        ("event_edit", "ops"): event_tools.EVENT_OP_ARGS,
+        ("raw_data", None): raw_tools.RAW_OP_ARGS,
+        ("scripts", None): misc_tools.SCRIPT_OP_ARGS,
+        ("backups", None): misc_tools.BACKUP_OP_ARGS,
+    }
+
+    def ops_one_of_accepts(self, tool_name, key):
+        """The op names the handler's own `one_of` call enforces.
+
+        Read out of the refusal it raises for an unknown op, because that is
+        the list the running code uses -- a structural comparison against the
+        schema would miss a third hardcoded copy, which is the bug here.
+        """
+        arguments = {"op": "__no_such_op__"}
+        if key:
+            arguments = {"ops": [arguments]}
+        # Enough to get past any required argument that is read first.
+        arguments.update({"map_id": 1, "table": "items",
+                          "common_event_id": None})
+        arguments = {k: v for k, v in arguments.items()
+                     if v is not None
+                     and k in (REGISTRY[tool_name].schema.get("properties") or {})}
+        if key:
+            arguments["ops"] = [{"op": "__no_such_op__"}]
+        with self.assertRaises(ToolError) as caught:
+            self.call(tool_name, **arguments)
+        message = str(caught.exception)
+        self.assertIn("must be one of", message,
+                      "%s did not refuse an unknown op through one_of" % tool_name)
+        listed = message.split("must be one of", 1)[1].split(", got")[0]
+        return {name.strip() for name in listed.split(",")}
+
+    def test_one_of_and_the_table_name_the_same_ops(self):
+        for (tool_name, key), table in sorted(self.TABLES.items()):
+            with self.subTest(tool=tool_name):
+                self.assertEqual(self.ops_one_of_accepts(tool_name, key),
+                                 set(table))
+
+    def test_an_op_with_no_table_entry_is_refused_not_ignored(self):
+        """The silent return is the hole, whatever the lists say.
+
+        Two agreeing lists is the good case; this is what has to happen in the
+        bad one. Returning quietly means the caller's inapplicable arguments
+        are dropped and the call reports success -- the exact failure this
+        function exists to prevent, reached through the function itself.
+        """
+        with self.assertRaises(ToolError) as caught:
+            check_op_args("not_a_real_op", {"op": "not_a_real_op", "patch": {}},
+                          {"update": {"op", "patch"}}, "a tool")
+        self.assertIn("not_a_real_op", str(caught.exception))
+
+
+class TestAWholesaleObjectCannotInventFields(ToolTest):
+    """A value carrying __class__ replaces an object, and its own field names
+    were never checked.
+
+    `refuse_unknown_fields` inspects the patch's key *names* against the
+    entry's fields, so the top-level key passes; `apply_patch` then sees a
+    `__class__` and takes the replacement path, which never reaches
+    `_refuse_invented_fields`; `from_json` builds the object with nothing but
+    `check_ivar_name` on each key. So a typo inside a replacement object is
+    written into the file and reported as the change the caller asked for --
+    and the editor then refuses to open the project.
+
+    Reachable three ways, all of them through tools that advertise validation:
+    a field's value, an element of an array, and raw_data's whole value.
+    """
+
+    def bgm_fields(self):
+        return set(self.reopen().project.load_map(1).get("bgm").fields())
+
+    def test_a_typo_in_a_replacement_object_is_refused(self):
+        before = self.bgm_fields()
+        with self.assertRaises((ToolError, ConversionError)) as caught:
+            self.call("map_edit", op="update", map_id=1, patch={
+                "bgm": {"__class__": "RPG::BGM", "name": "Town1",
+                        "volume": 100, "pitch": 100, "pich": 100}})
+        self.assertIn("pich", str(caught.exception))
+        self.assertEqual(self.bgm_fields(), before)
+
+    def test_a_typo_inside_an_array_element_is_refused(self):
+        with self.assertRaises((ToolError, ConversionError)) as caught:
+            self.call("db_edit", table="classes", dry_run=True, ops=[
+                {"op": "update", "id": 1, "patch": {"learnings": [
+                    {"__class__": "RPG::Class::Learning", "skill_id": 1,
+                     "levl": 5}]}}])
+        self.assertIn("levl", str(caught.exception))
+
+    def test_raw_data_refuses_one_too(self):
+        with self.assertRaises((ToolError, ConversionError)) as caught:
+            self.call("raw_data", op="set", map_id=1, path="bgm", value={
+                "value": {"__class__": "RPG::BGM", "name": "Town1",
+                          "volume": 100, "pitch": 100, "naem": "x"}})
+        self.assertIn("naem", str(caught.exception))
+
+    def test_a_correct_replacement_still_works(self):
+        out = self.call("map_edit", op="update", map_id=1, patch={
+            "bgm": {"__class__": "RPG::BGM", "name": "Cave", "volume": 70,
+                    "pitch": 100}})
+        self.assertTrue(out["changes"])
+        self.assertEqual(self.reopen().project.load_map(1).get("bgm").get("name").data,
+                         b"Cave")
+
+
+class TestReadToolsDropNoArgumentsEither(ToolTest):
+    """The gate covers ops; these two tools branch on something else.
+
+    `event_get` chooses between a map and a common event by which id it was
+    given, and `command_reference` between three answers by `code`,
+    `search` and `move_commands`. Neither branch is an `op`, so
+    `check_op_args` does not reach them -- and each silently dropped the
+    arguments its branch does not read, which is the failure the gate exists
+    to end, reached around it.
+    """
+
+    def test_a_common_event_read_refuses_page_arguments(self):
+        """A common event has no pages and is addressed by id.
+
+        `event_get common_event_id=3 name_contains="Fire"` returned the event
+        in full whether or not its name matched, and the reply reads exactly
+        like a positive match.
+        """
+        for extra in ({"name_contains": "zzz"}, {"page": 0},
+                      {"event_ids": [1]}):
+            with self.subTest(extra=sorted(extra)):
+                with self.assertRaises(ToolError) as caught:
+                    self.call("event_get", common_event_id=1, **extra)
+                self.assertIn(sorted(extra)[0], str(caught.exception))
+
+    def test_a_common_event_read_still_works(self):
+        out = self.call("event_get", common_event_id=1)
+        self.assertIn("script", out)
+
+    def test_a_map_read_still_takes_them(self):
+        out = self.call("event_get", map_id=1, name_contains="Elder")
+        self.assertTrue(out["events"])
+
+    def test_a_code_lookup_refuses_a_search_it_would_not_run(self):
+        """`code` returned before `search` was ever read."""
+        with self.assertRaises(ToolError) as caught:
+            self.call("command_reference", code=101, search="text")
+        self.assertIn("search", str(caught.exception))
+
+    def test_each_command_reference_answer_still_works(self):
+        self.assertEqual(self.call("command_reference", code=101)["code"], 101)
+        self.assertTrue(self.call("command_reference", search="text")["commands"])
+        self.assertTrue(self.call("command_reference",
+                                  move_commands=True)["move_commands"])
+
+
+class TestAFilteredListSaysItWasFiltered(ToolTest):
+    """A count of what matched must not read as a count of what exists.
+
+    db_list renamed exactly this to `matching_entries` with a comment saying
+    why; map_list kept `total`. And `map_files_without_tree_entry` was set to
+    an empty list whenever a filter was given, without looking -- so a
+    filtered call reported "no orphan map files" from a check that never ran,
+    which is the "a zero would read as nothing looked" failure this codebase
+    guards against everywhere else.
+    """
+
+    def test_the_count_names_what_it_counted(self):
+        everything = self.call("map_list")
+        filtered = self.call("map_list", parent_id=1)
+        self.assertLess(len(filtered["maps"]), len(everything["maps"]))
+        self.assertNotIn("total", filtered)
+        self.assertEqual(filtered["matching_maps"], len(filtered["maps"]))
+
+    def test_a_filter_does_not_claim_there_are_no_orphans(self):
+        """The orphan check is one set difference over the whole tree.
+
+        With a real orphan present, because comparing two empty lists passes
+        whether the check ran or not.
+        """
+        # A map file with no tree entry: exactly what the key reports.
+        self.call("map_edit", op="create", name="Ghost", map_id=9)
+        infos = self.project.load_data("map_infos")
+        infos.delete(9)
+        self.project.save_file(self.project.filename_for("map_infos"),
+                               tool="test", summary="orphan the file")
+        self.ctx = self.reopen()
+
+        unfiltered = self.call("map_list")
+        self.assertIn(9, unfiltered["map_files_without_tree_entry"])
+        filtered = self.call("map_list", parent_id=1)
+        self.assertEqual(filtered["map_files_without_tree_entry"],
+                         unfiltered["map_files_without_tree_entry"])
+
+
+class TestUnreadableStructuresAreNotReportedAsEmpty(ToolTest):
+    """"We could not read it" and "there is nothing there" are different.
+
+    `event_edit` refuses a map whose @events is not a Hash, by name. The three
+    read tools returned an empty list instead, so a model concluded the map
+    has no events when the field is unreadable.
+    """
+
+    def break_events(self):
+        game_map = self.project.load_map(1)
+        game_map.set("events", self.project.codec.make_string("not a hash"))
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="broken events")
+        self.ctx = self.reopen()
+
+    def test_event_get_says_it_could_not_read_them(self):
+        self.break_events()
+        out = self.call("event_get", map_id=1)
+        self.assertEqual(out["events"], [])
+        self.assertIn("validate", " ".join(str(v) for v in out.values()))
+
+    def test_map_get_says_so_too(self):
+        self.break_events()
+        out = self.call("map_get", map_id=1)
+        self.assertIn("validate", " ".join(str(v) for v in out.values()))
+
+    def test_map_list_says_so_too(self):
+        self.break_events()
+        row = next(m for m in self.call("map_list", include_details=True)["maps"]
+                   if m["id"] == 1)
+        self.assertIn("validate", " ".join(str(v) for v in row.values()))
+
+
+class TestMapGetHonoursTilesWithoutATable(ToolTest):
+    """A request that cannot be answered must be answered as such.
+
+    `tiles` was resolved inside `if isinstance(data, Table)`, so on a map
+    whose @data is not a Table the argument was dropped: no tile_counts, no
+    tile_table, no explanation -- and an invalid `tiles` value was not even
+    refused on that path.
+    """
+
+    def break_data(self):
+        game_map = self.project.load_map(1)
+        game_map.set("data", self.project.codec.make_string("not a table"))
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="broken data")
+        self.ctx = self.reopen()
+
+    def test_asking_for_counts_says_there_is_no_table(self):
+        self.break_data()
+        out = self.call("map_get", map_id=1, tiles="counts")
+        self.assertIn("rather than a Table",
+                      " ".join(str(v) for v in out.values()))
+
+    def test_an_invalid_tiles_value_is_still_refused(self):
+        self.break_data()
+        with self.assertRaises(ToolError):
+            self.call("map_get", map_id=1, tiles="every-single-one")
+
+
+class TestEventGetChecksThePageItWasGiven(ToolTest):
+    """A page index no event has must be refused, not answered emptily.
+
+    `page` was used only as `index != only_page`, so `page=9` returned every
+    event with an empty `pages` list and a non-zero `page_count`. `event_edit`
+    refuses the same value and names the range that exists, and `raw_data`
+    gives -1 the opposite meaning (the last page), so silence here is the one
+    reading a caller cannot check.
+    """
+
+    def test_a_negative_page_is_refused(self):
+        with self.assertRaises(ToolError):
+            self.call("event_get", map_id=1, page=-1)
+
+    def test_a_page_no_event_has_is_reported(self):
+        out = self.call("event_get", map_id=1, page=9)
+        self.assertIn("no event", " ".join(str(v) for v in out.values()).lower())
+
+    def test_a_page_that_exists_still_works(self):
+        out = self.call("event_get", map_id=1, page=0)
+        self.assertTrue(out["events"][0]["pages"])
+
+
+class TestADeletePreviewMatchesTheDelete(ToolTest):
+    """The preview promised a file deletion the act would not perform.
+
+    `_create_map`'s comment and `Project.snapshot`'s docstring both say a
+    preview that does not match the act is worse than no preview; this one
+    reported `would_delete: <filename>` unconditionally while the real call
+    checks whether the file is there and says so when it is not.
+    """
+
+    def test_the_preview_says_there_is_no_file_to_delete(self):
+        # A tree entry whose map file was never written.
+        self.call("map_edit", op="create", name="Ghost", map_id=7)
+        (self.tmp / "project" / "Data" / ("Map007" + self.extension)).unlink()
+        self.ctx = self.reopen()
+        preview = self.call("map_edit", op="delete", map_id=7, dry_run=True)
+        real = self.call("map_edit", op="delete", map_id=7)
+        self.assertIsNone(preview["would_delete"])
+        self.assertIn("no ", preview["note"])
+        self.assertIn("no ", real["note"])
+
+
+class TestRawDataCanFillANilField(ToolTest):
+    """A remedy a caller cannot follow is not a remedy.
+
+    `_check_same_kind` treated a nil as "not a structure", so writing a
+    properly classed object into a field that currently holds nil was refused
+    with "set a field inside it instead" -- and there is no field inside nil.
+    Filling one in is exactly what the escape hatch is for.
+    """
+
+    def test_an_object_can_replace_a_nil(self):
+        # Set directly, because raw_data still refuses object -> nil: that
+        # removes a structure rather than filling one in.
+        game_map = self.project.load_map(1)
+        game_map.set("bgs", None)
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="nil bgs")
+        self.ctx = self.reopen()
+        out = self.call("raw_data", op="set", map_id=1, path="bgs", value={
+            "value": {"__class__": "RPG::BGS", "name": "Wind",
+                      "volume": 80, "pitch": 100}})
+        self.assertIn("after", out)
+        self.assertEqual(
+            self.reopen().project.load_map(1).get("bgs").get("name").data,
+            b"Wind")
+
+
+class TestTheShapeGateFailsClosed(unittest.TestCase):
+    """A gate that cannot run must refuse, not wave the pattern through.
+
+    `check_shape` swallowed every parser exception and returned, so anything
+    the standard library's parser raised that this module had not anticipated
+    silently disabled the cheap gate. It is near-unreachable today -- the same
+    parser backs `re.compile`, and `_matcher` catches `re.error` -- but the one
+    thing standing between a caller and an uninterruptible match should not
+    fail open on a surprise.
+    """
+
+    def test_a_syntax_error_is_left_to_re_compile(self):
+        """A bad pattern gets `re`'s own message, which is better than ours."""
+        check_shape("(unclosed")           # must not raise here
+        with self.assertRaises(ToolError):
+            _matcher({"regex": True}, "(unclosed")
+
+    def test_an_unexpected_parser_failure_is_refused(self):
+        import rpgvxace_mcp.tools.pattern_safety as safety
+
+        class Exploding:
+            def parse(self, pattern):
+                raise MemoryError("parser ran out of room")
+            MAXREPEAT = safety._sre_parse.MAXREPEAT
+
+        original = safety._sre_parse
+        safety._sre_parse = Exploding()
+        self.addCleanup(setattr, safety, "_sre_parse", original)
+        with self.assertRaises(PatternTooCostly):
+            check_shape("anything")
+
+
+class TestSearchRefusesAnInertRegexFlag(ToolTest):
+    """`regex` says how to read `query`, and a code search reads no query.
+
+    `_matcher` returns on the falsy query before `regex` is looked at, so
+    `regex: true` alongside `command_code` was silently dropped -- the one
+    place in the tools layer where an argument no path reads was ignored
+    rather than refused.
+    """
+
+    def test_regex_alongside_a_command_code_is_refused(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("search", command_code=201, scopes=["events"], regex=True)
+        self.assertIn("regex", str(caught.exception))
+
+    def test_a_command_code_search_still_works(self):
+        out = self.call("search", command_code=201, scopes=["events"])
+        self.assertIn("scopes_searched", out)
+
+
+class TestRefusalsAreBounded(ToolTest):
+    """A refusal quotes untrusted file content, so it has to be capped.
+
+    `refuse_unknown_fields` interpolates the whole of `", ".join(known)`, and
+    `known` comes out of the file -- so an entry carrying a few hundred
+    thousand instance variables produced a multi-megabyte error. `_tool_error`
+    does not truncate, and the response ceiling guards only the success
+    payload, so the frame went out at whatever size the file dictated.
+
+    And `echo` exists twice with the same name and value -- here and in
+    server.py -- where the server's copy slices before `repr` "because the
+    whole point is not to materialise a value that may be megabytes" and this
+    one did not.
+    """
+
+    MANY = 5000
+
+    def entry_with_many_fields(self):
+        entry = self.project.get_entry("items", 1)
+        for index in range(self.MANY):
+            entry.set("extra_%d" % index, index)
+        self.project.save_file(self.project.filename_for("items"),
+                               tool="test", summary="many fields")
+        self.ctx = self.reopen()
+
+    def test_an_unknown_field_refusal_is_capped(self):
+        self.entry_with_many_fields()
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_edit", table="items", dry_run=True, ops=[
+                {"op": "update", "id": 1, "patch": {"nosuchfield": 1}}])
+        message = str(caught.exception)
+        self.assertIn("nosuchfield", message)
+        self.assertLess(len(message), 4000,
+                        "the refusal grew with the file: %d characters"
+                        % len(message))
+
+    def test_echo_does_not_materialise_a_huge_repr(self):
+        """One `echo`, slicing before repr, as server.py's copy documents."""
+        from rpgvxace_mcp.tools import registry
+        from rpgvxace_mcp import server
+        # One function, not two under the same name.
+        self.assertIs(server.echo, registry.echo)
+        shown = registry.echo("x" * 5_000_000)
+        self.assertLess(len(shown), registry.MAX_ECHO_CHARS + 60)

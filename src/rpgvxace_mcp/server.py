@@ -31,6 +31,7 @@ from .tools import (  # noqa: F401
 # imports empties the tool list.
 from .tools.registry import (
     Context,
+    echo,
     REGISTRY,
     ToolError,
     all_tools,
@@ -66,9 +67,11 @@ MAX_RESPONSE_CHARS = 4 * 1024 * 1024
 # server is broken" instead of the recoverable "narrow your request".
 MAX_TOOL_RESULT_CHARS = MAX_RESPONSE_CHARS // 2
 
-# How much of a caller's own string is quoted back in an error message. Without
-# this, a rejected 32 MB method name is echoed in full.
-MAX_ECHO_CHARS = 120
+# How much of a caller's own string is quoted back in an error message -- and
+# the function that applies it. Both come from the tools layer, because this
+# file had its own copy of each under the same names, and the two had drifted:
+# only the copy here sliced a string before repr'ing it, which is the half that
+# matters, and the copy every tool calls is the one handed raw arguments.
 
 # Methods a client may call before the initialize handshake. Everything else
 # waits, so protocol version negotiation cannot be skipped.
@@ -117,7 +120,7 @@ class Server:
             return _error(
                 request_id, INVALID_REQUEST,
                 "call initialize before %s: the protocol version has not been "
-                "negotiated yet" % _echo(method))
+                "negotiated yet" % echo(method))
 
         try:
             if method == "initialize":
@@ -145,7 +148,7 @@ class Server:
             if method == "resources/templates/list":
                 return _result(request_id, {"resourceTemplates": []})
             return _error(request_id, METHOD_NOT_FOUND,
-                          "unknown method %s" % _echo(method))
+                          "unknown method %s" % echo(method))
         except ToolError as exc:
             # A ToolError reaching here came from dispatch itself -- an unknown
             # tool or resource, or a malformed params object -- not from a tool
@@ -184,7 +187,7 @@ class Server:
         if tool is None:
             raise ToolError(
                 "unknown tool %s; available tools are %s"
-                % (_echo(name), ", ".join(sorted(REGISTRY)))
+                % (echo(name), ", ".join(sorted(REGISTRY)))
             )
         arguments = params.get("arguments", {})
         if arguments is None:
@@ -253,7 +256,7 @@ class Server:
                     "text": resource["builder"](self.context.project),
                 }]}
         raise ToolError("unknown resource %s; available: %s"
-                        % (_echo(uri), ", ".join(r["uri"] for r in RESOURCES)))
+                        % (echo(uri), ", ".join(r["uri"] for r in RESOURCES)))
 
     def _log(self, text: str) -> None:
         if self.verbose:
@@ -403,20 +406,6 @@ def _read_line(stdin: TextIO) -> tuple[str | None, bool]:
         more = stdin.readline(MAX_MESSAGE_CHARS + 1)
         if not more or more.endswith("\n"):
             return chunk, True
-
-
-def _echo(value: Any) -> str:
-    """Quote a caller's own value back at it, without quoting all of it.
-
-    Sliced before the repr for a string, because the whole point is not to
-    materialise a value that may be megabytes.
-    """
-    if isinstance(value, str) and len(value) > MAX_ECHO_CHARS:
-        return repr(value[:MAX_ECHO_CHARS]) + "... (%d characters)" % len(value)
-    shown = repr(value)
-    if len(shown) > MAX_ECHO_CHARS:
-        shown = shown[:MAX_ECHO_CHARS] + "... (%d characters)" % len(shown)
-    return shown
 
 
 def _dump_json(payload: Any) -> str:

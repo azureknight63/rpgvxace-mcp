@@ -142,6 +142,19 @@ BUDGETONE = "tests/test_tools.py::TestOneBudgetForAWholeResponse::"
 TALLY = "tests/test_tools.py::TestTileTallySaysWhatItLeftOut::"
 MAPREFS = "tests/test_tools.py::TestMapReferenceCountsDoNotUnderstate::"
 LOOKAROUND = "tests/test_tools.py::TestLookaroundIsRefusedByName::"
+MEASURED = "tests/test_tools.py::TestSearchPatternsStayFast::"
+CLOSED = "tests/test_tools.py::TestTheShapeGateFailsClosed::"
+WHOLE = "tests/test_tools.py::TestAWholesaleObjectCannotInventFields::"
+NOOP = "tests/test_tools.py::TestNoOpSlipsPastTheGate::"
+READDROP = "tests/test_tools.py::TestReadToolsDropNoArgumentsEither::"
+FILTERED = "tests/test_tools.py::TestAFilteredListSaysItWasFiltered::"
+UNREAD = "tests/test_tools.py::TestUnreadableStructuresAreNotReportedAsEmpty::"
+TILESNONE = "tests/test_tools.py::TestMapGetHonoursTilesWithoutATable::"
+PAGEARG = "tests/test_tools.py::TestEventGetChecksThePageItWasGiven::"
+DELPREV = "tests/test_tools.py::TestADeletePreviewMatchesTheDelete::"
+NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
+BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
+INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
 
 GUARDS = [
     Guard(
@@ -646,9 +659,9 @@ GUARDS = [
         "waits for a reply that never comes",
     ),
     Guard(
-        "echoed values are truncated", SERVER,
+        "echoed values are truncated", REGISTRY,
         'MAX_ECHO_CHARS = 120',
-        'MAX_ECHO_CHARS = 100_000_000',
+        'MAX_ECHO_CHARS = 32 * 1024 * 1024',
         [HARD + "test_a_rejected_method_is_not_echoed_in_full",
          HARD + "test_a_rejected_non_string_is_not_echoed_in_full"],
         "a rejected 32 MB method name is quoted back in full",
@@ -1268,6 +1281,116 @@ GUARDS = [
         [GATES + "test_every_op_selecting_tool_is_in_the_table_list",
          GATED + "test_map_tiles_refuses_the_other_ops_arguments"],
         'the gate is declared and applied to some tools and not others, which is how four op-selecting tools kept dropping arguments after it existed',
+    ),
+    Guard(
+        'the measurement bounds the work', SAFETY,
+        '    measure_cost(pattern)',
+        '    pass  # measurement removed',
+        [MEASURED + "test_every_costly_pattern_is_refused",
+         MEASURED + "test_the_tool_refuses_them_too"],
+        'ten patterns that the shape budget scores as cheap run for tens of seconds or never finish, because a score of 4096 covers patterns from instant to fatal and cannot tell them apart',
+    ),
+    Guard(
+        'the shape gate fails closed', SAFETY,
+        '    except _RE_ERROR:',
+        '    except Exception:',
+        [CLOSED + "test_an_unexpected_parser_failure_is_refused"],
+        "anything the standard library's parser raises that this module did not anticipate silently disables the cheap gate, and the caller is never told it ran on an unchecked pattern",
+    ),
+    Guard(
+        'a replacement cannot invent fields', CONVERT,
+        '        refuse_invented_in_replacement(existing, converted, field_path)',
+        '        pass  # replacement fields unchecked',
+        [WHOLE + "test_a_typo_in_a_replacement_object_is_refused",
+         WHOLE + "test_a_typo_inside_an_array_element_is_refused"],
+        'a typo inside a value carrying __class__ is written into the file and reported as the change the caller asked for, by every tool that takes a patch -- and the editor then refuses to open the project',
+    ),
+    Guard(
+        'raw_data checks a replacement too', RAW_TOOLS,
+        '    refuse_invented_in_replacement(existing, new_value, "/".join(path))',
+        '    pass  # replacement fields unchecked',
+        [WHOLE + "test_raw_data_refuses_one_too"],
+        "the escape hatch's own description says it refuses a field the object does not have, and it checked only the name in the path",
+    ),
+    Guard(
+        'an op with no table is refused', REGISTRY,
+        '        raise ToolError(\n            "op \\"%s\\" is accepted by %s but has no declared argument list, "',
+        '        return\n        _unused = (\n            "op \\"%s\\" is accepted by %s but has no declared argument list, "',
+        [NOOP + "test_an_op_with_no_table_entry_is_refused_not_ignored"],
+        'an op the tool accepts but the table omits has its arguments dropped and reports success, which is the failure the gate exists to prevent, reached through the gate itself',
+    ),
+    Guard(
+        'a common event read refuses page arguments', EVENT_TOOLS,
+        '        refuse_inert(\n            args, ("event_ids", "name_contains", "page"),',
+        '        _unused = (\n            args, ("event_ids", "name_contains", "page"),',
+        [READDROP + "test_a_common_event_read_refuses_page_arguments"],
+        'event_get common_event_id=N name_contains=X returns the event whether or not it matches, and the reply reads exactly like a positive match',
+    ),
+    Guard(
+        'a code lookup refuses a search', EVENT_TOOLS,
+        '        refuse_inert(args, ("search",),',
+        '        _unused = (args, ("search",),',
+        [READDROP + "test_a_code_lookup_refuses_a_search_it_would_not_run"],
+        'command_reference code=101 search=X answers for 101 alone, and the caller cannot tell that from a search that matched nothing',
+    ),
+    Guard(
+        'a filtered list says what it counted', MAP_TOOLS,
+        '    orphans = sorted(on_disk - {i for i, _ in',
+        '    orphans = [] if parent_filter is not None else sorted(on_disk - {i for i, _ in',
+        [FILTERED + "test_a_filter_does_not_claim_there_are_no_orphans"],
+        'a filtered map_list reports "no orphan map files" from a check that never ran, which is the zero that reads as "nothing looked"',
+    ),
+    Guard(
+        'unreadable events are not reported as empty', MAP_TOOLS,
+        'def unreadable_events_note(events: Any) -> "str | None":',
+        'def unreadable_events_note(events: Any) -> "str | None":\n    return None',
+        [UNREAD + "test_event_get_says_it_could_not_read_them",
+         UNREAD + "test_map_get_says_so_too",
+         UNREAD + "test_map_list_says_so_too"],
+        'a map whose @events cannot be read comes back with an empty event list on all three read tools, so a model concludes there are none',
+    ),
+    Guard(
+        'map_get answers a tiles request it cannot fill', MAP_TOOLS,
+        '    tiles = one_of(args, "tiles", list(TILE_DETAIL), TILE_DETAIL[0])',
+        '    tiles = "none"',
+        [TILESNONE + "test_asking_for_counts_says_there_is_no_table",
+         TILESNONE + "test_an_invalid_tiles_value_is_still_refused"],
+        'on a map whose tile data is not a Table the argument is dropped: no counts, no explanation, and an invalid value not even refused',
+    ),
+    Guard(
+        'event_get checks the page it was given', EVENT_TOOLS,
+        '    only_page = opt_int(args, "page", minimum=0)',
+        '    only_page = opt_int(args, "page")',
+        [PAGEARG + "test_a_negative_page_is_refused"],
+        'a negative page is accepted and filters nothing out, while event_edit refuses the same value and raw_data gives it the opposite meaning',
+    ),
+    Guard(
+        'the delete preview matches the delete', MAP_TOOLS,
+        '            "would_delete": filename if has_file else None,',
+        '            "would_delete": filename,',
+        [DELPREV + "test_the_preview_says_there_is_no_file_to_delete"],
+        "the preview promises a file deletion the real call will not perform, which this module's own comments call worse than no preview",
+    ),
+    Guard(
+        'raw_data can fill in a nil', RAW_TOOLS,
+        '    if existing is None:',
+        '    if False:',
+        [NILFILL + "test_an_object_can_replace_a_nil"],
+        'filling in a nil field is refused with "set a field inside it instead", and there is no field inside nil',
+    ),
+    Guard(
+        'a refusal cannot grow with the file', REGISTRY,
+        'def named(names: "Any", limit: int = MAX_NAMES_LISTED) -> str:',
+        'def named(names: "Any", limit: int = 10 ** 9) -> str:',
+        [BOUNDED + "test_an_unknown_field_refusal_is_capped"],
+        'an entry carrying five thousand instance variables produces a fifty-nine-kilobyte error message, from names that came out of the file',
+    ),
+    Guard(
+        'an inert regex flag is refused', SEARCH_TOOLS,
+        '        if opt_bool(args, "regex"):',
+        '        if False:',
+        [INERT + "test_regex_alongside_a_command_code_is_refused"],
+        'regex says how to read query, and a command_code search reads neither, so the flag is silently dropped',
     ),
 ]
 
