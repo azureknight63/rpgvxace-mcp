@@ -13,6 +13,11 @@ from ..project import Project
 # rejected multi-megabyte argument becomes a multi-megabyte error message.
 MAX_ECHO_CHARS = 120
 
+# How many operations one editing call applies. A batch larger than
+# this is not one a caller composed deliberately, and every op in it
+# mutates a cached file before any of them is written.
+MAX_OPS = 200
+
 
 class ToolError(ValueError):
     """A problem with the request. Reported to the model, not a server fault."""
@@ -62,12 +67,12 @@ class Context:
 
         Reading is unaffected -- dropping the cache costs one re-parse.
         """
-        keeper = StagedWrite(self.project)
+        keeper = StagedWrite(self.project, filenames)
         try:
             yield keeper
         finally:
-            if not keeper.committed:
-                for filename in filenames:
+            for filename in filenames:
+                if filename not in keeper.written:
                     self.project.forget_file(filename)
 
 
@@ -121,19 +126,31 @@ class StagedWrite:
     to commit are no longer two different things a tool can do.
     """
 
-    __slots__ = ("committed", "_project")
+    __slots__ = ("written", "_project", "_staged")
 
-    def __init__(self, project: Project) -> None:
-        self.committed = False
+    def __init__(self, project: Project, staged: "tuple[str, ...]") -> None:
+        self.written: set[str] = set()
         self._project = project
+        self._staged = staged
 
     def save(self, filename: str, *, dry_run: bool = False, tool: str = "",
              summary: str = "") -> dict[str, Any]:
-        """Write one file, and keep the staged changes if it was written."""
+        """Write one file, and keep that file's staged changes if it landed.
+
+        Per file, not per block. A single flag meant the first save to land
+        committed every staged file, so a two-file write whose second save was
+        refused kept the second file's mutation in the cache for a later write
+        to persist -- while the caller was told the whole call had failed.
+        """
+        if filename not in self._staged:
+            raise ToolError(
+                "%s was written without being staged, so a failure part-way "
+                "could not be undone. This is a bug in the tool, not in the "
+                "request." % filename)
         write = self._project.save_file(filename, dry_run=dry_run, tool=tool,
                                        summary=summary)
         if not dry_run:
-            self.committed = True
+            self.written.add(filename)
         return write
 
 
@@ -220,7 +237,44 @@ def refuse_fields(patch: dict[str, Any], fields: "tuple[str, ...]",
                             % (bare_name(key), remedy))
 
 
-def check_args(schema_def: dict[str, Any], args: dict[str, Any]) -> None:
+def refuse_unknown_fields(patch: dict[str, Any], known: "set[str]",
+                          what: str) -> None:
+    """Refuse a patch naming a field this kind of entry does not have.
+
+    ``apply_patch`` only checks that a name is a *syntactically* valid Ruby
+    ivar, so a plausible typo -- ``pirce`` for ``price`` -- used to invent a
+    new instance variable and be reported back as a successful change. The
+    editor rejects objects carrying instance variables it does not expect, and
+    ``raw_data._assign`` already refuses this on exactly those grounds: the
+    deliberately unvalidated escape hatch was stricter than the validating
+    tools.
+
+    ``known`` is drawn from the project's own data -- the fields this entry
+    already carries, or a sibling's -- rather than from a table of documented
+    field names. Two reasons: the reference tables cover the map and event
+    classes but no database class, so a documented allow-list would refuse
+    every field on every database entry; and a project whose scripts add their
+    own ivars is normal, and refusing those would break editing it.
+
+    An empty ``known`` means there was nothing to compare against, so nothing
+    is refused: this check narrows what a patch may say, and never blocks a
+    write it cannot judge.
+    """
+    if not known:
+        return
+    unknown = sorted({bare_name(key) for key in patch} - known)
+    if unknown:
+        raise ToolError(
+            "%s has no field%s %s. It carries %s. Nothing here invents a "
+            "field, because the editor rejects an object with instance "
+            "variables it does not expect -- check the spelling."
+            % (what, "s" if len(unknown) > 1 else "",
+               ", ".join(echo(u) for u in unknown),
+               ", ".join(sorted(known))))
+
+
+def check_args(schema_def: dict[str, Any], args: dict[str, Any],
+               where: str = "this tool") -> None:
     """Hold a call to the schema its tool declares.
 
     Every tool's schema says ``additionalProperties: False`` and most declare
@@ -238,14 +292,22 @@ def check_args(schema_def: dict[str, Any], args: dict[str, Any]) -> None:
     unknown = [key for key in args if key not in known]
     if unknown:
         raise ToolError(
-            "unknown argument%s %s. This tool takes %s -- check the spelling, "
-            "because an argument this tool does not know is ignored rather "
-            "than applied."
+            "unknown argument%s %s in %s. It takes %s -- check the "
+            "spelling, because an argument that is not known is ignored "
+            "rather than applied."
             % ("s" if len(unknown) > 1 else "",
-               ", ".join(echo(u) for u in sorted(unknown)),
+               ", ".join(echo(u) for u in sorted(unknown)), where,
                ", ".join(sorted(known))))
     for key, value in args.items():
         _check_declared(key, value, known[key])
+        item = (known[key].get("items") or {}) if isinstance(value, list) else {}
+        if item.get("properties"):
+            # An op inside `ops` is an argument too. Checking only the top
+            # level meant a misspelled key inside one was dropped, and for
+            # `set_commands` that emptied the page it was meant to rewrite.
+            for index, entry in enumerate(value):
+                if isinstance(entry, dict):
+                    check_args(item, entry, "%s[%d]" % (key, index))
 
 
 def _check_declared(key: str, value: Any, spec: dict[str, Any]) -> None:
@@ -309,8 +371,17 @@ def need_int(args: dict[str, Any], key: str, minimum: int | None = None,
 
 def opt_int(args: dict[str, Any], key: str, default: int | None = None,
             minimum: int | None = None, maximum: int | None = None) -> int | None:
+    """One optional integer, with the declared bounds applied to the default too.
+
+    The default is not always a constant -- a resize falls back to the map's
+    own recorded width -- and that comes out of a file this server did not
+    necessarily write. Returning it unchecked let a crafted extent straight
+    past the maximum the argument declares.
+    """
     if args.get(key) is None:
-        return default
+        if default is None:
+            return None
+        return as_int(default, "the default for %s" % key, minimum, maximum)
     return as_int(args[key], key, minimum, maximum)
 
 
@@ -328,6 +399,24 @@ def ops_arg(args: dict[str, Any], key: str = "ops") -> list[dict[str, Any]]:
             raise ToolError("%s[%d] must be an object, got %s"
                             % (key, index, echo(raw_op)))
     return ops
+
+
+def str_list(args: dict[str, Any], key: str, limit: int) -> list[str]:
+    """A list of strings, each read strictly, and bounded in length.
+
+    Coercing with ``str()`` turned a caller's nested array into the text
+    ``"['a']"`` and then looked for a file by that name, which reports the
+    wrong problem.
+    """
+    values = opt_list(args, key)
+    if len(values) > limit:
+        raise ToolError("%s lists %d entries; this server takes at most %d at "
+                        "a time" % (key, len(values), limit))
+    for index, value in enumerate(values):
+        if not isinstance(value, str):
+            raise ToolError("%s[%d] must be a string, got %s"
+                            % (key, index, echo(value)))
+    return list(values)
 
 
 def int_list(args: dict[str, Any], key: str, limit: int,

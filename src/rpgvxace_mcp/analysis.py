@@ -53,7 +53,6 @@ from .commands import (
 from .project import (
     ASSET_DIRS,
     MAX_MAP_ID,
-    MODELLED_ENGINES,
     Project,
     ProjectError,
 )
@@ -73,10 +72,16 @@ SEVERITIES = (ERROR, WARNING, INFO)
 DEFAULT_LIMIT = 200
 
 # A ceiling on findings collected, not just findings returned. A project broken
-# enough (or crafted carefully enough) to produce a finding per event command
-# would otherwise have this build millions of them to report two hundred. It is
-# far above any real project's count, so reaching it means something is wrong
-# with the project rather than with the rules.
+# enough -- or crafted carefully enough -- to produce a finding per event
+# command would otherwise build millions of them in order to report two
+# hundred. It is far above any real project's count, so reaching it means
+# something is wrong with the project rather than with the rules.
+#
+# Enforced where a finding can be produced per command or per cell walked:
+# the command walk and the asset walk, which are the only paths whose finding
+# count scales with the size of the file rather than with the number of
+# entries in a table. `validate` also stops between checks. The database
+# checks are bounded by their tables and are left to run.
 MAX_FINDINGS = 5000
 
 # Text out of a project file, quoted back in a message. A crafted event name can
@@ -584,16 +589,16 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
         findings += check_map_tree(project)
         findings += check_maps(project, ids, tables)
         findings += check_tilesets(project, ids, tables)
-    if "events" in scopes:
+    if "events" in scopes and len(findings) < MAX_FINDINGS:
         ran.append("event command structure and references (plus every common "
                    "event and troop page, which belong to the project rather "
                    "than to a map)")
         findings += check_commands(project, ids, tables)
         findings += check_event_pages(project, ids)
-    if "assets" in scopes:
+    if "assets" in scopes and len(findings) < MAX_FINDINGS:
         ran.append("graphic and audio file references")
         findings += check_assets(project, ids)
-    if "database" in scopes:
+    if "database" in scopes and len(findings) < MAX_FINDINGS:
         ran.append("database cross-references")
         findings += check_database(project, tables)
 
@@ -625,7 +630,7 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
                 "confirmed for both VX Ace and VX; commands outside that set "
                 "are not checked.",
     }
-    if project.engine not in MODELLED_ENGINES:
+    if not project.command_layouts_modelled:
         report["engine_warning"] = (
             "this is a %s project, whose event command layouts are not modelled "
             "here, so command parameter rules were skipped. Only structural and "
@@ -886,12 +891,19 @@ def check_commands(project: Project, map_ids: list[int],
     map_sizes = {map_id: (_int(m.get("width")), _int(m.get("height")))
                  for map_id, m in iter_maps(project)}
     on_disk = set(project.map_ids_on_disk())
-    check_parameters = project.engine in MODELLED_ENGINES
+    check_parameters = project.command_layouts_modelled
 
     for location, commands in iter_command_lists(project, map_ids):
+        if len(findings) >= MAX_FINDINGS:
+            break
         labels: set[str] | None = None
         indent_previous = 0
         for index, command in enumerate(commands):
+            if len(findings) >= MAX_FINDINGS:
+                # The ceiling is a collection ceiling, so it is checked here
+                # rather than at the end: one page of a million Jump to Label
+                # commands with no matching Label is a million findings.
+                break
             if not isinstance(command, RubyObject):
                 continue
             code = command.get("code", CODE_BLANK)
@@ -1183,7 +1195,20 @@ class _AssetChecker:
 
 
 def check_assets(project: Project, map_ids: list[int]) -> list[Finding]:
-    """Every graphic and audio name in the project, against the files present."""
+    """Graphic and audio names, against the files present.
+
+    Covers what an agent is most likely to break: map parallaxes and
+    battlebacks, map BGM and BGS that actually autoplay, event page character
+    graphics, Show Text faces, the four audio commands, actor character and
+    face graphics, enemy battlers, animation sheets, and tileset sheets.
+
+    Not everything: RPG::System's own graphics and sounds, pictures, titles,
+    and the graphics named by the commands that change an actor's appearance
+    or a battle's music, are not checked. Naming the subset rather than
+    claiming the whole set, because a caller who believes this is exhaustive
+    will read a clean result as "no missing assets" when it means "none of the
+    ones this looks at".
+    """
     checker = _AssetChecker(project)
     _check_map_assets(project, checker, map_ids)
     _check_command_assets(project, checker, map_ids)
@@ -1228,13 +1253,17 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
 
 def _check_command_assets(project: Project, checker: _AssetChecker,
                           map_ids: list[int]) -> None:
-    if project.engine not in MODELLED_ENGINES:
+    if not project.command_layouts_modelled:
         # An unmodelled engine's parameter layouts are different: XP's Show
         # Text keeps the message where Ace keeps the face graphic, so these
         # rules would invent a missing file for every line of dialogue.
         return
     for location, commands in iter_command_lists(project, map_ids):
+        if len(checker.findings) >= MAX_FINDINGS:
+            break
         for index, command in enumerate(commands):
+            if len(checker.findings) >= MAX_FINDINGS:
+                break
             if not isinstance(command, RubyObject):
                 continue
             code = command.get("code", CODE_BLANK)

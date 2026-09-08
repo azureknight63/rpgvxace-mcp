@@ -9,10 +9,24 @@ added to the Marshal codec, this script
   3. runs the test that is supposed to catch the regression,
   4. and requires that test to FAIL.
 
-A guard whose test still passes with the guard reverted is testing something
-else, and is reported as VACUOUS.
+Three things can go wrong, and they read alike from the outside:
+
+* VACUOUS -- the test still passes with the guard reverted, so it is checking
+  something else.
+* STALE -- the guard's anchor is no longer in the file, so nothing was
+  reverted. This happens whenever the code a guard watches is edited, which is
+  normal; leaving the guard behind is not.
+* AMBIGUOUS -- the anchor matches more than one place, so the revert hits
+  whichever comes first, which may not be the one the test walks. A guard like
+  this can report PROVEN for the wrong reason.
+
+Proving them all takes minutes, which is long enough to be tempting to skip
+after an edit. ``--check`` validates every anchor against its file in well
+under a second and catches STALE and AMBIGUOUS immediately, so run that after
+touching anything a guard watches.
 
     python scripts/prove_guards.py            # prove them all
+    python scripts/prove_guards.py --check    # anchors only, seconds
     python scripts/prove_guards.py --list     # just list what is proven
 """
 
@@ -94,6 +108,9 @@ TALLY = "tests/test_tools.py::TestFindingCountsAreTrustworthy::"
 REDOS = "tests/test_tools.py::TestSearchRefusesTheHangingPattern::"
 DELSTALE = "tests/test_tools.py::TestDeletingRespectsStaleness::"
 CANON = "tests/test_tools.py::TestMapIdsAreCanonical::"
+FIELD = "tests/test_tools.py::TestAPatchCannotInventAField::"
+PERFILE = "tests/test_tools.py::TestStagingIsPerFile::"
+BOUND = "tests/test_tools.py::TestCollectionIsBounded::"
 
 GUARDS = [
     Guard(
@@ -413,11 +430,8 @@ GUARDS = [
     ),
     Guard(
         "schema report names this engine", MISC_TOOLS,
-        '                "come from the RGSS reference for %s where one exists; a field "\n'
-        '                "with an empty description is real but undocumented here."\n'
-        "                % ctx.project.profile.label,",
-        '                "come from the RGSS2 reference where one exists; a field "\n'
-        '                "with an empty description is real but undocumented here.",',
+        '                "from the RGSS reference for %s where one exists, which covers "',
+        '                "from the RGSS reference for a VX-family engine, which covers "',
         [PROV + "test_the_report_names_this_project_s_engine"],
         "an Ace project is told its field descriptions come from the VX "
         "reference",
@@ -639,8 +653,8 @@ GUARDS = [
     ),
     Guard(
         "missing means absent, not unparseable", ANALYSIS,
-        "    if map_id not in on_disk:",
-        "    if map_id not in map_sizes:",
+        '    if map_id not in on_disk:\n        return [_missing(',
+        '    if map_id not in map_sizes:\n        return [_missing(',
         [VMISS + "test_a_transfer_to_an_unparseable_map_is_not_called_missing"],
         "a map that exists but will not parse is reported as not existing, which "
         "sends an agent recreating a file that is already there",
@@ -705,10 +719,8 @@ GUARDS = [
     ),
     Guard(
         "a change that did not land is not kept", REGISTRY,
-        "            if not keeper.committed:\n"
-        "                for filename in filenames:\n"
-        "                    self.project.forget_file(filename)",
-        "            pass  # rollback removed",
+        '                    self.project.forget_file(filename)',
+        '                    pass  # rollback removed',
         [STAGE + "test_a_dry_run_leaves_nothing_behind",
          STAGE + "test_a_failed_op_batch_leaves_nothing_behind",
          STAGE + "test_a_resize_dry_run_does_not_discard_cached_tiles"],
@@ -718,8 +730,8 @@ GUARDS = [
     ),
     Guard(
         "database entry ids are bounded", DB_TOOLS,
-        '        _check_id(table, entry_id, request.container, request.kind)',
-        '        pass  # check removed',
+        '    else:\n        _check_id(table, entry_id, request.container, request.kind)',
+        '    else:\n        pass  # check removed',
         [DBID + "test_a_negative_create_id_is_refused",
          DBID + "test_a_huge_create_id_is_refused",
          DBID + "test_slot_zero_is_refused"],
@@ -892,8 +904,8 @@ GUARDS = [
     ),
     Guard(
         "raw_data sees the @ spelling too", MISC_TOOLS,
-        '    if len(path) == 1 and _bare_name(path[0]) in STRUCTURAL_MAP_PATHS:',
-        '    if len(path) == 1 and path[0] in STRUCTURAL_MAP_PATHS:',
+        '    if path and _bare_name(path[0]) in STRUCTURAL_MAP_PATHS:',
+        '    if path and path[0] in STRUCTURAL_MAP_PATHS:',
         [ATFIELD + "test_raw_data_cannot_reach_a_structural_field"],
         'the same bypass on the escape hatch: path "@width" reaches the '
         'field this refuses',
@@ -912,8 +924,8 @@ GUARDS = [
     ),
     Guard(
         "an update cannot move an entry id", DB_TOOLS,
-        '    request.refuse_id_patch(patch, entry_id)',
-        '    pass  # check removed',
+        '    entry = request.require(entry_id, "update")\n    request.refuse_id_patch(patch, entry_id)',
+        '    entry = request.require(entry_id, "update")\n    pass  # check removed',
         [EVERY + "test_updating_an_entry_cannot_move_its_id"],
         "the refusal existed only on the create path, though the tool's own "
         'docstring said a patch could not move an id',
@@ -929,7 +941,7 @@ GUARDS = [
     ),
     Guard(
         "the hanging pattern shape is refused", MISC_TOOLS,
-        '    _refuse_nested_quantifier(query)',
+        '    _refuse_repeated_group(query)',
         '    pass  # check removed',
         [REDOS + "test_a_nested_quantifier_is_refused"],
         'a repeated group that itself repeats backtracks exponentially and '
@@ -959,6 +971,61 @@ GUARDS = [
         [CANON + "test_an_id_always_names_a_file_that_exists"],
         'Map1, Map01 and Map001 all parse as id 1, so one cached map is '
         'walked once per file and an id names a file that is not there',
+    ),
+    Guard(
+        "a patch cannot invent a field", REGISTRY,
+        '    unknown = sorted({bare_name(key) for key in patch} - known)',
+        '    unknown = []',
+        [FIELD + "test_a_misspelled_field_is_refused_and_the_real_one_listed",
+         FIELD + "test_a_blank_create_is_judged_against_a_sibling",
+         FIELD + "test_a_map_patch_is_judged_too"],
+        "a plausible typo adds an instance variable and is reported as a "
+        "successful change, and the editor then rejects the object for "
+        "carrying a field it does not expect",
+    ),
+    Guard(
+        "staging commits one file at a time", REGISTRY,
+        '                if filename not in keeper.written:',
+        '                if keeper.written and False:',
+        [PERFILE + "test_a_refused_second_save_discards_only_its_own_file"],
+        "the first save to land commits every staged file, so a two-file "
+        "write whose second save is refused keeps that file's mutation in "
+        "the cache while the caller is told nothing happened",
+    ),
+    Guard(
+        "a repeated group is refused", MISC_TOOLS,
+        '            if after < len(pattern) and pattern[after] in _QUANTIFIERS:',
+        '            if False:',
+        [REDOS + "test_a_nested_quantifier_is_refused"],
+        "the shapes that backtrack exponentially -- ((a+))+, (?:a+)+, "
+        "(a|a)+ -- walk straight past a flat pattern test, and a match in "
+        "progress cannot be interrupted",
+    ),
+    Guard(
+        "an op's own keys are checked", REGISTRY,
+        '        if item.get("properties"):',
+        '        if False:',
+        [SHAPE + "test_a_misspelled_key_inside_an_op_is_refused"],
+        "a misspelled key inside an op is dropped, and for set_commands "
+        "that leaves the page it was meant to rewrite holding one blank "
+        "command",
+    ),
+    Guard(
+        "an empty command list is refused", EVENT_TOOLS,
+        '    entries = opt_list(raw_op, "commands")\n    if not entries:',
+        '    entries = opt_list(raw_op, "commands")\n    if False:',
+        [SHAPE + "test_an_empty_command_list_is_refused"],
+        "set_commands with no commands leaves the page holding a lone "
+        "blank command and reports it as a rewrite",
+    ),
+    Guard(
+        "findings stop being collected at the ceiling", ANALYSIS,
+        '            if len(findings) >= MAX_FINDINGS:',
+        '            if False:',
+        [BOUND + "test_a_flood_of_findings_stops_at_the_ceiling"],
+        "the ceiling bounds only what is returned, so a page of broken "
+        "jumps builds a finding per command -- tens of thousands of them "
+        "-- in order to report ten",
     ),
 ]
 
@@ -1017,15 +1084,53 @@ def prove(guard: Guard) -> tuple[bool, str]:
         return True, (first[0].strip() if first else "failed as expected")
 
 
+def check_anchors(guards: list[Guard]) -> int:
+    """Report any guard whose anchor no longer matches its file exactly once.
+
+    Editing the code a guard watches is normal; leaving the guard behind is
+    not. A stale anchor reverts nothing and so proves nothing, and an anchor
+    that matches twice reverts whichever copy comes first -- which may not be
+    the one the test walks. Both read exactly like a guard that passes, and a
+    full run takes twenty minutes to say so, which is long enough that it is
+    tempting not to. This says it in seconds, so there is no excuse.
+    """
+    problems = []
+    for guard in guards:
+        source = (ROOT / guard.file).read_text(encoding="utf-8")
+        found = source.count(guard.present)
+        if found == 0:
+            problems.append((guard.name, "STALE: no longer in %s" % guard.file))
+        elif found > 1:
+            problems.append((guard.name,
+                             "AMBIGUOUS: matches %d places in %s, so the "
+                             "revert may hit the wrong one"
+                             % (found, guard.file)))
+    for name, detail in problems:
+        print("PROBLEM  %-46s %s" % (name, detail))
+    if problems:
+        print()
+        print("%d of %d anchors need attention. Re-anchor them to the code "
+              "as it now reads, then prove them." % (len(problems), len(guards)))
+        return 1
+    print("All %d anchors match their file exactly once." % len(guards))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true",
                         help="List the guards without proving them.")
     parser.add_argument("--only", metavar="TEXT",
                         help="Only guards whose name contains TEXT.")
+    parser.add_argument("--check", action="store_true",
+                        help="Only check that every anchor still matches its "
+                             "file exactly once. Runs no tests, so it is "
+                             "seconds rather than minutes.")
     args = parser.parse_args()
 
     guards = [g for g in GUARDS if not args.only or args.only.lower() in g.name.lower()]
+    if args.check:
+        return check_anchors(guards)
     if args.list:
         for guard in guards:
             print("%-46s %s" % (guard.name, ", ".join(guard.tests)))

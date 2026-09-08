@@ -87,7 +87,11 @@ class TestProjectInfo(ToolTest):
         # this project should have a description.
         game_map = info["schema"]["classes"]["RPG::Map"]
         self.assertTrue(game_map["fields"]["width"])
-        self.assertEqual(game_map["undocumented_fields"], [])
+        self.assertEqual(game_map["fields_without_a_description"], [])
+        # And a database class has no reference table, so all of its fields
+        # are listed without one -- which does not make them any less real.
+        self.assertTrue(actor["fields_without_a_description"])
+        self.assertIn("class_id", actor["fields_without_a_description"])
         self.assertEqual(len(info["schema"]["map_layers"]), 4 if self.ace else 3)
 
     def test_table_list_matches_the_engine(self):
@@ -2089,6 +2093,26 @@ class TestArgumentShapeIsEnforced(ToolTest):
         self.assertIn("tiles", message)
         self.assertIn("include_events", message)
 
+    def test_a_misspelled_key_inside_an_op_is_refused(self):
+        """An op's own keys are arguments too. Checking only the top level
+        meant a misspelled one was dropped -- and for set_commands that left
+        the page it was meant to rewrite holding one blank command."""
+        before = self.data_bytes("Items")
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_edit", table="items",
+                      ops=[{"op": "update", "id": 1, "pach": {"price": 9}}])
+        self.assertIn("ops[0]", str(caught.exception))
+        self.assertEqual(self.data_bytes("Items"), before)
+
+    def test_an_empty_command_list_is_refused(self):
+        game_map = self.project.load_map(1)
+        event_id = game_map.get("events").sorted_items()[0][0]
+        with self.assertRaises(ToolError) as caught:
+            self.call("event_edit", map_id=1, ops=[
+                {"op": "set_commands", "event_id": event_id, "page": 0,
+                 "commands": []}])
+        self.assertIn("at least one command", str(caught.exception))
+
     def test_a_declared_bound_is_enforced(self):
         with self.assertRaises(ToolError) as caught:
             self.call("db_list", table="items", limit=10_000_000)
@@ -2232,6 +2256,114 @@ class TestMapIdsAreCanonical(ToolTest):
              (name + self.extension)).write_bytes(data)
         ids = Project(self.tmp / "project").map_ids_on_disk()
         self.assertEqual(ids.count(1), 1, ids)
+
+class TestAPatchCannotInventAField(ToolTest):
+    """apply_patch only checks that a name is a valid Ruby ivar, so a
+    plausible typo used to add an instance variable and be reported back as a
+    successful change -- while raw_data, the deliberately unvalidated escape
+    hatch, refused exactly that on the grounds that the editor rejects an
+    object carrying ivars it does not expect."""
+
+    def test_a_misspelled_field_is_refused_and_the_real_one_listed(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_edit", table="items",
+                      ops=[{"op": "update", "id": 1, "patch": {"pirce": 900}}])
+        message = str(caught.exception)
+        self.assertIn("no field", message)
+        self.assertIn("price", message, "the message should list the real one")
+
+    def test_the_real_field_still_works_in_either_spelling(self):
+        for key in ("price", "@price"):
+            with self.subTest(key=key):
+                self.call("db_edit", table="items",
+                          ops=[{"op": "update", "id": 1, "patch": {key: 900}}])
+        self.assertEqual(self.reopen().project.get_entry("items", 1).get("price"),
+                         900)
+
+    def test_a_blank_create_is_judged_against_a_sibling(self):
+        """A blank entry has no fields of its own, so what the table's other
+        entries carry is the only authority for this class."""
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_edit", table="items",
+                      ops=[{"op": "create", "patch": {"nmae": "X"}}])
+        self.assertIn("no field", str(caught.exception))
+        self.call("db_edit", table="items",
+                  ops=[{"op": "create", "patch": {"name": "Fine"}}])
+
+    def test_a_map_patch_is_judged_too(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("map_edit", op="update", map_id=1,
+                      patch={"disable_dashng": True})
+        self.assertIn("no field", str(caught.exception))
+        self.call("map_edit", op="update", map_id=1,
+                  patch={"disable_dashing": True})
+
+class TestStagingIsPerFile(ToolTest):
+    """A two-file write must not keep the file whose save was refused.
+
+    One commit flag for the whole block meant the first save to land committed
+    every staged file, so a rename whose MapInfos save was refused stayed in
+    the cache -- while the caller was told the whole call had failed -- for the
+    next write of that file to persist.
+    """
+
+    def make_stale(self, filename):
+        """Leave a file valid, different, and wearing its old timestamp."""
+        import os
+        path = self.project.path_for(filename)
+        self.project.load_file(filename)          # cache the current value
+        stat = path.stat()
+        edited = marshal_rb.load(path.read_bytes())
+        entry = edited.sorted_items()[0][1] if hasattr(edited, "sorted_items")             else edited[1]
+        entry.set("name", self.project.codec.make_string("ChangedOnDisk"))
+        path.write_bytes(marshal_rb.dump(edited))
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    def test_a_refused_second_save_discards_only_its_own_file(self):
+        infos_file = self.project.filename_for("map_infos")
+        before = self.project.get_entry("map_infos", 1).get("name").data
+        self.make_stale(infos_file)
+
+        with self.assertRaises((ToolError, StaleFileError)):
+            self.call("map_edit", op="resize", map_id=1, width=25, height=20,
+                      name="Renamed")
+
+        # The rename must be gone from the cache, not waiting there. Re-read
+        # from disk to see what a later write of this file would marshal.
+        after = self.project.get_entry("map_infos", 1).get("name").data
+        self.assertNotEqual(after, b"Renamed",
+                            "the refused rename is still staged")
+        self.assertNotEqual(after, before,
+                            "the cache should have been re-read from disk")
+
+class TestCollectionIsBounded(ValidateTest):
+    """MAX_FINDINGS says it is "a ceiling on findings collected, not just
+    findings returned". It has to be one: a page of broken jumps produces a
+    finding per command, so an unbounded collection builds tens of thousands
+    of objects in order to report ten."""
+
+    def test_a_flood_of_findings_stops_at_the_ceiling(self):
+        from rpgvxace_mcp.analysis import MAX_FINDINGS
+        game_map = self.project.load_map(1)
+        event = game_map.get("events").sorted_items()[0][1]
+        # Jump to Label with no matching Label: one finding each.
+        flood = [RubyObject("RPG::EventCommand",
+                            {"@code": 119, "@indent": 0,
+                             "@parameters": [
+                                 self.project.codec.make_string("nowhere")]})
+                 for _ in range(MAX_FINDINGS * 3)]
+        flood.append(RubyObject("RPG::EventCommand",
+                                {"@code": 0, "@indent": 0, "@parameters": []}))
+        event.get("pages")[0].set("list", flood)
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="flood")
+        self.ctx = self.reopen()
+
+        rows = self.call("validate", scopes=["events"], limit=10)
+        collected = sum(rows["counts"].values())
+        self.assertLessEqual(collected, MAX_FINDINGS)
+        self.assertIn("stopped_early", rows,
+                      "the caller has to be told this is not the whole picture")
 
 if __name__ == "__main__":
     unittest.main()

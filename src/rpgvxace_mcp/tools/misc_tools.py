@@ -36,6 +36,7 @@ from ..schema import (
     TILE_ID_RANGES_NOTE,
 )
 from .registry import (
+    str_list,
     int_list,
     echo,
     ARR,
@@ -62,6 +63,9 @@ from .registry import (
 # One search's ceiling on hits, on how much of a hit's text comes back, and on
 # the size of a caller-supplied pattern.
 MAX_HITS = 1000
+
+# How many files one restore may name explicitly.
+MAX_RESTORE_FILES = 200
 
 # How many database rows one listing returns. Paging is what `offset`
 # is for; a listing larger than this is not one a caller reads.
@@ -94,8 +98,9 @@ MAX_MAP_IDS = 4096
     "What this server is working on: the project root, the engine it detected, "
     "the text encoding it will read and write, which data files exist, and how "
     "many entries each table holds. Call this first. Pass include_schema to see "
-    "the fields each Ruby class actually carries in this project, which is the "
-    "authority for what db_edit patches may set.",
+    "the fields each Ruby class actually carries in this project, which is "
+    "what db_edit and map_edit patches are checked against: a patch naming a "
+    "field the entry does not have is refused rather than adding one.",
     schema({
         "include_schema": prop(BOOL, "Report the instance variables observed on "
                                      "each RPG:: class in this project."),
@@ -167,15 +172,22 @@ def _schema_report(ctx: Context, refresh: bool) -> dict[str, Any]:
         classes[cls] = {
             "fields": fields,
             "instances_seen": max(observed[cls].values()) if observed[cls] else 0,
-            "undocumented_fields": [f for f in sorted(observed[cls])
-                                    if f not in documented],
+            # Real fields that simply have no description here. Named this
+            # way round because the reference tables cover the map and event
+            # classes and no database class, so for an Item or an Actor this
+            # is every field -- which says nothing about whether a patch may
+            # set them.
+            "fields_without_a_description": [f for f in sorted(observed[cls])
+                                             if f not in documented],
         }
     report: dict[str, Any] = {
         "classes": classes,
-        "note": "Fields are those observed in this project's files. Descriptions "
-                "come from the RGSS reference for %s where one exists; a field "
-                "with an empty description is real but undocumented here."
-                % ctx.project.profile.label,
+        "note": "Fields are those observed in this project's files, and are "
+                "what a db_edit or map_edit patch may name. Descriptions come "
+                "from the RGSS reference for %s where one exists, which covers "
+                "the map and event classes; a database class has no reference "
+                "table here, so its fields are listed with empty descriptions "
+                "and are no less real for it." % ctx.project.profile.label,
         "tile_id_ranges": TILE_ID_RANGES,
         "tile_id_ranges_note": TILE_ID_RANGES_NOTE,
         "map_layers": ctx.project.profile.map_layers,
@@ -316,7 +328,6 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                                             "command": command_name(code)}):
                             return _result(hits, limit, searched, None, unsearchable)
 
-    read_any = False
     if code_filter is None and "database" in scopes:
         for key, entry in ctx.project.data_files.items():
             if entry.container not in (ARRAY, HASH):
@@ -326,7 +337,11 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             except (ProjectError, ValueError) as exc:
                 unsearchable[key] = str(exc)
                 continue
-            read_any = True
+            if "database" not in searched:
+                # On the first table that reads, so an early return inside the
+                # walk keeps it and a table that will not load does not claim
+                # it. Per-table failures are reported in `unsearchable`.
+                searched.append("database")
             for entry_id, item in rows:
                 if not isinstance(item, RubyObject):
                     continue
@@ -340,12 +355,15 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                         if add(location, text):
                             return _result(hits, limit, searched, None, unsearchable)
 
-    if code_filter is None and "database" in scopes and read_any:
-        searched.append("database")
-
     if code_filter is None and "maps" in scopes:
         try:
-            for map_id, info in ctx.project.entries("map_infos"):
+            rows = ctx.project.entries("map_infos")
+            # Recorded once the read succeeds and before the walk: after the
+            # walk, an early return on reaching the limit lost the scope the
+            # hits came from; before the read, a file that would not load
+            # claimed to have been searched.
+            searched.append("maps")
+            for map_id, info in rows:
                 if not isinstance(info, RubyObject):
                     continue
                 name = info.get("name")
@@ -353,7 +371,6 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 if text and matcher and matcher(text):
                     if add(Location("map", map_id=map_id, field="name"), text):
                         return _result(hits, limit, searched, None, unsearchable)
-            searched.append("maps")
         except (ProjectError, ValueError) as exc:
             unsearchable["map_infos"] = str(exc)
 
@@ -412,33 +429,57 @@ def _script_at(script: dict[str, Any], line: int) -> Location:
     return location
 
 
-# A quantified group that itself contains an unbounded quantifier -- (a+)+,
-# (a*)*, (\w+)* and so on. Python's `re` backtracks exponentially on these and
-# cannot be interrupted once it starts, so one of them against a long script
-# line wedges this single-threaded server for good. Length was never the
-# control: "(a+)+$" is six characters.
-_NESTED_QUANTIFIER = re.compile(r"\((?:[^()\\]|\\.)*[+*]\)\s*[+*{]")
+# The quantifiers that can repeat a group an unbounded number of times.
+_QUANTIFIERS = "+*{"
 
 
-def _refuse_nested_quantifier(pattern: str) -> None:
-    """Refuse the pattern shape that backtracks exponentially.
+def _refuse_repeated_group(pattern: str) -> None:
+    """Refuse any quantifier applied to a group.
 
-    A conservative shape test, not an analysis: it refuses some patterns that
-    would in fact have been fine. That is the right trade here, because the
-    failure it prevents is unrecoverable -- the process stops answering, and
-    the caller cannot cancel -- while a refusal costs one rephrased search.
+    Python's ``re`` backtracks exponentially on a repeated group whose body can
+    match the same text more than one way -- ``(a+)+``, ``((a+))+``,
+    ``(?:a+)+``, ``(a|a)+``, ``(a{1,2})+`` -- and a match in progress cannot be
+    interrupted, so one search wedges this single-threaded server for good.
 
-    It is also not complete, and saying so matters more than implying it is:
-    an alternation of overlapping branches (``(a|a)+``) backtracks badly and is
-    not caught by this shape. What bounds that case is the subject cap in
-    :func:`_matcher`, not this check.
+    Deciding which repeated groups are actually safe means analysing the body.
+    The earlier attempt here was a flat regex matching only the simplest
+    spelling, and every form above walked straight past it -- while its own
+    docstring claimed the subject cap covered the rest, which was not true:
+    2**2000 is not a bound. So this refuses the whole shape, scanning
+    parentheses properly and skipping escapes and character classes.
+
+    It is blunt: ``(abc)+`` is perfectly safe and is refused too. That is the
+    trade worth making, because a refusal costs one rephrased search while the
+    failure it prevents cannot be recovered from at all.
     """
-    if _NESTED_QUANTIFIER.search(pattern):
-        raise ToolError(
-            "that pattern has a repeated group that itself repeats, like "
-            "\"(a+)+\". Those can take exponential time to match and cannot "
-            "be interrupted, so this server refuses them. Rewrite it without "
-            "the inner repeat, or search for a plain substring.")
+    depth = 0
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            # Inside a character class, brackets and parens are literal.
+            index += 1
+            while index < len(pattern) and pattern[index] != "]":
+                index += 2 if pattern[index] == "\\" else 1
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+            after = index + 1
+            if after < len(pattern) and pattern[after] in _QUANTIFIERS:
+                raise ToolError(
+                    "that pattern repeats a group -- the %r after a closing "
+                    "bracket. A repeated group can take exponential time to "
+                    "match and cannot be interrupted, so this server refuses "
+                    "the shape rather than try to judge which cases are safe. "
+                    "Repeat a single character or a character class instead "
+                    "(a+ or [abc]+), or search for a plain substring."
+                    % pattern[after])
+        index += 1
+
 
 
 def _matcher(args: dict[str, Any], query: str | None):
@@ -459,7 +500,7 @@ def _matcher(args: dict[str, Any], query: str | None):
             "the pattern is %d characters, above the %d this server compiles. "
             "Search for a plain substring instead, or narrow the pattern."
             % (len(query), MAX_PATTERN_CHARS))
-    _refuse_nested_quantifier(query)
+    _refuse_repeated_group(query)
     try:
         pattern = re.compile(query, re.IGNORECASE)
     except re.error as exc:
@@ -467,11 +508,10 @@ def _matcher(args: dict[str, Any], query: str | None):
     except RecursionError:
         raise ToolError("that pattern nests too deeply to compile")
 
-    # Matched against a bounded prefix of each candidate. Refusing nested
-    # quantifiers above removes the common blow-up, but it is a shape test, not
-    # a proof -- an alternation of overlapping branches can still backtrack
-    # badly -- so the subject is capped as well. Together these bound one
-    # match; the scan loops bound how many.
+    # Matched against a bounded prefix of each candidate. This bounds the
+    # input to one match; what bounds the *shape* is the refusal above. Neither
+    # alone is enough, and the cap is not a substitute for it: exponential
+    # backtracking on a 2000-character subject is still unbounded in practice.
     def search(text: str):
         return pattern.search(text[:MAX_SUBJECT_CHARS])
 
@@ -593,8 +633,9 @@ def scripts(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         "op": prop(STR, "list, create (snapshot every data file), restore, or prune.",
                    enum=["list", "create", "restore", "prune"]),
         "backup": prop(STR, "Which snapshot to restore, as named by list."),
-        "files": prop(ARR, "For restore: only these files (default all in the "
-                           "snapshot).", items={"type": STR}),
+        "files": prop(ARR, "For restore: only these files (default all in "
+                           "the snapshot). At most %d." % MAX_RESTORE_FILES,
+                      items={"type": STR}, maxItems=MAX_RESTORE_FILES),
         "label": prop(STR, "For create: a short label added to the snapshot name."),
         "dry_run": DRY_RUN,
     }, ["op"]),
@@ -628,7 +669,7 @@ def backups(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 "kept": ctx.project.backup_keep}
     return ctx.project.restore_backup(
         need_str(args, "backup"),
-        [str(f) for f in opt_list(args, "files")] or None,
+        str_list(args, "files", MAX_RESTORE_FILES) or None,
         dry_run,
     )
 
@@ -640,7 +681,13 @@ def backups(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     "value by path, e.g. table \"system\" path \"party_members\", or map 1 path "
     '"events/1/pages/0/list/3/parameters/0". Values are the same JSON shapes '
     "db_get returns, so objects need a __class__ key. Use the purpose-built "
-    "tools where they exist: they validate, and this does not.",
+    "tools where they exist: they validate, and this does not. It still "
+    "refuses four things, because each produces a file the editor cannot open "
+    "rather than an unusual value: the scripts table (a slot body is "
+    "compressed Ruby -- use the scripts tool); a map's data, width, height or "
+    "events at any depth (use map_edit resize, map_tiles, event_edit); "
+    "swapping a structure for a scalar or the reverse; and a field the object "
+    "does not already have.",
     schema({
         "op": prop(STR, "get (default) or set.", enum=["get", "set"]),
         "table": prop(STR, "A data table name, e.g. system, actors, map_infos.",
@@ -727,9 +774,14 @@ STRUCTURAL_MAP_PATHS = ("data", "width", "height", "events")
 
 
 def _check_structural(path: list[str]) -> None:
-    # Bare, because `_resolve` accepts either spelling of an ivar and so did
-    # this check's raw comparison: path "@width" reached the field this refuses.
-    if len(path) == 1 and _bare_name(path[0]) in STRUCTURAL_MAP_PATHS:
+    """Refuse any path into a map field the rest of the map has to agree with.
+
+    At any depth, not just the first segment: replacing an event's page list
+    through "events/1/pages" produces the same map the interpreter cannot run
+    as replacing "events" wholesale. Bare names, because `_resolve` accepts
+    either spelling of an ivar.
+    """
+    if path and _bare_name(path[0]) in STRUCTURAL_MAP_PATHS:
         raise ToolError(
             "%s cannot be replaced through raw_data, because the rest of the "
             "map has to agree with it. Use map_edit op=\"resize\" for the "

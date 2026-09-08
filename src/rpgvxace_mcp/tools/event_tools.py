@@ -21,6 +21,8 @@ from ..project import MAX_MAP_ID
 from ..rubytypes import RubyHash, RubyObject, RubyString
 from ..schema import new_event, new_event_command, new_page
 from .registry import (
+    MAX_OPS,
+    refuse_unknown_fields,
     refuse_fields,
     ops_arg,
     StagedWrite,
@@ -208,7 +210,9 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                                      "apply to a common event -- the page ops "
                                      "are map-only. Pass exactly one of map_id "
                                      "or common_event_id."),
-        "ops": prop(ARR, "Operations, applied in order.", items={
+        "ops": prop(ARR, "Operations, applied in order.",
+                    maxItems=MAX_OPS, items={
+            "additionalProperties": False,
             "type": OBJ,
             "properties": {
                 "op": {"type": STR, "enum": ["create", "update", "delete", "move",
@@ -318,6 +322,12 @@ def _range_text(ids: list[int]) -> str:
     return "%d to %d" % (min(ids), max(ids))
 
 
+def _page_fields(ctx: Context, page: RubyObject) -> set[str]:
+    """What a patch to an event page may name."""
+    documented = ctx.project.profile.class_fields.get("RPG::Event::Page", {})
+    return set(page.fields()) | set(documented)
+
+
 def _check_page_patch(patch: dict[str, Any]) -> None:
     """Refuse a patch that would write a command list the tool did not build.
 
@@ -386,6 +396,8 @@ def _apply_event_op(ctx: Context, events: RubyHash, raw_op: dict[str, Any],
         patch = opt_dict(raw_op, "patch")
         if patch:
             _check_page_patch(patch)
+            refuse_unknown_fields(patch, _page_fields(ctx, page),
+                                  "a new event's first page")
             changes = apply_patch(page, patch, ctx.codec)
         if raw_op.get("commands") is not None:
             page.set("list", _build_list(ctx, raw_op["commands"]))
@@ -441,6 +453,9 @@ def _apply_event_op(ctx: Context, events: RubyHash, raw_op: dict[str, Any],
         page = normalize_strings(new_page(), ctx.codec)
         patch = opt_dict(raw_op, "patch")
         _check_page_patch(patch)
+        if patch:
+            refuse_unknown_fields(patch, _page_fields(ctx, page),
+                                  "page %d of event %d" % (page_index, event_id))
         changes = apply_patch(page, patch, ctx.codec) if patch else []
         if raw_op.get("commands") is not None:
             page.set("list", _build_list(ctx, raw_op["commands"]))
@@ -473,6 +488,10 @@ def _apply_event_op(ctx: Context, events: RubyHash, raw_op: dict[str, Any],
     if op == "set_page":
         patch = opt_dict(raw_op, "patch")
         _check_page_patch(patch)
+        if patch:
+            refuse_unknown_fields(patch, _page_fields(ctx, page),
+                                  "page %d of event %d"
+                                  % (page_index, event_id))
         changes = apply_patch(page, patch, ctx.codec) if patch else []
         if raw_op.get("commands") is not None:
             page.set("list", _build_list(ctx, raw_op["commands"]))
@@ -483,18 +502,20 @@ def _apply_event_op(ctx: Context, events: RubyHash, raw_op: dict[str, Any],
                 "summary": "updated page %d of event %d" % (page_index, event_id)}
 
     entries = opt_list(raw_op, "commands")
+    if not entries:
+        # The same refusal the common-event path makes: an empty list leaves
+        # the page holding a lone blank command, which is a deletion wearing
+        # the name of an edit.
+        raise ToolError(
+            "%s needs at least one command. To clear a page, remove it with "
+            "op \"delete_page\"." % op)
     if op == "set_commands":
         page.set("list", _build_list(ctx, entries))
         return {"op": op, "event_id": event_id, "page": page_index,
                 "commands": len(page.get("list")),
                 "summary": "rewrote page %d of event %d" % (page_index, event_id)}
 
-    existing = list(page.get("list") or [])
-    # The trailing blank command terminates the list, so new commands go before it.
-    while existing and isinstance(existing[-1], RubyObject) and \
-            (existing[-1].get("code", 0) or 0) == 0:
-        existing.pop()
-    page.set("list", existing + _build_list(ctx, entries))
+    page.set("list", _appended(ctx, page.get("list"), entries))
     return {"op": op, "event_id": event_id, "page": page_index,
             "commands": len(page.get("list")),
             "summary": "appended to page %d of event %d" % (page_index, event_id)}
@@ -532,6 +553,11 @@ def _apply_common_ops(ctx: Context, common_id: int, common: RubyObject,
             if not patch:
                 raise ToolError("update needs a patch or name")
             _check_page_patch(patch)
+            documented = ctx.project.profile.class_fields.get(
+                "RPG::CommonEvent", {})
+            refuse_unknown_fields(patch,
+                                  set(common.fields()) | set(documented),
+                                  "common event %d" % common_id)
             applied.append({"op": op,
                             "changes": apply_patch(common, patch, ctx.codec)})
             continue

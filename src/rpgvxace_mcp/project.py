@@ -401,6 +401,20 @@ class Project:
                 % ", ".join(self.rtp_unresolved))
 
     @property
+    def command_layouts_modelled(self) -> bool:
+        """Whether this project's event command parameter layouts are known.
+
+        Not a profile capability, because it cannot be one: an engine opened
+        with --allow-other-engines is *described* with the closest profile
+        available, so the profile says yes while the engine's real layouts
+        differ. XP's Show Text keeps the message where Ace keeps the face
+        graphic, which is the difference that matters. So this is one named
+        fact about the open project, asked in the three places that care,
+        rather than an engine-string comparison spelled out at each of them.
+        """
+        return self.engine in MODELLED_ENGINES
+
+    @property
     def assets_complete(self) -> bool:
         """Whether every asset this project can reference is visible to us.
 

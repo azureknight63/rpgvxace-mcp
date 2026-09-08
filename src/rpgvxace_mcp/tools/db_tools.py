@@ -9,8 +9,11 @@ from ..analysis import REFERENCE_RULES, find_references
 from ..convert import apply_patch, to_json
 from ..project import ProjectError
 from ..rubytypes import RubyObject, RubyString
-from ..schema import SINGLE, ALL_DATABASE_TABLES, ALL_TABLE_KEYS, ARRAY, HASH
+from ..schema import ALL_DATABASE_TABLES, ALL_TABLE_KEYS, ARRAY, HASH, SCRIPTS, SINGLE
 from .registry import (
+    bare_name,
+    MAX_OPS,
+    refuse_unknown_fields,
     opt_dict,
     ops_arg,
     echo,
@@ -67,6 +70,9 @@ ARRAY_GROWTH_HEADROOM = 1000
 # How many ids one db_get call will fetch. Each one is a lookup plus its own
 # JSON conversion budget.
 MAX_IDS_PER_CALL = 200
+
+# How many extra field names one listing looks up per row.
+MAX_EXTRA_FIELDS = 32
 
 # How many rows one listing returns. `offset` is what paging is for; a listing
 # larger than this is not one a caller reads.
@@ -134,8 +140,10 @@ def _brief_field(ctx: Context, value: Any) -> Any:
                                    "(case-insensitive)."),
         "id_from": prop(INT, "Lowest id to include."),
         "id_to": prop(INT, "Highest id to include."),
-        "fields": prop(ARR, "Extra field names to include for each entry, beyond "
-                            "the defaults for the table.", items={"type": STR}),
+        "fields": prop(ARR, "Extra field names to include for each entry, "
+                            "beyond the defaults for the table. At most %d."
+                            % MAX_EXTRA_FIELDS, items={"type": STR},
+                       maxItems=MAX_EXTRA_FIELDS),
         "limit": prop(INT, "Maximum entries to return (default 50, at most "
                            "%d)." % MAX_ROWS, minimum=1, maximum=MAX_ROWS),
         "offset": prop(INT, "Skip this many matching entries first.",
@@ -216,6 +224,11 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         raise ToolError("this %s project has no %r table; it has %s"
                         % (ctx.project.profile.label, table,
                            ", ".join(sorted(ctx.project.data_files))))
+    if ctx.project.data_files[table].container == SCRIPTS:
+        raise ToolError(
+            "the scripts table holds zlib-compressed Ruby, which this tool "
+            "would hand back as base64. Use the scripts tool, which inflates "
+            "and decodes it.")
     refresh = opt_bool(args, "refresh")
     mode = one_of(args, "tables", ["summary", "full"], "summary")
 
@@ -262,7 +275,9 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                            "here: a tree entry and its Map### file have to "
                            "change together, so use map_edit for those.",
                       enum=EDITABLE_DATABASE_TABLES),
-        "ops": prop(ARR, "Operations, applied in order.", items={
+        "ops": prop(ARR, "Operations, applied in order.",
+                    maxItems=MAX_OPS, items={
+            "additionalProperties": False,
             "type": OBJ,
             "properties": {
                 "op": {"type": STR, "enum": ["update", "create", "delete"]},
@@ -358,6 +373,22 @@ class _DbRequest:
                   existing=existing)
         return entry_id
 
+    def fields_of(self, entry: Any) -> set[str]:
+        """The bare field names an entry carries, if it is an object at all."""
+        return set(entry.fields()) if isinstance(entry, RubyObject) else set()
+
+    def sibling_fields(self) -> set[str]:
+        """The fields any existing entry in this table carries.
+
+        What a blank create is judged against: the class model documents no
+        database class, so the project's own entries are the only authority
+        for which fields one of these has.
+        """
+        for _, row in self.ctx.project.entries(self.table):
+            if isinstance(row, RubyObject):
+                return set(row.fields())
+        return set()
+
     def refuse_id_patch(self, patch: dict[str, Any], entry_id: int) -> None:
         """Refuse a patch that would move an entry's own id.
 
@@ -367,11 +398,14 @@ class _DbRequest:
         """
         if not _carries_id(self.kind):
             return
-        if patch.get("id") not in (None, entry_id):
+        # Bare, like every other refusal list: "@id" is the same field.
+        given = next((patch[key] for key in patch
+                      if bare_name(key) == "id"), None)
+        if given not in (None, entry_id):
             raise ToolError(
                 "the patch sets id %s but this entry lives in slot %d; an RGSS "
                 "entry's id is its position, so leave id out of the patch"
-                % (echo(patch.get("id")), entry_id))
+                % (echo(given), entry_id))
 
     def require(self, entry_id: int, op: str) -> Any:
         """The entry at an id, or a refusal naming what to do instead."""
@@ -389,6 +423,8 @@ def _op_update(request: _DbRequest, raw_op: dict[str, Any],
     entry_id = request.entry_id(raw_op, "update", existing=True)
     entry = request.require(entry_id, "update")
     request.refuse_id_patch(patch, entry_id)
+    refuse_unknown_fields(patch, request.fields_of(entry),
+                          "%s entry %d" % (request.table, entry_id))
     changes = apply_patch(entry, patch, request.ctx.codec)
     return {"op": "update", "id": entry_id, "changes": changes}
 
@@ -400,6 +436,9 @@ def _op_create(request: _DbRequest, raw_op: dict[str, Any],
     entry_id = opt_int(raw_op, "id")
     if entry_id is None:
         entry_id = _next_free_id(request.container, request.kind)
+        # Checked too: a hash-keyed table's existing keys come out of a file,
+        # so the id derived from them is not automatically a usable one.
+        _check_id(table, entry_id, request.container, request.kind)
     else:
         _check_id(table, entry_id, request.container, request.kind)
         if ctx.project.get_entry(table, entry_id) is not None:
@@ -422,6 +461,12 @@ def _op_create(request: _DbRequest, raw_op: dict[str, Any],
             "complains, create it with clone_from instead."
             % (entry_id, ctx.project.data_files[table].cls))
 
+    if patch:
+        # A clone knows its own fields; a blank entry has none, so a sibling
+        # in the same table is what says which fields this class carries.
+        refuse_unknown_fields(patch, request.fields_of(entry) or
+                              request.sibling_fields(),
+                              "a new %s entry" % table)
     changes = apply_patch(entry, patch, ctx.codec) if patch else []
     if isinstance(entry, RubyObject) and _carries_id(request.kind):
         # After the patch, and unconditionally: every RGSS entry in an
