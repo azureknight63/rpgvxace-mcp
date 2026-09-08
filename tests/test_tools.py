@@ -22,8 +22,23 @@ from rpgvxace_mcp.project import (  # noqa: E402
     ReadOnlyError,
     StaleFileError,
 )
-from rpgvxace_mcp.rubytypes import RubyObject, RubyString  # noqa: E402
-from rpgvxace_mcp.tools import db_tools, event_tools, map_tools, misc_tools  # noqa: E402,F401
+from rpgvxace_mcp.rubytypes import RubyObject, RubyString, Table  # noqa: E402
+from rpgvxace_mcp import convert  # noqa: E402
+from rpgvxace_mcp.convert import ConversionError  # noqa: E402
+from rpgvxace_mcp.schema import PROFILES  # noqa: E402
+from rpgvxace_mcp.tools.search_tools import MAX_SUBJECT_CHARS  # noqa: E402
+from rpgvxace_mcp.tools import pattern_safety  # noqa: E402
+from rpgvxace_mcp.tools.pattern_safety import (  # noqa: E402
+    PatternTooCostly,
+    check_pattern,
+)
+from rpgvxace_mcp.tools import (  # noqa: E402,F401
+    db_tools,
+    event_tools,
+    map_tools,
+    misc_tools,
+    raw_tools,
+)
 from rpgvxace_mcp.tools.registry import Context, REGISTRY, ToolError  # noqa: E402
 
 
@@ -116,7 +131,7 @@ class TestProjectInfo(ToolTest):
 class TestDatabase(ToolTest):
     def test_list_summarises_entries(self):
         result = self.call("db_list", table="items")
-        self.assertEqual(result["total_entries"], 2)
+        self.assertEqual(result["matching_entries"], 2)
         first = result["entries"][0]
         self.assertEqual((first["id"], first["name"], first["price"]), (1, "Potion", 50))
 
@@ -774,7 +789,7 @@ class TestReadOnly(ToolTest):
     read_only = True
 
     def test_reads_work(self):
-        self.assertEqual(self.call("db_list", table="items")["total_entries"], 2)
+        self.assertEqual(self.call("db_list", table="items")["matching_entries"], 2)
 
     def test_writes_are_refused(self):
         with self.assertRaises(ReadOnlyError):
@@ -967,7 +982,7 @@ class TestAceTilesets(ToolTest):
 
     def test_map_names_its_tileset(self):
         properties = self.call("map_get", map_id=2)
-        self.assertEqual(properties["unknown_fields"].count("tileset_id"), 1)
+        self.assertEqual(properties["other_fields"].count("tileset_id"), 1)
         raw = self.call("raw_data", map_id=2, path="tileset_id")
         self.assertEqual(raw["value"], 2)
 
@@ -2104,6 +2119,20 @@ class TestArgumentShapeIsEnforced(ToolTest):
         self.assertIn("ops[0]", str(caught.exception))
         self.assertEqual(self.data_bytes("Items"), before)
 
+    def test_a_declared_bound_inside_an_op_is_enforced(self):
+        """The part of the recursion nothing else covers.
+
+        An unknown key inside an op is refused twice over now -- by this
+        recursion and by the per-op applicability check -- but a key that is
+        real and out of range is only caught here. So the bounds each handler
+        enforces are declared in the ops item too, and this is the test that
+        walks them.
+        """
+        with self.assertRaises(ToolError) as caught:
+            self.call("event_edit", map_id=1, dry_run=True, ops=[
+                {"op": "move", "event_id": 10 ** 9, "x": 1, "y": 1}])
+        self.assertIn("at most", str(caught.exception))
+
     def test_an_empty_command_list_is_refused(self):
         game_map = self.project.load_map(1)
         event_id = game_map.get("events").sorted_items()[0][0]
@@ -2204,7 +2233,12 @@ class TestSearchRefusesTheHangingPattern(ToolTest):
             with self.subTest(pattern=pattern):
                 with self.assertRaises(ToolError) as caught:
                     self.call("search", query=pattern, regex=True)
-                self.assertIn("repeated group", str(caught.exception))
+                message = str(caught.exception)
+                # The shape it found, and the reason a refusal is the answer:
+                # the message names one or the other of these depending on
+                # whether the cost is in the nesting or in a chain.
+                self.assertIn("repeats a group", message)
+                self.assertIn("cannot be interrupted", message)
 
     def test_an_ordinary_pattern_still_works(self):
         result = self.call("search", query="Welcome|Potion", regex=True)
@@ -2367,3 +2401,1049 @@ class TestCollectionIsBounded(ValidateTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInapplicableArgumentsAreRefused(ToolTest):
+    """An argument the chosen op does not read must be refused, not dropped.
+
+    A dropped argument reports the same success as one that was applied, so a
+    caller cannot tell that half its request vanished -- and will not retry
+    what it believes already happened. `event_edit` op "update" reading a name
+    and ignoring `commands` was the worst of these: the rename landed, the
+    command list did not, and the reply said "updated event 1".
+    """
+
+    def test_event_update_will_not_quietly_drop_commands(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("event_edit", map_id=1, dry_run=True, ops=[
+                {"op": "update", "event_id": 1, "name": "Quiet",
+                 "commands": [{"text": "hello"}]}])
+        message = str(caught.exception)
+        self.assertIn("commands", message)
+        # And it says which ops do read it, so the caller can split the request.
+        self.assertIn("set_commands", message)
+
+    def test_db_delete_will_not_quietly_drop_a_patch(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_edit", table="actors", dry_run=True, ops=[
+                {"op": "delete", "id": 1, "patch": {"name": "Gone"}}])
+        self.assertIn("patch", str(caught.exception))
+
+    def test_map_delete_will_not_quietly_drop_anything(self):
+        for extra in ({"patch": {"encounter_step": 9}}, {"name": "Renamed"},
+                      {"width": 30}, {"parent_id": 1}):
+            with self.subTest(extra=sorted(extra)):
+                with self.assertRaises(ToolError) as caught:
+                    self.call("map_edit", op="delete", map_id=3, dry_run=True,
+                              **extra)
+                self.assertIn(sorted(extra)[0], str(caught.exception))
+
+    def test_map_update_will_not_quietly_drop_a_reparent(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("map_edit", op="update", map_id=1, dry_run=True,
+                      patch={"encounter_step": 25}, parent_id=2)
+        self.assertIn("parent_id", str(caught.exception))
+
+    def test_an_op_that_does_read_it_still_works(self):
+        # The gate must not refuse the combinations that are real: a resize
+        # may carry a patch and a rename, because it is one file write either
+        # way.
+        out = self.call("map_edit", op="resize", map_id=1, width=21,
+                        patch={"encounter_step": 9}, name="Renamed",
+                        dry_run=True)
+        self.assertIn("resized from 20x15 to 21x15", out["changes"])
+
+    def test_every_op_in_the_schema_has_a_table_entry(self):
+        """A new op must not be able to land without declaring what it reads.
+
+        The op names and the table are the same dict now, but the argument
+        names in each set are written by hand, so this also holds them to the
+        schema: a set naming an argument the schema does not declare would
+        refuse nothing, and check_args would have refused it first.
+        """
+        for tool_name, key, table in (
+                ("event_edit", "ops", event_tools.EVENT_OP_ARGS),
+                ("db_edit", "ops", db_tools.DB_OP_ARGS),
+                ("map_edit", None, map_tools.MAP_OP_ARGS)):
+            with self.subTest(tool=tool_name):
+                properties = REGISTRY[tool_name].schema["properties"]
+                if key:
+                    properties = properties[key]["items"]["properties"]
+                declared = set(properties)
+                self.assertEqual(set(properties["op"]["enum"]), set(table))
+                for op, reads in table.items():
+                    self.assertLessEqual(reads, declared,
+                                         "%s op %s names an argument the "
+                                         "schema does not declare" % (tool_name, op))
+                # And the other direction, which is this round's whole defect:
+                # an argument the schema advertises that no op reads would be
+                # accepted by check_args, refused by nothing, and dropped.
+                never_read = declared - set().union(*table.values())
+                self.assertEqual(
+                    never_read, set(),
+                    "%s declares %s, which no op reads -- it would be "
+                    "accepted and ignored"
+                    % (tool_name, ", ".join(sorted(never_read))))
+
+
+class TestANestedPatchCannotInventAField(ToolTest):
+    """A typo one level down must be refused like a typo at the top.
+
+    `refuse_unknown_fields` compares the patch's top-level keys, and
+    `apply_patch` merges nested dicts field by field, so
+    {"bgm": {"nmae": "Town"}} added @nmae to the RPG::BGM and reported
+    `bgm.nmae: <unset> -> "Town"` as the change asked for. The editor rejects
+    an object carrying instance variables it does not expect, so that write
+    produces a project that will not open.
+    """
+
+    def test_a_nested_typo_is_refused(self):
+        with self.assertRaises((ToolError, ConversionError)) as caught:
+            self.call("map_edit", op="update", map_id=1,
+                      patch={"bgm": {"nmae": "Town1"}})
+        message = str(caught.exception)
+        self.assertIn("nmae", message)
+        self.assertIn("RPG::BGM", message)
+
+    def test_the_field_is_not_left_behind(self):
+        with self.assertRaises((ToolError, ConversionError)):
+            self.call("map_edit", op="update", map_id=1,
+                      patch={"bgm": {"nmae": "Town1"}})
+        bgm = self.reopen().project.load_map(1).get("bgm")
+        self.assertFalse(bgm.has("nmae"))
+
+    def test_a_real_nested_field_still_merges(self):
+        out = self.call("map_edit", op="update", map_id=1,
+                        patch={"bgm": {"volume": 55}})
+        self.assertIn("bgm.volume: 100 -> 55", out["changes"])
+        self.assertEqual(self.reopen().project.load_map(1).get("bgm").get("volume"), 55)
+
+
+class TestAddPageRefusesInsteadOfCrashing(ToolTest):
+    """add_page with a misspelled patch field must refuse, not raise.
+
+    The refusal message named a page index that is only assigned further down,
+    for the ops that act on an existing page, so this raised UnboundLocalError
+    -- which server.py does not catch, so the model was told the server is
+    broken rather than that it made a typo.
+    """
+
+    def test_a_misspelled_field_is_refused(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("event_edit", map_id=1, dry_run=True, ops=[
+                {"op": "add_page", "event_id": 1,
+                 "patch": {"trigggger": 3}}])
+        self.assertIn("trigggger", str(caught.exception))
+
+    def test_add_page_with_a_real_patch_works(self):
+        out = self.call("event_edit", map_id=1, ops=[
+            {"op": "add_page", "event_id": 1, "patch": {"trigger": 2}}])
+        self.assertEqual(out["applied"][0]["op"], "add_page")
+
+
+class TestSearchPatternsStayFast(ToolTest):
+    """The corpus pattern_safety's docstring points at.
+
+    A shape-based gate cannot be checked by reading it, so this measures: every
+    pattern the module allows must finish quickly against the worst subject it
+    will ever see, and every chain that can be made to backtrack must be
+    refused. Python's `re` cannot be interrupted, so a pattern that is merely
+    slow here is a server that has to be killed in production.
+    """
+
+    ATTACKS = (
+        "a?" * 24 + "b",
+        "a?" * 40 + "b",
+        "(a|ab)" * 20 + "z",
+        "(a+)+b",
+        "((a+))+b",
+        "(?:a+)+b",
+        "(a|a)+b",
+        "(a{1,2})+b",
+        "(a*)*b",
+        "(a|b|ab)*c",
+        r"(\w+\s?)*$",
+        "a{0,500}a{0,500}a{0,500}b",
+        "[a-z]+[a-z]+[a-z]+[a-z]+!",
+        "(x+x+)+y",
+    )
+
+    ORDINARY = (
+        r"\bHP\b", "Sword|Blade|Axe", r"^\s*#", "[Ff]ire.*damage",
+        r"Gold\s+\d+", r"(fire|ice)\s*bolt", "Fire.*Sword.*Shield",
+        r"\d{1,3} damage", "Potion", r"actor_\d+", r"[A-Z][a-z]+",
+        r"\w+@\w+", "self_switch", r"item\s*=\s*\d+", ".*",
+        "(?:Elixir|Potion)s?", r"[0-9]+\.[0-9]+",
+    )
+
+    # Subjects chosen to be the worst case for the shapes above: a long run of
+    # one character is what makes a chain of optional atoms backtrack.
+    SUBJECTS = ("a" * MAX_SUBJECT_CHARS, "ab" * (MAX_SUBJECT_CHARS // 2),
+                "a" * (MAX_SUBJECT_CHARS - 1) + "!", " " * MAX_SUBJECT_CHARS)
+
+    # Generous enough not to be flaky on a loaded machine, and far below the
+    # tens of seconds the refused patterns take.
+    BUDGET_SECONDS = 2.0
+
+    def test_every_backtracking_chain_is_refused(self):
+        for pattern in self.ATTACKS:
+            with self.subTest(pattern=pattern[:30]):
+                with self.assertRaises(PatternTooCostly):
+                    check_pattern(pattern)
+
+    def test_every_allowed_pattern_finishes_quickly(self):
+        import re
+        import time
+        for pattern in self.ORDINARY:
+            with self.subTest(pattern=pattern):
+                check_pattern(pattern)         # must not refuse a real pattern
+                compiled = re.compile(pattern, re.IGNORECASE)
+                start = time.perf_counter()
+                for subject in self.SUBJECTS:
+                    compiled.search(subject[:MAX_SUBJECT_CHARS])
+                elapsed = time.perf_counter() - start
+                self.assertLess(elapsed, self.BUDGET_SECONDS,
+                                "%r took %.2fs against %d subjects"
+                                % (pattern, elapsed, len(self.SUBJECTS)))
+
+    def test_the_worst_pattern_the_budget_allows_is_still_quick(self):
+        """The boundary, measured rather than assumed.
+
+        MAX_BACKTRACK_PATHS was chosen from this number: at 2**14 the slowest
+        pattern that passes takes well under a second, and one notch higher
+        measured about three seconds for the same shape.
+        """
+        import re
+        import time
+        worst = "a?" * 14 + "b"
+        check_pattern(worst)
+        compiled = re.compile(worst)
+        start = time.perf_counter()
+        compiled.search("a" * MAX_SUBJECT_CHARS)
+        self.assertLess(time.perf_counter() - start, self.BUDGET_SECONDS)
+
+    def test_the_tool_refuses_it_too(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("search", query="a?" * 24 + "b", regex=True)
+        self.assertIn("backtrack", str(caught.exception).lower())
+
+
+class TestSearchSaysWhatItDidNotRead(ToolTest):
+    """A regex is matched against a bounded prefix; a caller must be told.
+
+    A plain substring search reads every string in full and a regex search
+    does not, and the two reported the same shape -- so "no hits" from a regex
+    over a project with long script lines was indistinguishable from a search
+    that had genuinely looked everywhere.
+    """
+
+    def long_note(self):
+        """Put a needle past the prefix a regex will look at."""
+        item = self.project.get_entry("items", 1)
+        padding = "x" * (MAX_SUBJECT_CHARS + 500)
+        item.set("note", self.project.codec.make_string(padding + "NEEDLE"))
+        self.project.save_file(self.project.filename_for("items"),
+                               tool="test", summary="long note")
+
+    def test_a_clipped_regex_search_says_so(self):
+        self.long_note()
+        out = self.call("search", query="NEEDLE", regex=True,
+                        scopes=["database"])
+        self.assertEqual(out["hits"], [])
+        self.assertIn("notes", out)
+        self.assertIn(str(MAX_SUBJECT_CHARS), out["notes"])
+
+    def test_a_substring_search_reads_the_whole_string(self):
+        self.long_note()
+        out = self.call("search", query="NEEDLE", scopes=["database"])
+        self.assertEqual(out["count"], 1)
+        # Nothing was clipped, so nothing is claimed to have been.
+        self.assertNotIn("notes", out)
+
+
+class TestAMapPatchCannotMoveAnEvent(ToolTest):
+    """@events must be refused in a map patch, as the message already said.
+
+    A patch merges field by field, so patch={"events": {"1": {"x": 99999}}}
+    reached into the event object and moved it off the map -- past event_edit's
+    bounds check, and past a refusal whose own text says to use event_edit for
+    events. raw_data refused this and map_edit did not.
+    """
+
+    def test_patching_events_is_refused(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("map_edit", op="update", map_id=1,
+                      patch={"events": {"1": {"x": 99999, "y": 99999}}})
+        self.assertIn("events", str(caught.exception))
+
+    def test_the_event_did_not_move(self):
+        with self.assertRaises(ToolError):
+            self.call("map_edit", op="update", map_id=1,
+                      patch={"events": {"1": {"x": 99999, "y": 99999}}})
+        event = self.reopen().project.load_map(1).get("events").get(1)
+        self.assertEqual(event.get("x"), 5)
+
+    def test_both_guards_read_the_same_list(self):
+        """The two lists had drifted, which is what opened the hole."""
+        self.assertEqual(tuple(raw_tools.STRUCTURAL_MAP_PATHS),
+                         tuple(map_tools.STRUCTURAL_MAP_FIELDS))
+
+
+class TestCommandReferenceSaysWhoseLayoutsTheseAre(ToolTest):
+    """An unmodelled engine's layouts are Ace's, and must not read as its own.
+
+    `command_table` and `param_specs` fall back to Ace for an engine this
+    server does not model. Reading is still useful; presenting those layouts as
+    confirmed is how a caller writes a raw command with the wrong parameter
+    order, which the interpreter then misreads.
+    """
+
+    def test_a_modelled_engine_says_yes(self):
+        out = self.call("command_reference", search="text")
+        self.assertTrue(out["layouts_are_this_engines"])
+        self.assertNotIn("engine_warning", out)
+
+    def test_one_code_says_it_too(self):
+        out = self.call("command_reference", code=101)
+        self.assertTrue(out["layouts_are_this_engines"])
+
+    def test_the_move_route_listing_says_it_too(self):
+        """This branch returned before the engine was ever consulted.
+
+        The tool description promises every reply carries the key, and the
+        move-route listing was the one that did not -- so a model reading move
+        codes on an unmodelled engine got no caveat while believing it had one.
+        """
+        out = self.call("command_reference", move_commands=True)
+        self.assertTrue(out["layouts_are_this_engines"])
+        self.assertTrue(out["move_commands"])
+
+    def test_move_commands_refuses_the_arguments_it_ignores(self):
+        """It reads neither `code` nor `search`, and used to accept both."""
+        for extra in ({"code": 101}, {"search": "text"}):
+            with self.subTest(extra=extra):
+                with self.assertRaises(ToolError) as caught:
+                    self.call("command_reference", move_commands=True, **extra)
+                self.assertIn(sorted(extra)[0], str(caught.exception))
+
+
+class TestRawDataWillNotHandBackCompressedScripts(ToolTest):
+    """The scripts refusal was claimed for both directions, done for one.
+
+    Reading returned every slot body as base64 of compressed Ruby: bytes no
+    caller can use, in a response large enough to crowd out everything else,
+    from the one table whose whole point is that another tool decompresses it.
+    db_get was changed to refuse this and raw_data was not.
+    """
+
+    def test_reading_the_scripts_table_is_refused(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("raw_data", table="scripts", path="")
+        self.assertIn("scripts tool", str(caught.exception))
+
+    def test_writing_it_is_still_refused(self):
+        with self.assertRaises(ToolError):
+            self.call("raw_data", op="set", table="scripts", path="0/2",
+                      value={"value": "puts 1"})
+
+
+class TestAnEmptyCommandListIsRefusedEverywhere(ToolTest):
+    """commands: [] is a deletion wearing the name of an edit.
+
+    Two of the five sites that take `commands` refused it; the three that take
+    it alongside a patch did not, so set_page with an empty list compiled
+    nothing, wrote the lone blank terminator, and reported "replaced the
+    command list".
+    """
+
+    def test_set_page_refuses_it(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("event_edit", map_id=1, dry_run=True, ops=[
+                {"op": "set_page", "event_id": 1, "page": 0, "commands": []}])
+        self.assertIn("delete_page", str(caught.exception))
+
+    def test_add_page_refuses_it(self):
+        with self.assertRaises(ToolError):
+            self.call("event_edit", map_id=1, dry_run=True, ops=[
+                {"op": "add_page", "event_id": 1, "commands": []}])
+
+    def test_create_refuses_it(self):
+        with self.assertRaises(ToolError):
+            self.call("event_edit", map_id=1, dry_run=True, ops=[
+                {"op": "create", "name": "New", "x": 1, "y": 1,
+                 "commands": []}])
+
+    def test_the_page_still_holds_what_it_did(self):
+        before = len(self.project.load_map(1).get("events").get(1)
+                     .get("pages")[0].get("list"))
+        with self.assertRaises(ToolError):
+            self.call("event_edit", map_id=1, ops=[
+                {"op": "set_page", "event_id": 1, "page": 0, "commands": []}])
+        after = len(self.reopen().project.load_map(1).get("events").get(1)
+                    .get("pages")[0].get("list"))
+        self.assertEqual(before, after)
+
+
+class TestDamagedPagesAreRefusedNotCrashedOn(ToolTest):
+    """@pages must get the type check @events already has.
+
+    On a crafted or unmodelled-engine map, add_page reached `.append` and
+    delete_page reached `len()` on whatever the file held -- an AttributeError
+    or TypeError where a "run validate" refusal belongs. A nil @pages was also
+    silently replaced with a fresh list, which is the discarding
+    _apply_event_ops refuses by name for @events.
+    """
+
+    def break_pages(self, value):
+        game_map = self.project.load_map(1)
+        game_map.get("events").get(1).set("pages", value)
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="broken pages")
+
+    def test_a_non_list_pages_is_refused(self):
+        self.break_pages(self.project.codec.make_string("not a list"))
+        # add_page appends and so takes no page; the others act on one.
+        for op, extra in (("add_page", {}), ("delete_page", {"page": 0}),
+                          ("set_page", {"page": 0, "patch": {"trigger": 1}})):
+            with self.subTest(op=op):
+                with self.assertRaises(ToolError) as caught:
+                    self.call("event_edit", map_id=1, dry_run=True, ops=[
+                        dict(op=op, event_id=1, **extra)])
+                self.assertIn("validate", str(caught.exception))
+
+    def test_an_event_with_no_pages_is_named_clearly(self):
+        self.break_pages([])
+        with self.assertRaises(ToolError) as caught:
+            self.call("event_edit", map_id=1, dry_run=True, ops=[
+                {"op": "set_page", "event_id": 1, "page": 0,
+                 "patch": {"trigger": 1}}])
+        message = str(caught.exception)
+        self.assertIn("no pages", message)
+        self.assertNotIn("0..-1", message)
+
+
+class TestReferenceCountsDoNotUnderstate(ToolTest):
+    """A preview limit reported as a total is a count that misleads.
+
+    find_references was asked for REFERENCE_PREVIEW hits and len() of the
+    result was reported as the number of references, so an entry referenced
+    three hundred times was said to be referenced twenty-five times -- and a
+    caller could believe it had seen them all.
+    """
+
+    def flood_references(self, count):
+        """Point `count` event commands at item 1."""
+        commands = [{"raw": {"code": 126, "parameters": [1, 0, 0, 1]}}
+                    for _ in range(count)]
+        self.call("event_edit", map_id=1, ops=[
+            {"op": "set_commands", "event_id": 1, "page": 0,
+             "commands": commands}])
+
+    def test_a_count_past_the_preview_says_at_least(self):
+        self.flood_references(db_tools.REFERENCE_PREVIEW + 10)
+        out = self.call("db_edit", table="items", dry_run=True, ops=[
+            {"op": "delete", "id": 1}])
+        warning = " ".join(out["warnings"])
+        self.assertIn("at least", warning)
+
+    def test_a_count_inside_the_preview_is_exact(self):
+        self.flood_references(3)
+        out = self.call("db_edit", table="items", dry_run=True, ops=[
+            {"op": "delete", "id": 1}])
+        warning = " ".join(out["warnings"])
+        # However many the demo project already had, a count inside the
+        # preview is the real one and is not hedged.
+        self.assertNotIn("at least", warning)
+        self.assertIn("event command", warning)
+
+
+class TestDbGetArgumentsAreHonoured(ToolTest):
+    """An argument db_get cannot honour must be refused, not ignored."""
+
+    def test_ids_on_a_single_object_table_are_refused(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_get", table="system", ids=[1, 2])
+        self.assertIn("system", str(caught.exception))
+
+    def test_reading_the_single_object_still_works(self):
+        out = self.call("db_get", table="system")
+        self.assertIn("entry", out)
+
+    def test_a_non_string_field_name_is_refused(self):
+        with self.assertRaises(ToolError):
+            self.call("db_list", table="items", fields=[["price"]])
+
+    def test_the_empty_slot_note_only_offers_what_create_accepts(self):
+        out = self.call("db_get", table="items", ids=[0, 998])
+        self.assertIn("998", out["note"])
+        self.assertIn("Id 0", out["note"])
+
+    def test_scripts_is_not_advertised(self):
+        self.assertNotIn("scripts",
+                         REGISTRY["db_get"].schema["properties"]["table"]["enum"])
+
+
+class TestMapTilesNamesAnEmptyTable(ToolTest):
+    """A map with no cells must be named, not reported as a bad argument.
+
+    Every bound in map_tiles is derived from the table's extents, so an empty
+    one came back as "the default for x must be at most -1, got 0" -- a message
+    about an argument the caller never sent.
+    """
+
+    def test_an_empty_tile_table_says_so(self):
+        game_map = self.project.load_map(1)
+        game_map.set("data", Table(0, 0, 1))
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="emptied")
+        with self.assertRaises(ToolError) as caught:
+            self.call("map_tiles", map_id=1)
+        message = str(caught.exception)
+        self.assertIn("no cells", message)
+        self.assertNotIn("default for x", message)
+
+
+class TestGrowingAMapIsBoundedToo(ToolTest):
+    """The whole-table ceiling applied to shrinking and not to growing.
+
+    The check lived inside the function that counts discarded tiles, which
+    returns before reaching it when both axes grow -- so a grow was bounded
+    only by the Table's own allocation cap.
+    """
+
+    def test_a_grow_past_the_ceiling_is_refused(self):
+        game_map = self.project.load_map(1)
+        # A small table with more layers than the editor writes -- extents come
+        # out of a file that need not be one the editor wrote. Growing this to
+        # the largest side allowed is 5 million cells, past the ceiling, while
+        # the table being grown *from* is well inside it. That is the case the
+        # old check could not see.
+        game_map.set("data", Table(20, 15, 5))
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="five layers")
+        with self.assertRaises(ToolError) as caught:
+            self.call("map_edit", op="resize", map_id=1, width=1000,
+                      height=1000, dry_run=True)
+        message = str(caught.exception)
+        self.assertIn("cells", message)
+        # And the remedy is not a tool that cannot resize.
+        self.assertNotIn("read it in pieces with map_tiles", message)
+
+    def test_an_ordinary_resize_still_works(self):
+        out = self.call("map_edit", op="resize", map_id=1, width=25,
+                        height=20, dry_run=True)
+        self.assertIn("resized from 20x15 to 25x20", out["changes"])
+
+
+class TestDiscardedTileCountIsRight(ToolTest):
+    """The slice-based count must agree with counting cell by cell.
+
+    _cells_outside was rewritten to work over rows of the flat buffer rather
+    than two Python calls per cell; a count of someone's discarded work is not
+    a place to be approximately right.
+    """
+
+    def test_it_matches_a_per_cell_count(self):
+        import random
+        random.seed(11)
+        for _ in range(40):
+            xs, ys, zs = (random.randint(1, 7), random.randint(1, 7),
+                          random.randint(1, 3))
+            table = Table(xs, ys, zs)
+            for _ in range(random.randint(0, xs * ys * zs)):
+                table.set(random.randrange(xs), random.randrange(ys),
+                          random.randrange(zs), random.randint(1, 400))
+            for width in range(xs + 2):
+                for height in range(ys + 2):
+                    expected = 0
+                    if width < xs or height < ys:
+                        expected = sum(
+                            1
+                            for z in range(zs)
+                            for y in range(ys)
+                            for x in range(xs)
+                            if (x >= width or y >= height)
+                            and table.get(x, y, z))
+                    self.assertEqual(
+                        map_tools._cells_outside(table, width, height),
+                        expected,
+                        "%dx%dx%d cropped to %dx%d" % (xs, ys, zs, width, height))
+
+
+class TestOneCommandListHasACeiling(ToolTest):
+    """A compiled command list had no bound at all.
+
+    Nesting depth and ops-per-call were bounded; the compiled length was not,
+    so one large request could write a page carrying far more commands than
+    the editor will open, with no cap and no warning.
+    """
+
+    def test_a_list_past_the_ceiling_is_refused(self):
+        # Inside the declared maxItems on `commands`, which counts entries,
+        # and past the ceiling on the compiled list, which counts commands:
+        # one {"text": ...} becomes a 101 and its 401 line.
+        many = [{"text": "line"}
+                for _ in range(event_tools.MAX_COMMANDS_PER_LIST // 2 + 1)]
+        self.assertLessEqual(len(many), event_tools.MAX_COMMANDS_PER_LIST)
+        with self.assertRaises(ToolError) as caught:
+            self.call("event_edit", map_id=1, dry_run=True, ops=[
+                {"op": "set_commands", "event_id": 1, "page": 0,
+                 "commands": many}])
+        self.assertIn("commands on one page", str(caught.exception))
+
+    def test_appending_cannot_walk_past_it_a_little_at_a_time(self):
+        """The append path concatenates, so it needs its own check."""
+        # One {"text": ...} compiles to two commands, a 101 and its 401 line,
+        # so a quarter of the ceiling in entries is about half of it in
+        # commands -- two of these fit, three do not.
+        quarter = event_tools.MAX_COMMANDS_PER_LIST // 4
+        batch = [{"text": "line"} for _ in range(quarter)]
+        self.call("event_edit", map_id=1, ops=[
+            {"op": "set_commands", "event_id": 1, "page": 0,
+             "commands": batch}])
+        with self.assertRaises(ToolError):
+            for _ in range(3):
+                self.call("event_edit", map_id=1, ops=[
+                    {"op": "append_commands", "event_id": 1, "page": 0,
+                     "commands": batch}])
+
+
+class TestSnapshotPreviewMatchesTheSnapshot(ToolTest):
+    """A dry run must report what the real call would do.
+
+    The preview globbed the data folder itself while `snapshot` skips symlinked
+    files, so it listed files no backup would ever hold -- the same mistake the
+    prune branch's comment says it fixed by asking the real function.
+    """
+
+    def test_the_preview_leaves_out_what_the_snapshot_skips(self):
+        """The difference the two could not agree on was a skipped file.
+
+        `snapshot` refuses to copy a symlinked data file, because copying one
+        would put whatever it points at into the backup tree. The preview
+        globbed the folder itself, so it listed that file anyway. Symlinks
+        cannot be created without privilege on this platform, so one is
+        simulated -- the property under test is that the preview asks the
+        function that copies, not that this platform has symlinks.
+        """
+        import pathlib as _pathlib
+        skipped = self.project.filename_for("items")
+        real_is_symlink = _pathlib.Path.is_symlink
+
+        def pretend(path):
+            return path.name == skipped or real_is_symlink(path)
+
+        _pathlib.Path.is_symlink = pretend
+        self.addCleanup(setattr, _pathlib.Path, "is_symlink", real_is_symlink)
+
+        preview = self.call("backups", op="create", dry_run=True)
+        real = self.call("backups", op="create")
+        self.assertNotIn(skipped, real["files"])
+        self.assertEqual(preview["would_snapshot"], real["files"])
+
+    def test_the_preview_matches_an_ordinary_snapshot(self):
+        preview = self.call("backups", op="create", dry_run=True)
+        real = self.call("backups", op="create")
+        self.assertEqual(preview["would_snapshot"], real["files"])
+
+    def test_a_dry_run_writes_nothing(self):
+        before = self.call("backups", op="list")["backups"]
+        self.call("backups", op="create", dry_run=True)
+        self.assertEqual(self.call("backups", op="list")["backups"], before)
+
+
+class TestReadingManyEntriesSharesOneBudget(ToolTest):
+    """The conversion budget was per entry, so per response it was unbounded.
+
+    A tool reading MAX_IDS_PER_CALL entries gave each its own 2-million-node
+    allowance, which is not what the budget was chosen to permit.
+    """
+
+    def test_one_walk_is_shared_across_the_ids(self):
+        walk = convert.new_walk()
+        before = walk.budget
+        for _ in range(3):
+            convert.to_json(self.project.load_data("items"), self.project.codec,
+                            "summary", walk)
+        self.assertLess(walk.budget, before)
+
+    def test_db_get_still_reads_several_ids(self):
+        out = self.call("db_get", table="items", ids=[1, 2])
+        self.assertEqual(len(out["entries"]), 2)
+
+    def test_the_budget_bounds_the_response_not_each_entry(self):
+        """Reading two entries must spend one allowance, not two.
+
+        The real allowance is two million nodes, which no fixture reaches, so
+        a small one is put in its place: with the budget shared, the second
+        entry runs out; with one per entry -- which is what this was before --
+        both succeed however small it is, because the bound never sees the
+        first entry's work.
+        """
+        self.addCleanup(setattr, db_tools, "new_walk", convert.new_walk)
+
+        # What one entry actually costs, measured rather than guessed, so this
+        # keeps working if the fixture's items change shape.
+        probe = convert.new_walk()
+        before = probe.budget
+        convert.to_json(self.project.get_entry("items", 1), self.project.codec,
+                        "summary", probe)
+        one_entry = before - probe.budget
+        self.assertGreater(one_entry, 0)
+
+        # Room for one entry and a little over -- never for two.
+        db_tools.new_walk = lambda: convert._Walk(budget=one_entry + 2)
+        with self.assertRaises((ToolError, ConversionError)):
+            self.call("db_get", table="items", ids=[1, 2])
+
+
+class TestHashTablesThatCarryTheirOwnId(unittest.TestCase):
+    """VX's `areas` is Hash-keyed and RPG::Area does carry @id.
+
+    `_carries_id` decided from ARRAY-versus-HASH, in a docstring that asserted
+    a Hash-keyed table never carries one -- so an area created here was written
+    with no @id at all, and a patch moving @id to another number was accepted.
+    MapInfos, the case that reasoning was built for, genuinely has no id field
+    and must stay exempt.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-areas-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        build(self.tmp / "project", "vx")
+        self.project = Project(self.tmp / "project")
+        self.ctx = Context(self.project)
+
+    def call(self, tool_name, /, **arguments):
+        return REGISTRY[tool_name].run(self.ctx, arguments)
+
+    def test_a_created_area_carries_its_own_id(self):
+        self.call("db_edit", table="areas", ops=[
+            {"op": "create", "id": 4, "patch": {"name": "Cave"}}])
+        entry = Project(self.tmp / "project").get_entry("areas", 4)
+        self.assertEqual(entry.get("id"), 4)
+
+    def test_a_clone_gets_its_own_id_not_the_originals(self):
+        self.call("db_edit", table="areas", ops=[
+            {"op": "create", "id": 1, "patch": {"name": "First"}}])
+        self.call("db_edit", table="areas", ops=[
+            {"op": "create", "id": 7, "clone_from": 1}])
+        self.assertEqual(self.project.get_entry("areas", 7).get("id"), 7)
+
+    def test_a_patch_cannot_move_an_areas_id(self):
+        self.call("db_edit", table="areas", ops=[
+            {"op": "create", "id": 2, "patch": {"name": "Second"}}])
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_edit", table="areas", ops=[
+                {"op": "update", "id": 2, "patch": {"id": 99}}])
+        self.assertIn("its position", str(caught.exception))
+
+    def test_map_infos_is_still_exempt(self):
+        """RPG::MapInfo has no id field, which is why the rule was written."""
+        self.assertNotIn("id", PROFILES["vx"].class_fields["RPG::MapInfo"])
+
+
+class TestUnknownCharacterClassesCountAsCompeting(unittest.TestCase):
+    """An unrecognised pair of character categories must be assumed to overlap.
+
+    The budget only multiplies backtrack points that can compete for the same
+    characters, so "these cannot meet" is the answer that makes a chain score
+    as free. The first version of this listed the overlapping pairs and
+    defaulted to disjoint, so a pair it had not thought of -- a newline
+    against a whitespace class, which do overlap -- read as unable to compete.
+    """
+
+    def charset(self, *categories):
+        return pattern_safety._Charset(categories=set(categories))
+
+    def test_a_category_and_its_complement_are_disjoint(self):
+        for name in ("SPACE", "DIGIT", "WORD", "LINEBREAK"):
+            with self.subTest(category=name):
+                self.assertFalse(
+                    self.charset("CATEGORY_" + name).intersects(
+                        self.charset("CATEGORY_NOT_" + name)))
+
+    def test_overlapping_categories_are_reported_as_such(self):
+        for left, right in (("CATEGORY_DIGIT", "CATEGORY_WORD"),
+                            ("CATEGORY_LINEBREAK", "CATEGORY_SPACE"),
+                            ("CATEGORY_WORD", "CATEGORY_NOT_SPACE")):
+            with self.subTest(pair=(left, right)):
+                self.assertTrue(self.charset(left).intersects(self.charset(right)))
+
+    def test_an_unlisted_pair_counts_as_overlapping(self):
+        """The safe direction: refuse more, never score a real chain as free."""
+        self.assertTrue(
+            self.charset("CATEGORY_SOMETHING_NEW").intersects(
+                self.charset("CATEGORY_ANOTHER_ONE")))
+
+    def test_the_order_a_pair_is_written_in_does_not_matter(self):
+        """Two entries were written the opposite way round from the lookup."""
+        for left, right in (("CATEGORY_SPACE", "CATEGORY_NOT_SPACE"),
+                            ("CATEGORY_WORD", "CATEGORY_NOT_WORD")):
+            with self.subTest(pair=(left, right)):
+                self.assertFalse(self.charset(left).intersects(self.charset(right)))
+                self.assertFalse(self.charset(right).intersects(self.charset(left)))
+
+
+class TestEveryOpSelectingToolHasATable(unittest.TestCase):
+    """No tool may take an `op` without declaring what each op reads.
+
+    Fixing the tools that had no per-op table was not the fix; this is. The
+    gate was added to the three editing tools, its docstring said "nothing is
+    ignored silently here", and four op-selecting tools -- map_tiles, raw_data,
+    scripts, backups -- had no table at all, so each accepted the other ops'
+    arguments and reported success. A reviewer found them, twice. This walks
+    the registry so the next one cannot land unnoticed.
+    """
+
+    # Every op table in the tools layer, by the tool and argument path it
+    # governs. `ops` means the op sits inside each entry of an `ops` array.
+    TABLES = {
+        ("map_edit", None): map_tools.MAP_OP_ARGS,
+        ("map_tiles", None): map_tools.TILE_OP_ARGS,
+        ("db_edit", "ops"): db_tools.DB_OP_ARGS,
+        ("event_edit", "ops"): event_tools.EVENT_OP_ARGS,
+        ("raw_data", None): raw_tools.RAW_OP_ARGS,
+        ("scripts", None): misc_tools.SCRIPT_OP_ARGS,
+        ("backups", None): misc_tools.BACKUP_OP_ARGS,
+    }
+
+    def op_selecting_tools(self):
+        """Every (tool, path) in the registry whose schema declares an `op`."""
+        found = []
+        for name, tool in REGISTRY.items():
+            properties = tool.schema.get("properties") or {}
+            if "op" in properties:
+                found.append((name, None))
+            inside = (properties.get("ops", {}).get("items", {})
+                      .get("properties", {}))
+            if "op" in inside:
+                found.append((name, "ops"))
+        return sorted(found)
+
+    def test_every_op_selecting_tool_is_in_the_table_list(self):
+        self.assertEqual(self.op_selecting_tools(), sorted(self.TABLES),
+                         "a tool takes an op with no per-op argument table, "
+                         "so it accepts the other ops' arguments and ignores "
+                         "them")
+
+    def test_every_table_agrees_with_its_schema(self):
+        for (name, key), table in sorted(self.TABLES.items()):
+            with self.subTest(tool=name, path=key):
+                properties = REGISTRY[name].schema["properties"]
+                if key:
+                    properties = properties[key]["items"]["properties"]
+                self.assertEqual(set(properties["op"]["enum"]), set(table))
+                declared = set(properties)
+                for op, reads in table.items():
+                    self.assertLessEqual(
+                        reads, declared,
+                        "%s op %s reads an argument the schema does not "
+                        "declare" % (name, op))
+                never_read = declared - set().union(*table.values())
+                self.assertEqual(
+                    never_read, set(),
+                    "%s declares %s, which no op reads -- it would be "
+                    "accepted and ignored" % (name, ", ".join(sorted(never_read))))
+
+    def test_every_dispatcher_covers_exactly_its_table(self):
+        """A dispatch table and an argument table must name the same ops.
+
+        db_tools carried three separate lists of the same three op names while
+        the comment above one of them said they were "named once, so they
+        cannot drift apart". An op added to two of the three raises KeyError at
+        dispatch, which is the shape of failure a comment cannot prevent.
+        """
+        for label, dispatch, declared in (
+                ("db_edit", db_tools._DB_OPS, db_tools.DB_OP_ARGS),
+                ("event_edit", event_tools._EVENT_OPS,
+                 event_tools.EVENT_OP_ARGS)):
+            with self.subTest(tool=label):
+                self.assertEqual(set(dispatch), set(declared))
+
+    def test_the_common_event_path_has_one_too(self):
+        """event_edit runs a second loop that the schema cannot distinguish.
+
+        A common event has no pages and no position, so its ops read far less
+        -- and that loop had no table, so `commands` on an "update" were
+        dropped and an `event_id` that means nothing there was accepted.
+        """
+        table = event_tools.COMMON_EVENT_OP_ARGS
+        declared = set(REGISTRY["event_edit"]
+                       .schema["properties"]["ops"]["items"]["properties"])
+        self.assertLessEqual(set(table), set(event_tools.EVENT_OP_ARGS))
+        for op, reads in table.items():
+            self.assertLessEqual(reads, declared)
+
+
+class TestOpArgumentsAreGatedEverywhere(ToolTest):
+    """The gate must reach every tool that takes an op, not the editing three.
+
+    `check_op_args` was added to map_edit, db_edit and event_edit, and its
+    docstring said "nothing is ignored silently here" while map_tiles,
+    raw_data, scripts and backups had no table at all -- so each accepted the
+    other ops' arguments, ignored them, and reported success.
+    """
+
+    def test_map_tiles_refuses_the_other_ops_arguments(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("map_tiles", map_id=1, op="fill", tile_id=5,
+                      rows=[[1]], dry_run=True)
+        message = str(caught.exception)
+        self.assertIn("rows", message)
+        self.assertIn("write", message)      # the op that does read it
+
+    def test_map_tiles_still_fills(self):
+        out = self.call("map_tiles", map_id=1, op="fill", tile_id=5, x=0, y=0,
+                        width=2, height=2, dry_run=True)
+        self.assertIn("filled", out["changed"])
+
+    def test_raw_data_refuses_a_value_it_would_not_write(self):
+        """`op` defaults to "get", which is the dangerous half.
+
+        A caller that meant to write and forgot the op used to get back the
+        value already there, under a "value" key that reads exactly like
+        confirmation of the write it thought it had made.
+        """
+        with self.assertRaises(ToolError) as caught:
+            self.call("raw_data", table="system", path="party_members",
+                      value={"value": [1]})
+        self.assertIn("value", str(caught.exception))
+        self.assertIn("set", str(caught.exception))
+
+    def test_raw_data_still_reads_and_writes(self):
+        self.assertEqual(
+            self.call("raw_data", table="system", path="party_members")["value"],
+            [1, 2])
+        out = self.call("raw_data", op="set", table="system",
+                        path="party_members", value={"value": [1]},
+                        dry_run=True)
+        self.assertEqual(out["after"], [1])
+
+    def test_scripts_refuses_code_on_a_read(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("scripts", op="get", index=0, code="puts 1")
+        self.assertIn("code", str(caught.exception))
+
+    def test_backups_refuses_files_on_a_create(self):
+        """"create" snapshots the whole folder; `files` belongs to "restore"."""
+        with self.assertRaises(ToolError) as caught:
+            self.call("backups", op="create", files=["Items.rvdata2"])
+        self.assertIn("files", str(caught.exception))
+
+
+class TestCommonEventOpsAreGatedToo(ToolTest):
+    """event_edit runs a second loop, and it had no table.
+
+    A common event has no pages and no position, so its ops read far less --
+    and this is the sibling path I fixed the map path without touching.
+    """
+
+    def test_commands_are_not_dropped_on_an_update(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("event_edit", common_event_id=1, dry_run=True, ops=[
+                {"op": "update", "name": "Renamed",
+                 "commands": [{"text": "dropped"}]}])
+        message = str(caught.exception)
+        self.assertIn("commands", message)
+        self.assertIn("set_commands", message)
+
+    def test_an_event_id_means_nothing_here(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("event_edit", common_event_id=1, dry_run=True, ops=[
+                {"op": "set_commands", "event_id": 3,
+                 "commands": [{"text": "hi"}]}])
+        self.assertIn("event_id", str(caught.exception))
+
+    def test_a_real_common_event_edit_still_works(self):
+        out = self.call("event_edit", common_event_id=1, dry_run=True, ops=[
+            {"op": "set_commands", "commands": [{"text": "hi"}]}])
+        self.assertEqual(out["applied"][0]["op"], "set_commands")
+
+
+class TestOneBudgetForAWholeResponse(ToolTest):
+    """A string's ivar record must not start its own walk.
+
+    `_string_to_json` rendered the record with the *public* `to_json`, which
+    begins a fresh `_Walk` -- so both the node budget and the depth counter
+    restarted once per string, and a few kilobytes of crafted file could ask
+    for an unbounded walk.
+    """
+
+    def carrying_ivars(self, inner):
+        """A RubyString whose ivar record holds `inner`."""
+        text = self.project.codec.make_string("hi")
+        text.ivars = dict(text.ivars)
+        text.ivars["@extra"] = inner
+        return text
+
+    def test_a_string_ivar_is_charged_to_the_callers_budget(self):
+        nested = [[1] * 50] * 50          # about 2,550 nodes
+        walk = convert.new_walk()
+        before = walk.budget
+        convert.to_json(self.carrying_ivars(nested), self.project.codec,
+                        "summary", walk)
+        self.assertGreater(before - walk.budget, 2000)
+
+    def test_a_string_ivar_cannot_reset_the_depth_limit(self):
+        deep = "x"
+        for _ in range(convert.MAX_JSON_DEPTH + 20):
+            deep = [deep]
+        with self.assertRaises(ConversionError) as caught:
+            convert.to_json(self.carrying_ivars(deep), self.project.codec)
+        self.assertIn("nests deeper", str(caught.exception))
+
+
+class TestTileTallySaysWhatItLeftOut(ToolTest):
+    """A tally that showed twelve ids promised "which tile ids appear"."""
+
+    def test_it_reports_the_ids_it_did_not_list(self):
+        # More distinct ids on one layer than the tally lists.
+        rows = [[(x + y * 7) % 400 + 1 for x in range(7)] for y in range(7)]
+        self.call("map_tiles", map_id=1, op="write", x=0, y=0, width=7,
+                  height=7, z=0, rows=rows)
+        counts = self.call("map_get", map_id=1,
+                           tiles="counts")["tile_counts"]
+        layer = counts["0"]
+        self.assertGreater(layer["distinct_tile_ids"], map_tools.TOP_TILE_IDS)
+        self.assertEqual(
+            layer["tile_ids_not_shown"],
+            layer["distinct_tile_ids"] - len(layer["most_common"]))
+        self.assertGreater(layer["tile_ids_not_shown"], 0)
+
+
+class TestMapReferenceCountsDoNotUnderstate(ToolTest):
+    """The same preview-as-total that db_edit had, on the map path."""
+
+    def test_a_count_past_the_preview_says_at_least(self):
+        # More Transfer Player commands pointing at map 2 than the preview.
+        transfers = [{"transfer": {"map_id": 2, "x": 0, "y": 0}}
+                     for _ in range(map_tools.REFERENCE_PREVIEW + 5)]
+        self.call("event_edit", map_id=1, ops=[
+            {"op": "set_commands", "event_id": 1, "page": 0,
+             "commands": transfers}])
+        # Map 2 has children in the demo project, so preview the delete.
+        out = self.call("map_edit", op="delete", map_id=2, dry_run=True)
+        self.assertTrue(out["incoming_transfers_truncated"])
+        self.assertEqual(len(out["incoming_transfers"]),
+                         map_tools.REFERENCE_PREVIEW)
+
+
+class TestLookaroundIsRefusedByName(ToolTest):
+    """A refusal has to name the shape it found.
+
+    A lookaround was charged past the budget, so it came back described as a
+    repeated group or a chain of competing parts -- neither of which the
+    pattern has. `Gold(?!\\d)` was told to "anchor the pattern with the
+    literal text you are looking for", which it already was, so a caller
+    cannot find the cause and rephrases forever.
+    """
+
+    def test_a_lookaround_names_itself(self):
+        for pattern in (r"Fire(?=Sword)", r"Gold(?!\d)", r"(?<=Name: )\w+"):
+            with self.subTest(pattern=pattern):
+                with self.assertRaises(ToolError) as caught:
+                    self.call("search", query=pattern, regex=True)
+                message = str(caught.exception)
+                self.assertIn("lookahead", message)
+                self.assertNotIn("repeats a group", message)

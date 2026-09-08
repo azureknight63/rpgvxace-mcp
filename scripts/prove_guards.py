@@ -52,6 +52,10 @@ ANALYSIS = "src/rpgvxace_mcp/analysis.py"
 REGISTRY = "src/rpgvxace_mcp/tools/registry.py"
 DB_TOOLS = "src/rpgvxace_mcp/tools/db_tools.py"
 EVENT_TOOLS = "src/rpgvxace_mcp/tools/event_tools.py"
+CONVERT = "src/rpgvxace_mcp/convert.py"
+SAFETY = "src/rpgvxace_mcp/tools/pattern_safety.py"
+SEARCH_TOOLS = "src/rpgvxace_mcp/tools/search_tools.py"
+RAW_TOOLS = "src/rpgvxace_mcp/tools/raw_tools.py"
 
 
 class Guard:
@@ -111,6 +115,33 @@ CANON = "tests/test_tools.py::TestMapIdsAreCanonical::"
 FIELD = "tests/test_tools.py::TestAPatchCannotInventAField::"
 PERFILE = "tests/test_tools.py::TestStagingIsPerFile::"
 BOUND = "tests/test_tools.py::TestCollectionIsBounded::"
+OPARG = "tests/test_tools.py::TestInapplicableArgumentsAreRefused::"
+NESTED = "tests/test_tools.py::TestANestedPatchCannotInventAField::"
+ADDPAGE = "tests/test_tools.py::TestAddPageRefusesInsteadOfCrashing::"
+FAST = "tests/test_tools.py::TestSearchPatternsStayFast::"
+CLIP = "tests/test_tools.py::TestSearchSaysWhatItDidNotRead::"
+MAPEV = "tests/test_tools.py::TestAMapPatchCannotMoveAnEvent::"
+LAYOUT = "tests/test_tools.py::TestCommandReferenceSaysWhoseLayoutsTheseAre::"
+RAWSCR = "tests/test_tools.py::TestRawDataWillNotHandBackCompressedScripts::"
+EMPTYC = "tests/test_tools.py::TestAnEmptyCommandListIsRefusedEverywhere::"
+PAGES = "tests/test_tools.py::TestDamagedPagesAreRefusedNotCrashedOn::"
+REFCNT = "tests/test_tools.py::TestReferenceCountsDoNotUnderstate::"
+DBARG = "tests/test_tools.py::TestDbGetArgumentsAreHonoured::"
+EMPTYT = "tests/test_tools.py::TestMapTilesNamesAnEmptyTable::"
+GROW = "tests/test_tools.py::TestGrowingAMapIsBoundedToo::"
+DROPPED = "tests/test_tools.py::TestDiscardedTileCountIsRight::"
+LISTCAP = "tests/test_tools.py::TestOneCommandListHasACeiling::"
+SNAPDRY = "tests/test_tools.py::TestSnapshotPreviewMatchesTheSnapshot::"
+BUDGET = "tests/test_tools.py::TestReadingManyEntriesSharesOneBudget::"
+AREAID = "tests/test_tools.py::TestHashTablesThatCarryTheirOwnId::"
+GATES = "tests/test_tools.py::TestEveryOpSelectingToolHasATable::"
+GATED = "tests/test_tools.py::TestOpArgumentsAreGatedEverywhere::"
+COMMON = "tests/test_tools.py::TestCommonEventOpsAreGatedToo::"
+SYMDEPTH = "tests/test_marshal.py::TestHostileInput::"
+BUDGETONE = "tests/test_tools.py::TestOneBudgetForAWholeResponse::"
+TALLY = "tests/test_tools.py::TestTileTallySaysWhatItLeftOut::"
+MAPREFS = "tests/test_tools.py::TestMapReferenceCountsDoNotUnderstate::"
+LOOKAROUND = "tests/test_tools.py::TestLookaroundIsRefusedByName::"
 
 GUARDS = [
     Guard(
@@ -535,8 +566,8 @@ GUARDS = [
     ),
     Guard(
         "map ids are ones a filename can express", PROJECT,
-        '            if digits.isdigit() and 1 <= int(digits) <= MAX_MAP_ID \\',
-        '            if digits.isdigit() and True \\',
+        '            if digits.isascii() and digits.isdigit() \\',
+        '            if True \\',
         [HOSTILE + "test_an_unaddressable_map_file_does_not_stop_the_server"],
         "a Map0 or Map10000 in the Data folder reaches map_filename, which "
         "raises for an id it cannot express, and the server will not start",
@@ -730,7 +761,7 @@ GUARDS = [
     ),
     Guard(
         "database entry ids are bounded", DB_TOOLS,
-        '    else:\n        _check_id(table, entry_id, request.container, request.kind)',
+        '    else:\n        _check_id(request, entry_id)',
         '    else:\n        pass  # check removed',
         [DBID + "test_a_negative_create_id_is_refused",
          DBID + "test_a_huge_create_id_is_refused",
@@ -741,7 +772,7 @@ GUARDS = [
     ),
     Guard(
         "a created entry carries its own id", DB_TOOLS,
-        '    if isinstance(entry, RubyObject) and _carries_id(request.kind):',
+        '    if isinstance(entry, RubyObject) and _carries_id(request):',
         '    if False:',
         [DBID + "test_a_created_entry_carries_its_own_id"],
         "the one field every RGSS data class needs is the one field a blank "
@@ -805,23 +836,23 @@ GUARDS = [
     ),
     Guard(
         "a discarded tile is reported", MAP_TOOLS,
-        "        dropped = _cells_outside(data, width, height)",
-        "        dropped = 0",
+        '    dropped = _cells_outside(data, width, height)',
+        '    dropped = 0',
         [MAPW + "test_a_shrink_reports_the_tiles_it_discards"],
         "shrinking a map silently throws away every tile outside the new "
         "bounds",
     ),
     Guard(
         "tile values fit their layer", MAP_TOOLS,
-        "        _check_tile(ctx, tile_id, z, \"tile_id\")",
-        "        pass  # check removed",
+        '    _check_tile(ctx, tile_id, rect.z, "tile_id")',
+        '    pass  # check removed',
         [MAPW + "test_a_tile_value_the_layer_cannot_hold_is_refused",
          MAPW + "test_a_region_id_beyond_the_layer_is_refused"],
         "Table.set masks to sixteen bits, so an out-of-range id is stored as "
         "some other tile entirely and reported back as the one asked for",
     ),
     Guard(
-        "raw_data refuses a shape swap", MISC_TOOLS,
+        "raw_data refuses a shape swap", RAW_TOOLS,
         "    _check_same_kind(existing, new_value, \"/\".join(path))",
         "    pass  # check removed",
         [RAWD + "test_a_structure_cannot_be_replaced_by_a_scalar"],
@@ -829,15 +860,15 @@ GUARDS = [
         "the file stops being one the editor or the game can open",
     ),
     Guard(
-        "search reports the scopes it searched", MISC_TOOLS,
-        "\n    return _result(hits, limit, searched, unreadable, unsearchable)",
-        "\n    return _result(hits, limit, list(scopes), unreadable, unsearchable)",
+        "search reports the scopes it searched", SEARCH_TOOLS,
+        '            "scopes_searched": self.searched,',
+        '            "scopes_searched": list(SEARCH_SCOPES),',
         [SEARCHED + "test_a_command_code_search_does_not_claim_to_have_searched_text"],
         "a command_code search skips the scopes holding no commands, and "
         "reporting them as searched tells the model they came back empty",
     ),
     Guard(
-        "an unknown scope is refused", MISC_TOOLS,
+        "an unknown scope is refused", REGISTRY,
         "    unknown = [s for s in asked if s not in allowed]",
         "    unknown = []",
         [SEARCHED + "test_an_unknown_scope_is_refused_not_ignored"],
@@ -845,12 +876,9 @@ GUARDS = [
         "caller believes it narrowed the search and gets the whole project",
     ),
     Guard(
-        "a scope is searched only once it loads", MISC_TOOLS,
-        '    if code_filter is None and "maps" in scopes:\n'
-        '        try:',
-        '    if code_filter is None and "maps" in scopes:\n'
-        '        searched.append("maps")\n'
-        '        try:',
+        "a scope is searched only once it loads", SEARCH_TOOLS,
+        '    try:\n        rows = ctx.project.entries("map_infos")\n    except (ProjectError, ValueError) as exc:\n        found.unsearchable["map_infos"] = str(exc)\n        return',
+        '    found.searching("maps")\n    try:\n        rows = ctx.project.entries("map_infos")\n    except (ProjectError, ValueError) as exc:\n        found.unsearchable["map_infos"] = str(exc)\n        return',
         [READ + "test_a_scope_whose_only_file_fails_is_not_called_searched"],
         "a file that would not load comes back as \"searched, nothing found\", "
         "which is the same lie as reporting a scope that was skipped",
@@ -903,7 +931,7 @@ GUARDS = [
         'spelling the field the other way',
     ),
     Guard(
-        "raw_data sees the @ spelling too", MISC_TOOLS,
+        "raw_data sees the @ spelling too", RAW_TOOLS,
         '    if path and _bare_name(path[0]) in STRUCTURAL_MAP_PATHS:',
         '    if path and path[0] in STRUCTURAL_MAP_PATHS:',
         [ATFIELD + "test_raw_data_cannot_reach_a_structural_field"],
@@ -924,8 +952,8 @@ GUARDS = [
     ),
     Guard(
         "an update cannot move an entry id", DB_TOOLS,
-        '    entry = request.require(entry_id, "update")\n    request.refuse_id_patch(patch, entry_id)',
-        '    entry = request.require(entry_id, "update")\n    pass  # check removed',
+        '    entry = request.require(entry_id)\n    request.refuse_id_patch(patch, entry_id)',
+        '    entry = request.require(entry_id)\n    pass  # id patch not refused on update',
         [EVERY + "test_updating_an_entry_cannot_move_its_id"],
         "the refusal existed only on the create path, though the tool's own "
         'docstring said a patch could not move an id',
@@ -940,16 +968,7 @@ GUARDS = [
         'then reported zero errors while errors existed',
     ),
     Guard(
-        "the hanging pattern shape is refused", MISC_TOOLS,
-        '    _refuse_repeated_group(query)',
-        '    pass  # check removed',
-        [REDOS + "test_a_nested_quantifier_is_refused"],
-        'a repeated group that itself repeats backtracks exponentially and '
-        'cannot be interrupted, so one search wedges this single-threaded '
-        'server for good',
-    ),
-    Guard(
-        "a command_code search needs somewhere to look", MISC_TOOLS,
+        "a command_code search needs somewhere to look", SEARCH_TOOLS,
         '        if "events" not in scopes:',
         '        if False:',
         [REDOS + "test_a_command_code_search_needs_the_events_scope"],
@@ -993,22 +1012,14 @@ GUARDS = [
         "the cache while the caller is told nothing happened",
     ),
     Guard(
-        "a repeated group is refused", MISC_TOOLS,
-        '            if after < len(pattern) and pattern[after] in _QUANTIFIERS:',
-        '            if False:',
-        [REDOS + "test_a_nested_quantifier_is_refused"],
-        "the shapes that backtrack exponentially -- ((a+))+, (?:a+)+, "
-        "(a|a)+ -- walk straight past a flat pattern test, and a match in "
-        "progress cannot be interrupted",
-    ),
-    Guard(
         "an op's own keys are checked", REGISTRY,
         '        if item.get("properties"):',
         '        if False:',
-        [SHAPE + "test_a_misspelled_key_inside_an_op_is_refused"],
-        "a misspelled key inside an op is dropped, and for set_commands "
-        "that leaves the page it was meant to rewrite holding one blank "
-        "command",
+        [SHAPE + "test_a_declared_bound_inside_an_op_is_enforced"],
+        "an op's declared bounds are not applied to it -- an event_id of a "
+        "billion reaches the handler. An unknown key inside an op is caught "
+        "twice over now, by this and by check_op_args; a key that is real and "
+        "out of range is caught only here",
     ),
     Guard(
         "an empty command list is refused", EVENT_TOOLS,
@@ -1026,6 +1037,237 @@ GUARDS = [
         "the ceiling bounds only what is returned, so a page of broken "
         "jumps builds a finding per command -- tens of thousands of them "
         "-- in order to report ten",
+    ),
+    Guard(
+        'an inapplicable argument is refused', REGISTRY,
+        '    inert = sorted(key for key in args if key not in allowed)',
+        '    inert = []',
+        [OPARG + "test_event_update_will_not_quietly_drop_commands",
+         OPARG + "test_db_delete_will_not_quietly_drop_a_patch",
+         OPARG + "test_map_delete_will_not_quietly_drop_anything",
+         OPARG + "test_map_update_will_not_quietly_drop_a_reparent"],
+        'an argument the op does not read is dropped, and the reply reports the same success as if it had been applied',
+    ),
+    Guard(
+        'a nested patch cannot invent a field', CONVERT,
+        '                _refuse_invented_fields(existing, new_value, field_path)',
+        '                pass  # check removed',
+        [NESTED + "test_a_nested_typo_is_refused",
+         NESTED + "test_the_field_is_not_left_behind"],
+        'a typo one level down adds an instance variable the editor will not open the project with, and reports it as the change asked for',
+    ),
+    Guard(
+        'add_page refuses rather than crashing', EVENT_TOOLS,
+        '    changes = request.patch_page(\n        page, raw_op, "the new page %d of event %d" % (len(pages), event_id))',
+        '    changes = []  # patch not validated',
+        [ADDPAGE + "test_a_misspelled_field_is_refused"],
+        'add_page with a patch raises UnboundLocalError, which server.py does not catch, so a typo is reported as a broken server',
+    ),
+    Guard(
+        'the backtracking budget is enforced', SAFETY,
+        '    if worst <= MAX_BACKTRACK_PATHS:\n        return',
+        '    if True:\n        return',
+        [FAST + "test_every_backtracking_chain_is_refused",
+         FAST + "test_the_tool_refuses_it_too"],
+        'one search with a pattern like "a?a?a?...b" wedges this single-threaded server until it is killed',
+    ),
+    Guard(
+        'an unbounded repeat of a variable body is refused', SAFETY,
+        '    if unbounded and inner_freedom > 1:',
+        '    if False:',
+        [FAST + "test_every_backtracking_chain_is_refused"],
+        '(a+)+ and (a|ab)* are charged a linear weight, which is not what they cost -- their time grows with the length of the text searched',
+    ),
+    Guard(
+        'a clipped regex search says so', SEARCH_TOOLS,
+        '        if not self.whole and len(text) > MAX_SUBJECT_CHARS:\n            self.clipped += 1',
+        '        if False:\n            self.clipped += 1',
+        [CLIP + "test_a_clipped_regex_search_says_so"],
+        'a regex search reports "no hits" for text it never looked at, in the same shape as a search that read everything',
+    ),
+    Guard(
+        'a map patch cannot reach into events', MAP_TOOLS,
+        'STRUCTURAL_MAP_FIELDS = ("width", "height", "data", "events")',
+        'STRUCTURAL_MAP_FIELDS = ("width", "height", "data")',
+        [MAPEV + "test_patching_events_is_refused",
+         MAPEV + "test_the_event_did_not_move"],
+        'a patch merges into the event objects and moves an event off the map, past the bounds check event_edit exists to apply',
+    ),
+    Guard(
+        'borrowed command layouts are labelled', EVENT_TOOLS,
+        '        entry["layouts_are_this_engines"] = modelled',
+        '        entry["engine_is_modelled"] = modelled',
+        [LAYOUT + "test_one_code_says_it_too"],
+        "an unmodelled engine is handed VX Ace's parameter layouts as its own confirmed ones, and raw commands get written in the wrong order",
+    ),
+    Guard(
+        'raw_data will not read the scripts table', RAW_TOOLS,
+        '    if table == "scripts":',
+        '    if False:',
+        [RAWSCR + "test_reading_the_scripts_table_is_refused",
+         RAWSCR + "test_writing_it_is_still_refused"],
+        'every script body comes back as base64 of compressed Ruby, which no caller can use and which crowds out the rest of the response',
+    ),
+    Guard(
+        'an empty command list is refused', EVENT_TOOLS,
+        '    entries = opt_list(raw_op, "commands")\n    if not entries:',
+        '    entries = opt_list(raw_op, "commands")\n    if False:',
+        [EMPTYC + "test_set_page_refuses_it",
+         EMPTYC + "test_add_page_refuses_it",
+         EMPTYC + "test_the_page_still_holds_what_it_did"],
+        'commands: [] empties the page it was meant to rewrite and reports "replaced the command list"',
+    ),
+    Guard(
+        'damaged pages are refused', EVENT_TOOLS,
+        '        if not isinstance(pages, list):',
+        '        if False:',
+        [PAGES + "test_a_non_list_pages_is_refused"],
+        'add_page reaches .append and delete_page reaches len() on whatever the file holds, so a damaged map crashes the call instead of being reported',
+    ),
+    Guard(
+        'a reference count says when it is a floor', DB_TOOLS,
+        '    more_than_shown = len(found) > REFERENCE_PREVIEW',
+        '    more_than_shown = False',
+        [REFCNT + "test_a_count_past_the_preview_says_at_least"],
+        'an entry referenced three hundred times is reported as referenced twenty-five times, and the caller believes it has seen them all',
+    ),
+    Guard(
+        'ids are refused where they do nothing', DB_TOOLS,
+        '        given = [name for name in ("ids", "id") if args.get(name) is not None]',
+        '        given = []',
+        [DBARG + "test_ids_on_a_single_object_table_are_refused"],
+        'db_get on a single-object table returns the whole object as though the ids had been honoured',
+    ),
+    Guard(
+        'a non-string field name is refused', DB_TOOLS,
+        '    fields = list(SUMMARY_FIELDS.get(table, [])) + str_list(\n        args, "fields", MAX_EXTRA_FIELDS)',
+        '    fields = list(SUMMARY_FIELDS.get(table, [])) + [\n        f for f in args.get("fields") or [] if isinstance(f, str)]',
+        [DBARG + "test_a_non_string_field_name_is_refused"],
+        'a malformed field name is dropped and the rows come back without it, with no error',
+    ),
+    Guard(
+        'an empty tile table is named', MAP_TOOLS,
+        '    if data.xsize < 1 or data.ysize < 1:',
+        '    if False:',
+        [EMPTYT + "test_an_empty_tile_table_says_so"],
+        'a map with no cells is reported as a bad default for x, which is about an argument the caller never sent',
+    ),
+    Guard(
+        'growing a map is bounded too', MAP_TOOLS,
+        '    _check_budget(width * height * data.zsize, "write",\n                  windowed=False, remedy=_RESIZE_REMEDY)',
+        '    pass  # target size unchecked',
+        [GROW + "test_a_grow_past_the_ceiling_is_refused"],
+        'the whole-table ceiling applies to shrinking a map and not to growing one, so one call can build a multi-megabyte tile table',
+    ),
+    Guard(
+        'one command list has a ceiling', EVENT_TOOLS,
+        '    if len(commands) > MAX_COMMANDS_PER_LIST:',
+        '    if False:',
+        [LISTCAP + "test_a_list_past_the_ceiling_is_refused"],
+        'one request writes a page carrying far more commands than the editor will open, with no cap and no warning',
+    ),
+    Guard(
+        'appending is bounded as well', EVENT_TOOLS,
+        '    _check_list_length(combined)\n    return combined',
+        '    return combined',
+        [LISTCAP + "test_appending_cannot_walk_past_it_a_little_at_a_time"],
+        'the ceiling sees only the part being added, so a page can be walked past it a little at a time',
+    ),
+    Guard(
+        'the snapshot preview asks the snapshot', MISC_TOOLS,
+        '        return ctx.project.snapshot(label, dry_run=dry_run)',
+        '        if dry_run:\n            return {"would_snapshot": sorted(\n                p.name for p in ctx.project.data_dir.glob(\n                    "*" + ctx.project.extension)),\n                "label": label, "dry_run": True}\n        return ctx.project.snapshot(label)',
+        [SNAPDRY + "test_the_preview_leaves_out_what_the_snapshot_skips"],
+        'the preview lists the symlinked data files the real snapshot skips, so it names files no backup would hold',
+    ),
+    Guard(
+        'one conversion budget per response', DB_TOOLS,
+        '                        "entry": to_json(entry, ctx.codec, mode, walk)})',
+        '                        "entry": to_json(entry, ctx.codec, mode)})',
+        [BUDGET + "test_the_budget_bounds_the_response_not_each_entry"],
+        'each entry gets its own two-million-node allowance, so the budget bounds one entry and not the response',
+    ),
+    Guard(
+        "a hash table's own id is set", DB_TOOLS,
+        '    if request.kind == ARRAY:\n        return True',
+        '    return request.kind == ARRAY\n    if False:',
+        [AREAID + "test_a_created_area_carries_its_own_id",
+         AREAID + "test_a_clone_gets_its_own_id_not_the_originals",
+         AREAID + "test_a_patch_cannot_move_an_areas_id"],
+        'a VX area is written with no @id, or with the @id of the entry it was cloned from, and a patch can move an id off its own slot',
+    ),
+    Guard(
+        'map_tiles gates its op arguments', MAP_TOOLS,
+        '    check_op_args(op, args, TILE_OP_ARGS, "map_tiles")',
+        '    pass  # gate removed',
+        [GATED + "test_map_tiles_refuses_the_other_ops_arguments"],
+        'a fill carrying rows reports "filled ..." and never looks at them',
+    ),
+    Guard(
+        'raw_data gates its op arguments', RAW_TOOLS,
+        '    check_op_args(op, args, RAW_OP_ARGS, "raw_data")',
+        '    pass  # gate removed',
+        [GATED + "test_raw_data_refuses_a_value_it_would_not_write"],
+        'a caller that meant to write and forgot op="set" is handed the value already there, under a "value" key that reads like confirmation',
+    ),
+    Guard(
+        'scripts and backups gate theirs', MISC_TOOLS,
+        '    check_op_args(op, args, SCRIPT_OP_ARGS, "scripts")',
+        '    pass  # gate removed',
+        [GATED + "test_scripts_refuses_code_on_a_read"],
+        'scripts op="get" accepts a `code` and hands back the body already there, so a write is reported as a read of what it meant to replace',
+    ),
+    Guard(
+        'the common event path is gated too', EVENT_TOOLS,
+        '        check_op_args(op, raw_op, COMMON_EVENT_OP_ARGS, "ops[%d]" % index)',
+        '        pass  # gate removed',
+        [COMMON + "test_commands_are_not_dropped_on_an_update",
+         COMMON + "test_an_event_id_means_nothing_here"],
+        'a common event\'s "update" takes a commands list, drops it, and reports the rename as the whole change',
+    ),
+    Guard(
+        'a symbol cannot recurse without bound', CODEC,
+        '        if depth > MAX_DEPTH:\n            raise MarshalError(\n                "a symbol is nested more than %d records deep at byte %d; "',
+        '        if False:\n            raise MarshalError(\n                "a symbol is nested more than %d records deep at byte %d; "',
+        [SYMDEPTH + "test_rejects_a_deeply_nested_symbol"],
+        '1.2KB of encoding records in a name position raises RecursionError, which is not a MarshalError and escapes to a startup traceback',
+    ),
+    Guard(
+        'a string ivar cannot reset the budget', CONVERT,
+        '                "__ivars__": {k: _to_json(v, codec, tables, walk)\n                              for k, v in value.ivars.items()}}',
+        '                "__ivars__": {k: to_json(v, codec)\n                              for k, v in value.ivars.items()}}',
+        [BUDGETONE + "test_a_string_ivar_is_charged_to_the_callers_budget",
+         BUDGETONE + "test_a_string_ivar_cannot_reset_the_depth_limit"],
+        'MAX_JSON_NODES and MAX_JSON_DEPTH both restart once per string that carries an ivar record, so a few kilobytes can ask for an unbounded walk',
+    ),
+    Guard(
+        'the tile tally says what it left out', MAP_TOOLS,
+        '            "tile_ids_not_shown": max(0, len(counter) - TOP_TILE_IDS),',
+        '            "tile_ids_not_shown": 0,',
+        [TALLY + "test_it_reports_the_ids_it_did_not_list"],
+        'a caller asking whether one tile is used reads a twelve-row list, does not find it, and concludes it is unused',
+    ),
+    Guard(
+        "a map's reference count says when it is a floor", MAP_TOOLS,
+        '    more_than_shown = len(found) > REFERENCE_PREVIEW',
+        '    more_than_shown = False',
+        [MAPREFS + "test_a_count_past_the_preview_says_at_least"],
+        'a map referenced three hundred times is reported as referenced twenty-five times, so a caller that fixes those believes it is free',
+    ),
+    Guard(
+        'a lookaround is refused by name', SAFETY,
+        '            raise PatternTooCostly(\n                "that pattern uses a lookahead, lookbehind or conditional "',
+        '            atoms.append(_Atom(MAX_BACKTRACK_PATHS + 1, _ANYTHING))\n            _unused = (\n                "that pattern uses a lookahead, lookbehind or conditional "',
+        [LOOKAROUND + "test_a_lookaround_names_itself"],
+        "a lookaround is refused with the budget's message, which describes a repeated group or a chain -- neither of which the pattern has, so the caller rephrases forever instead of dropping the lookaround",
+    ),
+    Guard(
+        'every op-selecting tool has a table', REGISTRY,
+        '    inert = sorted(key for key in args if key not in allowed)',
+        '    inert = []',
+        [GATES + "test_every_op_selecting_tool_is_in_the_table_list",
+         GATED + "test_map_tiles_refuses_the_other_ops_arguments"],
+        'the gate is declared and applied to some tools and not others, which is how four op-selecting tools kept dropping arguments after it existed',
     ),
 ]
 

@@ -167,6 +167,18 @@ PAGE_CONDITION_FLAGS = ("switch1_valid", "switch2_valid", "variable_valid",
 TRIGGER_ACTION, TRIGGER_PLAYER_TOUCH, TRIGGER_EVENT_TOUCH = 0, 1, 2
 TRIGGER_AUTORUN, TRIGGER_PARALLEL = 3, 4
 
+# What each trigger is called in a reply. Here rather than in a tool, because
+# both event_get and map_get print it into their own descriptions of the same
+# page: written out separately in each, a reworded name in one made the two
+# tools disagree about what a page does.
+TRIGGER_NAMES = {
+    TRIGGER_ACTION: "action button",
+    TRIGGER_PLAYER_TOUCH: "player touch",
+    TRIGGER_EVENT_TOUCH: "event touch",
+    TRIGGER_AUTORUN: "autorun",
+    TRIGGER_PARALLEL: "parallel process",
+}
+
 # The nine tileset sheets an RPG::Tileset names, in @tileset_names order.
 TILESET_SHEET_NAMES = ("A1", "A2", "A3", "A4", "A5", "B", "C", "D", "E")
 

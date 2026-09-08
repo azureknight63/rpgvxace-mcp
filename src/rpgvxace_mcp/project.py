@@ -58,12 +58,25 @@ ENCODING_SAMPLE_TABLES = ("system", "actors", "items", "map_infos")
 ENCODING_SAMPLE_LIMIT = 400
 MAX_STRING_SCAN_DEPTH = 12
 
-# How many values the encoding sampler will look at. It runs during
-# construction, so it has to finish on any file at all.
+# How many values one call of `collect_strings` will look at. The encoding
+# sampler runs during construction, so it has to finish on any file at all --
+# and it walks several files, so the sampler's own ceiling is one shared budget
+# passed to each call. This is the per-call default for every other caller.
 MAX_STRING_SCAN_NODES = 200_000
 
 # The highest map id the editor's Map%03d naming can express.
 MAX_MAP_ID = 9999
+
+# The largest data file this server will read into memory. A real project's
+# largest file is a few megabytes; this leaves room above that while turning a
+# damaged or crafted multi-gigabyte file into a refusal rather than a
+# MemoryError, which is not a ProjectError and so escaped Project.__init__ as
+# a traceback.
+MAX_DATA_FILE_BYTES = 128 * 1024 * 1024
+
+# Game.ini is a handful of keys. Capped for the same reason and much lower,
+# because nothing legitimate comes near it.
+MAX_GAME_INI_BYTES = 1024 * 1024
 
 # A script slot inflates into memory, so a crafted Scripts file must not be
 # able to ask for an unbounded amount of it.
@@ -103,9 +116,15 @@ JSON_ENGINES = ("mv",)
 # Which generation of RGSS each engine ships, for finding its RTP.
 RGSS_GENERATION = {"vx_ace": "RGSS3", "vx": "RGSS2", "xp": "RGSS"}
 
-# A superset across the VX family. A folder an engine does not use simply comes
-# back empty, and checks against an empty pool are skipped -- Battlebacks1/2 are
-# Ace, the single Battlebacks folder is VX.
+# A superset across the VX family: Battlebacks1/2 are Ace's, the single
+# Battlebacks folder is VX's. A folder an engine does not use simply comes back
+# empty.
+#
+# An empty pool is *not* generally skipped -- `_AssetChecker` skips one only
+# when a declared RTP could not be located, which is the case where "we could
+# not look" and "there is nothing there" are indistinguishable. With no RTP
+# declared, every reference into an empty folder is reported missing, which is
+# right for a project that really has none.
 ASSET_DIRS = {
     "characters": "Graphics/Characters",
     "faces": "Graphics/Faces",
@@ -117,7 +136,6 @@ ASSET_DIRS = {
     "tilesets": "Graphics/Tilesets",
     "battlebacks1": "Graphics/Battlebacks1",
     "battlebacks2": "Graphics/Battlebacks2",
-    "battlebacks": "Graphics/Battlebacks",
     "titles1": "Graphics/Titles1",
     "titles2": "Graphics/Titles2",
     "bgm": "Audio/BGM",
@@ -298,6 +316,11 @@ class Project:
                     "set explicitly with --encoding")
         samples: list[bytes] = []
         sampled: list[str] = []
+        # One budget for the whole sample, not one per file: five files each
+        # given MAX_STRING_SCAN_NODES is five times the work the constant
+        # describes, during construction, before the server can answer
+        # anything.
+        budget = [MAX_STRING_SCAN_NODES]
         sources = list(ENCODING_SAMPLE_TABLES)
         # Dialogue lives in maps, not in the database, so sample one: a project
         # with an ASCII database and Japanese event text is otherwise reported
@@ -306,7 +329,7 @@ class Project:
         for key in sources:
             try:
                 collect_strings(self.load_data(key), samples,
-                                limit=ENCODING_SAMPLE_LIMIT)
+                                limit=ENCODING_SAMPLE_LIMIT, budget=budget)
             except (ProjectError, ValueError, OSError):
                 continue
             sampled.append(key)
@@ -315,7 +338,7 @@ class Project:
         if first_map is not None and len(samples) < ENCODING_SAMPLE_LIMIT:
             try:
                 collect_strings(self.load_map(first_map), samples,
-                                limit=ENCODING_SAMPLE_LIMIT)
+                                limit=ENCODING_SAMPLE_LIMIT, budget=budget)
                 sampled.append("map %d" % first_map)
             except (ProjectError, ValueError, OSError):
                 pass
@@ -345,6 +368,11 @@ class Project:
         try:
             # Game.ini is Windows-encoded and occasionally malformed; neither
             # should stop the server from opening the project.
+            # Size-capped like every other untrusted read here: a real
+            # Game.ini is a few hundred bytes, and reading a huge one whole
+            # would raise MemoryError out of Project.__init__.
+            if path.stat().st_size > MAX_GAME_INI_BYTES:
+                return []
             parser.read_string(path.read_text(encoding="cp1252", errors="replace"))
         except (configparser.Error, OSError):
             return []
@@ -466,6 +494,17 @@ class Project:
         if not path.is_file():
             raise ProjectError("%s does not exist in %s" % (filename, self.data_dir))
         stat = path.stat()
+        if stat.st_size > MAX_DATA_FILE_BYTES:
+            # Checked before reading, not after: a damaged or crafted file of
+            # a few gigabytes raised MemoryError, which is not a ProjectError
+            # and so escaped Project.__init__ as a traceback rather than being
+            # reported as a bad file.
+            raise ProjectError(
+                "%s is %.1f MB, above the %d MB this server reads. A real "
+                "data file is a few megabytes; this one is damaged, or is not "
+                "project data."
+                % (filename, stat.st_size / (1024 * 1024),
+                   MAX_DATA_FILE_BYTES // (1024 * 1024)))
         raw = path.read_bytes()
         try:
             value, warnings = marshal_rb.load_with_warnings(raw)
@@ -512,7 +551,12 @@ class Project:
             # parse as id 1, so accepting them let one cached map be walked
             # once per file, and made an id whose name maps back to a file
             # that is not there.
-            if digits.isdigit() and 1 <= int(digits) <= MAX_MAP_ID \
+            # isascii() as well: isdigit() is true for non-decimal Unicode
+            # numerics that int() then rejects, so "Map²9.rvdata2" reached
+            # int() and raised ValueError out of the function whose job is to
+            # decide which ids the engine can address.
+            if digits.isascii() and digits.isdigit() \
+                    and 1 <= int(digits) <= MAX_MAP_ID \
                     and digits == "%03d" % int(digits):
                 ids.append(int(digits))
         self._map_ids = sorted(set(ids))
@@ -830,17 +874,30 @@ class Project:
             self.prune_backups()
         return str(target)
 
-    def snapshot(self, label: str = "manual", keep: set[str] | None = None
-                 ) -> dict[str, Any]:
+    def snapshot(self, label: str = "manual", keep: set[str] | None = None,
+                 dry_run: bool = False) -> dict[str, Any]:
         """Copy every data file into a fresh backup directory.
 
         Prunes old snapshots afterwards, sparing anything named in ``keep``.
+
+        ``dry_run`` reports what would be copied without writing anything.
+        It walks the same files with the same skips rather than leaving the
+        caller to glob for itself: the `backups` tool did that, so its preview
+        listed the symlinked data files this refuses to copy -- a preview that
+        does not match the act is worse than no preview.
         """
-        self._assert_writable("taking a snapshot")
+        if not dry_run:
+            # Gated like every sibling preview: save_file, delete_file,
+            # restore_backup and prune_backups all check this only when they
+            # are about to write. A read-only server used to refuse a snapshot
+            # *preview*, which writes nothing, so a model exploring one was
+            # told a write had failed.
+            self._assert_writable("taking a snapshot")
         clean = re.sub(r"[^A-Za-z0-9._-]", "-", label) or "manual"
         stamp = datetime.now().strftime(BACKUP_STAMP_FORMAT) + "-" + clean
         target = self._backup_dir(stamp)
-        target.mkdir(parents=True, exist_ok=True)
+        if not dry_run:
+            target.mkdir(parents=True, exist_ok=True)
         copied = []
         for path in sorted(self.data_dir.glob("*" + self.extension)):
             if path.is_symlink():
@@ -849,10 +906,18 @@ class Project:
                 continue
             name = safe_component(path.name, "data file name")
             _contained(target / name, target, "backup of %r" % name)
-            shutil.copy2(path, target / name)
+            if not dry_run:
+                shutil.copy2(path, target / name)
             copied.append(name)
-        self.prune_backups(keep)
-        return {"backup": stamp, "path": str(target), "files": copied}
+        # The prune is part of the act, so the preview reports it too. It was
+        # left out of both, so `backups op="create"` quietly removed the
+        # oldest snapshot while the sibling op="prune" reports every removal.
+        if dry_run:
+            return {"would_snapshot": copied, "label": clean, "dry_run": True,
+                    "would_prune": self.prune_backups(keep, dry_run=True)}
+        pruned = self.prune_backups(keep)
+        return {"backup": stamp, "path": str(target), "files": copied,
+                "pruned": pruned}
 
     def list_backups(self) -> list[dict[str, Any]]:
         root = self.backup_root()
@@ -911,11 +976,26 @@ class Project:
         # pruning runs inside this call, and would otherwise be free to delete
         # the very directory about to be copied out of.
         pre = self.snapshot("pre-restore", keep={stamp})
+        # Staleness-checked before anything is copied, so a restore that would
+        # overwrite an editor's unsaved work refuses with none of it done. This
+        # was the one write path exempt from the module's own stated habit --
+        # "refuse to write over a file that changed underneath us" -- and the
+        # safety snapshot above made it recoverable rather than harmless.
         for name in wanted:
-            source = _contained(source_dir / name, self.backup_root(),
+            cached = self._cache.get(name)
+            if cached is not None:
+                self._assert_not_stale(name, self.path_for(name), cached)
+        for name in wanted:
+            # The snapshot being restored from, not the backup root: with the
+            # root as the boundary a symlink planted in one snapshot could
+            # resolve into another and be restored from there.
+            source = _contained(source_dir / name, source_dir,
                                 "backup file %r" % name)
             shutil.copy2(source, self.path_for(name))
             self._cache.pop(name, None)
+            # With the cache entry gone, the per-run backup flag has to go too,
+            # or the next save of a restored file skips its own backup.
+            self._backed_up.discard(name)
         self._map_ids = None
         self._log_change("backups", ",".join(wanted), "restored from %s" % stamp)
         return {"backup": stamp, "restored": wanted, "safety_backup": pre["backup"]}

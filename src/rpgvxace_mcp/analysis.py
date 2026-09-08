@@ -402,6 +402,17 @@ def _referenced_ids(code: Any, params: list[Any]) -> Iterator[tuple[str, int]]:
             yield table, value
 
 
+# How many of the references to a thing being deleted come back. Enough to see
+# the shape of the problem without turning a delete into a report. Defined here
+# rather than in each tool, because both callers bound the same promise against
+# this same function and had written the rationale out twice.
+#
+# A caller wanting to know whether there are *more* than this asks for one
+# past it: find_references stops as soon as it has what it was asked for, so
+# a full page and a page that is exactly full look identical otherwise.
+REFERENCE_PREVIEW = 25
+
+
 def find_references(project: Project, table: str, entry_id: int,
                     limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
     """Find event commands that mention ``entry_id`` from ``table``."""
@@ -659,6 +670,8 @@ def check_map_tree(project: Project) -> list[Finding]:
     on_disk = set(project.map_ids_on_disk())
 
     for map_id, info in infos.items():
+        if len(findings) >= MAX_FINDINGS:
+            break
         name = _text(project, info.get("name")) if isinstance(info, RubyObject) else "?"
         if _int(map_id) is None or not 1 <= map_id <= MAX_MAP_ID:
             findings.append(Finding(
@@ -685,6 +698,8 @@ def check_map_tree(project: Project) -> list[Finding]:
                 _map_at(map_id, "parent_id")))
 
     for map_id in sorted(on_disk - set(infos)):
+        if len(findings) >= MAX_FINDINGS:
+            break
         findings.append(Finding(
             WARNING, "orphan_map_file",
             "%s exists but no MapInfos entry points at it, so the editor will "
@@ -713,6 +728,8 @@ def _parent_cycles(infos: dict[Any, Any]) -> list[Finding]:
     findings = []
     settled: dict[int, bool] = {}   # map id -> is its chain sound
     for start in infos:
+        if len(findings) >= MAX_FINDINGS:
+            break
         if _int(start) is None or start in settled:
             continue
         chain: list[int] = []
@@ -862,6 +879,8 @@ def check_tilesets(project: Project, map_ids: list[int],
     # differ only in case.
     checker = _AssetChecker(project)
     for entry_id, tileset in tables.rows_of("tilesets"):
+        if len(findings) >= MAX_FINDINGS:
+            break
         if not isinstance(tileset, RubyObject):
             continue
         name = _text(project, tileset.get("name"))
@@ -1200,7 +1219,12 @@ def check_assets(project: Project, map_ids: list[int]) -> list[Finding]:
     Covers what an agent is most likely to break: map parallaxes and
     battlebacks, map BGM and BGS that actually autoplay, event page character
     graphics, Show Text faces, the four audio commands, actor character and
-    face graphics, enemy battlers, animation sheets, and tileset sheets.
+    face graphics, enemy battlers, and animation sheets.
+
+    Not tileset sheets, though they are asset names too: those are checked by
+    `check_tilesets`, which runs under the "maps" scope because a tileset is
+    reached through the map that uses it. Asking for scopes=["assets"] alone
+    does not check them.
 
     Not everything: RPG::System's own graphics and sounds, pictures, titles,
     and the graphics named by the commands that change an actor's appearance
@@ -1324,11 +1348,19 @@ NESTED_DB_REFERENCES = (
 
 
 def check_database(project: Project, tables: _Tables) -> list[Finding]:
-    """Ids one database table holds for another."""
+    """Ids one database table holds for another.
+
+    Each check walks one table's rows, so the ceiling is tested between them
+    rather than inside each loop: that bounds the whole function to one
+    table's overshoot without a guard in every one of a dozen loops.
+    """
     findings: list[Finding] = []
 
+    def room() -> bool:
+        return len(findings) < MAX_FINDINGS
+
     class_ids = tables.ids("classes")
-    if class_ids is not None:
+    if class_ids is not None and room():
         for entry_id, actor in tables.rows_of("actors"):
             if not isinstance(actor, RubyObject) or not actor.has("class_id"):
                 continue
@@ -1341,11 +1373,17 @@ def check_database(project: Project, tables: _Tables) -> list[Finding]:
                     "class.", _db_at("actors", entry_id, "class_id")))
 
     for ref in NESTED_DB_REFERENCES:
+        if not room():
+            break
         target_ids = tables.ids(ref.target)
         if target_ids is None:
             continue
         noun = TABLE_NOUNS[ref.target]
         for entry_id, row in tables.rows_of(ref.owner):
+            if not room():
+                # Inside the row loop as well as outside it: one owner table
+                # with a million rows is one iteration of the loop above.
+                break
             if not isinstance(row, RubyObject):
                 continue
             for child in _seq(row.get(ref.field)):

@@ -5,17 +5,19 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from ..analysis import REFERENCE_RULES, find_references
-from ..convert import apply_patch, to_json
+from ..analysis import REFERENCE_PREVIEW, REFERENCE_RULES, find_references
+from ..convert import TABLE_MODES, apply_patch, new_walk, to_json
 from ..project import ProjectError
 from ..rubytypes import RubyObject, RubyString
 from ..schema import ALL_DATABASE_TABLES, ALL_TABLE_KEYS, ARRAY, HASH, SCRIPTS, SINGLE
 from .registry import (
     bare_name,
+    check_op_args,
     MAX_OPS,
     refuse_unknown_fields,
     opt_dict,
     ops_arg,
+    str_list,
     echo,
     int_list,
     ARR,
@@ -30,7 +32,6 @@ from .registry import (
     one_of,
     opt_bool,
     opt_int,
-    opt_list,
     opt_str,
     prop,
     schema,
@@ -80,18 +81,31 @@ MAX_ROWS = 500
 
 TABLE_LIST = ", ".join(ALL_DATABASE_TABLES)
 
-# The operations db_edit accepts. Named once, so the schema that advertises
-# them and the reader that enforces them cannot drift apart.
-DB_OPS = ("update", "create", "delete")
+# The operations db_edit accepts, and what each one reads. One table, so the
+# schema that advertises them, the reader that enforces them and the dispatcher
+# that runs them cannot drift apart -- the comment here claimed that while
+# three separate lists of the same three names sat in this file, and a test now
+# holds the dispatcher to this.
+#
+# `delete` reads no patch: an op meaning to rename an entry and delete it did
+# the delete and reported nothing amiss.
+DB_OP_ARGS = {
+    "update": {"op", "id", "patch"},
+    "create": {"op", "id", "clone_from", "patch"},
+    "delete": {"op", "id"},
+}
 
-# How many of the references to a deleted entry are listed back. Enough to see
-# the shape of the problem without turning a delete into a report.
-REFERENCE_PREVIEW = 25
+
 
 # Everything db_edit will actually change. map_infos is left out
 # deliberately: the tree and the map files have to move together, and
 # only map_edit does both, so advertising it here would offer an edit
 # that is always refused.
+# Every table db_get will read. Scripts is left out rather than advertised
+# and then refused at runtime: an enum is the only place a caller can learn
+# what a tool takes before calling it, and db_edit already narrows its own.
+READABLE_DATABASE_TABLES = [t for t in ALL_TABLE_KEYS if t != "scripts"]
+
 EDITABLE_DATABASE_TABLES = [t for t in ALL_DATABASE_TABLES
                             if t != "map_infos"]
 
@@ -108,10 +122,17 @@ def _table_arg(ctx: Context, args: dict[str, Any]) -> str:
         raise ToolError("unknown table %r; this project has %s"
                         % (table, ", ".join(sorted(ctx.project.data_files))))
     if entry.container not in (ARRAY, HASH):
+        # One remedy each, because the two are not interchangeable: raw_data
+        # refuses the scripts table outright, so offering it for `scripts` was
+        # a remedy that cannot work.
+        if entry.container == SCRIPTS:
+            raise ToolError(
+                "%s is the script editor, not an id-indexed table. Use the "
+                "scripts tool, which inflates and compresses a slot body for "
+                "you." % table)
         raise ToolError(
-            "%s is not an id-indexed table. Use raw_data for %s, or the scripts "
-            "tool for the script editor." % (table, table)
-        )
+            "%s is one object, not an id-indexed table. Read a field of it "
+            "with raw_data, or the whole thing with db_get." % table)
     return table
 
 
@@ -159,9 +180,11 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 
     id_from, id_to = opt_int(args, "id_from"), opt_int(args, "id_to")
     needle = (opt_str(args, "name_contains") or "").lower()
-    fields = list(SUMMARY_FIELDS.get(table, [])) + [
-        f for f in opt_list(args, "fields") if isinstance(f, str)
-    ]
+    # str_list rather than a filter: dropping a non-string entry left a
+    # caller who passed [["price"]] with rows carrying no extra fields and no
+    # error, which is the silent coercion every other argument here refuses.
+    fields = list(SUMMARY_FIELDS.get(table, [])) + str_list(
+        args, "fields", MAX_EXTRA_FIELDS)
 
     rows = []
     for entry_id, entry in entries:
@@ -192,7 +215,10 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         "table": table,
         "file": ctx.project.filename_for(table),
         "class": ctx.project.data_files[table].cls,
-        "total_entries": len(rows),
+        # The number matching the filters, which is what was counted --
+        # "total" read as the size of the table, so a filtered listing looked
+        # like the whole of a much smaller one.
+        "matching_entries": len(rows),
         "returned": len(window),
         "offset": offset,
         "entries": window,
@@ -206,14 +232,18 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     "Field names match the RGSS instance variables minus the leading @, which "
     "is what db_edit patches expect.",
     schema({
-        "table": prop(STR, "Which table to read from.", enum=ALL_TABLE_KEYS),
+        "table": prop(STR, "Which table to read from. Not scripts -- a slot "
+                           "body is compressed Ruby, so the scripts tool "
+                           "reads those.", enum=READABLE_DATABASE_TABLES),
         "ids": prop(ARR, "Entry ids to read; at most %d per call."
                     % MAX_IDS_PER_CALL, items={"type": INT},
                     maxItems=MAX_IDS_PER_CALL),
-        "id": prop(INT, "A single entry id, if you only want one."),
+        "id": prop(INT, "A single entry id, if you only want one. Ids run "
+                        "from 1 to %d." % MAX_ENTRY_ID, minimum=0,
+                   maximum=MAX_ENTRY_ID),
         "tables": prop(STR, "How to render RGSS Table fields such as parameter "
                             "curves: summary (shape only, the default) or full "
-                            "(every cell).", enum=["summary", "full"]),
+                            "(every cell).", enum=list(TABLE_MODES)),
         "refresh": REFRESH,
     }, ["table"]),
 )
@@ -230,32 +260,55 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             "would hand back as base64. Use the scripts tool, which inflates "
             "and decodes it.")
     refresh = opt_bool(args, "refresh")
-    mode = one_of(args, "tables", ["summary", "full"], "summary")
+    mode = one_of(args, "tables", list(TABLE_MODES), TABLE_MODES[0])
 
     if ctx.project.data_files[table].container == SINGLE:
+        # Refused rather than ignored: `db_get table="system" ids=[1,2]` used
+        # to return the whole System object, which reads as though the ids had
+        # been honoured and two entries had come back.
+        given = [name for name in ("ids", "id") if args.get(name) is not None]
+        if given:
+            raise ToolError(
+                "%s is one object, not a table of entries, so %s does not "
+                "apply to it. Leave it out to read the whole thing, or read "
+                "one field with raw_data."
+                % (table, " or ".join(echo(name) for name in given)))
         value = ctx.project.load_data(table, refresh)
         return {"table": table, "entry": to_json(value, ctx.codec, mode)}
 
     ids = int_list(args, "ids", MAX_IDS_PER_CALL, minimum=0)
-    single = opt_int(args, "id")
+    single = opt_int(args, "id", minimum=0, maximum=MAX_ENTRY_ID)
     if single is not None:
         ids.append(single)
     if not ids:
         raise ToolError("pass ids (an array) or id (a single number)")
 
     out, missing = [], []
+    # One budget for the whole response. Each entry used to get its own, so
+    # reading MAX_IDS_PER_CALL crafted entries was an unbounded walk in
+    # aggregate however tight the per-entry bound was.
+    walk = new_walk()
     for entry_id in ids:
         entry = ctx.project.get_entry(table, entry_id, refresh)
         refresh = False  # only re-read the file once
         if entry is None:
             missing.append(entry_id)
         else:
-            out.append({"id": entry_id, "entry": to_json(entry, ctx.codec, mode)})
+            out.append({"id": entry_id,
+                        "entry": to_json(entry, ctx.codec, mode, walk)})
     result: dict[str, Any] = {"table": table, "entries": out}
     if missing:
         result["missing_ids"] = missing
-        result["note"] = ("ids with no entry are empty slots; db_edit with "
-                          'op "create" fills them in')
+        # Only the ids db_edit will actually accept get that advice: id 0 is
+        # RPG Maker's deliberately empty slot and _check_id refuses it, so
+        # offering create for it hands the caller a remedy that cannot work.
+        creatable = [i for i in missing if i >= 1]
+        result["note"] = (
+            'ids with no entry are empty slots; db_edit with op "create" '
+            "fills in %s" % (", ".join(str(i) for i in creatable)
+                             if creatable else "none of these")
+            + (". Id 0 is not an entry: RPG Maker keeps slot 0 empty so every "
+               "id matches its position." if 0 in missing else ""))
     return result
 
 
@@ -280,9 +333,19 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             "additionalProperties": False,
             "type": OBJ,
             "properties": {
-                "op": {"type": STR, "enum": ["update", "create", "delete"]},
+                "op": {"type": STR, "enum": list(DB_OP_ARGS)},
+                # No declared minimum or maximum. The real ceiling is
+                # this table's own length plus a little headroom, which a
+                # static bound cannot express -- and declaring %d would be
+                # worse than declaring nothing, because ids far below it are
+                # refused for a small table. `_check_id` names the table's
+                # size in its refusal, which is the answer a caller can act
+                # on.
                 "id": {"type": INT, "description":
-                       "Entry id. Optional for create, which appends by default."},
+                       "Entry id, numbered from 1. op \"create\" accepts "
+                       "an id up to about a thousand past the end of the "
+                       "table, and its refusal says exactly how far. Optional "
+                       "for create, which appends by default."},
                 "clone_from": {"type": INT, "description":
                                "For create: copy this entry, then apply the patch."},
                 "patch": {"type": OBJ, "description":
@@ -341,8 +404,9 @@ def _apply_db_ops(ctx: Context, table: str,
     request = _DbRequest(ctx, table, container, kind)
     applied: list[dict[str, Any]] = []
 
-    for raw_op in ops:
-        op = one_of(raw_op, "op", list(DB_OPS))
+    for index, raw_op in enumerate(ops):
+        op = one_of(raw_op, "op", list(DB_OP_ARGS))
+        check_op_args(op, raw_op, DB_OP_ARGS, "ops[%d]" % index)
         patch = opt_dict(raw_op, "patch")
         applied.append(_DB_OPS[op](request, raw_op, patch))
     return applied, request.warnings
@@ -369,8 +433,7 @@ class _DbRequest:
         entry_id = opt_int(raw_op, "id")
         if entry_id is None:
             raise ToolError("%s needs an id" % op)
-        _check_id(self.table, entry_id, self.container, self.kind,
-                  existing=existing)
+        _check_id(self, entry_id, existing=existing)
         return entry_id
 
     def fields_of(self, entry: Any) -> set[str]:
@@ -396,7 +459,7 @@ class _DbRequest:
         and the engine subscripts the array on that. Setting @id to anything
         else leaves an entry the engine cannot find.
         """
-        if not _carries_id(self.kind):
+        if not _carries_id(self):
             return
         # Bare, like every other refusal list: "@id" is the same field.
         given = next((patch[key] for key in patch
@@ -407,7 +470,7 @@ class _DbRequest:
                 "entry's id is its position, so leave id out of the patch"
                 % (echo(given), entry_id))
 
-    def require(self, entry_id: int, op: str) -> Any:
+    def require(self, entry_id: int) -> Any:
         """The entry at an id, or a refusal naming what to do instead."""
         entry = self.ctx.project.get_entry(self.table, entry_id)
         if entry is None:
@@ -421,7 +484,7 @@ def _op_update(request: _DbRequest, raw_op: dict[str, Any],
                patch: dict[str, Any]) -> dict[str, Any]:
     """Change fields on an entry that already exists."""
     entry_id = request.entry_id(raw_op, "update", existing=True)
-    entry = request.require(entry_id, "update")
+    entry = request.require(entry_id)
     request.refuse_id_patch(patch, entry_id)
     refuse_unknown_fields(patch, request.fields_of(entry),
                           "%s entry %d" % (request.table, entry_id))
@@ -438,9 +501,9 @@ def _op_create(request: _DbRequest, raw_op: dict[str, Any],
         entry_id = _next_free_id(request.container, request.kind)
         # Checked too: a hash-keyed table's existing keys come out of a file,
         # so the id derived from them is not automatically a usable one.
-        _check_id(table, entry_id, request.container, request.kind)
+        _check_id(request, entry_id)
     else:
-        _check_id(table, entry_id, request.container, request.kind)
+        _check_id(request, entry_id)
         if ctx.project.get_entry(table, entry_id) is not None:
             raise ToolError(
                 "%s already has an entry %d; use op \"update\" to change it"
@@ -468,7 +531,7 @@ def _op_create(request: _DbRequest, raw_op: dict[str, Any],
                               request.sibling_fields(),
                               "a new %s entry" % table)
     changes = apply_patch(entry, patch, ctx.codec) if patch else []
-    if isinstance(entry, RubyObject) and _carries_id(request.kind):
+    if isinstance(entry, RubyObject) and _carries_id(request):
         # After the patch, and unconditionally: every RGSS entry in an
         # id-indexed array carries @id equal to its own slot, a blank entry has
         # no fields at all to test for, and a patch naming a different id would
@@ -482,16 +545,28 @@ def _op_create(request: _DbRequest, raw_op: dict[str, Any],
 
 
 def _op_delete(request: _DbRequest, raw_op: dict[str, Any],
-               patch: dict[str, Any]) -> dict[str, Any]:
-    """Clear an entry, reporting what still points at it."""
+               _patch: dict[str, Any]) -> dict[str, Any]:
+    """Clear an entry, reporting what still points at it.
+
+    Takes the patch argument it never reads, because `_DB_OPS` dispatches all
+    three ops through one signature -- and `check_op_args` refuses a patch on
+    a delete before this is reached, so there is never one to ignore. Named
+    with a leading underscore so that is visible here.
+    """
     ctx, table, kind = request.ctx, request.table, request.kind
     entry_id = request.entry_id(raw_op, "delete", existing=True)
     if ctx.project.get_entry(table, entry_id) is None:
         raise ToolError("%s has no entry %d" % (table, entry_id))
 
     scanned = table in REFERENCE_RULES
-    references = (find_references(ctx.project, table, entry_id,
-                                  limit=REFERENCE_PREVIEW) if scanned else [])
+    # One past the preview, so a full page can be told from a page that
+    # happens to be exactly full: `len(references)` was reported as the total,
+    # so an entry referenced three hundred times was said to be referenced
+    # twenty-five times, and a caller could believe it had seen them all.
+    found = (find_references(ctx.project, table, entry_id,
+                             limit=REFERENCE_PREVIEW + 1) if scanned else [])
+    more_than_shown = len(found) > REFERENCE_PREVIEW
+    references = found[:REFERENCE_PREVIEW]
     if kind == ARRAY:
         # Keep the slot, so every later id keeps its position. That is what the
         # editor does when you clear an entry.
@@ -501,8 +576,10 @@ def _op_delete(request: _DbRequest, raw_op: dict[str, Any],
 
     if references:
         request.warnings.append(
-            "entry %d is still referenced by %d event command(s); those "
-            "commands now point at nothing" % (entry_id, len(references)))
+            "entry %d is still referenced by %s%d event command(s); those "
+            "commands now point at nothing"
+            % (entry_id, "at least " if more_than_shown else "",
+               len(references)))
     elif not scanned:
         # A zero here would read as "nothing points at it", when in fact
         # nothing looked: only some tables have command parameter rules.
@@ -512,6 +589,10 @@ def _op_delete(request: _DbRequest, raw_op: dict[str, Any],
             "afterwards." % (table, entry_id))
     return {"op": "delete", "id": entry_id,
             "references_checked": scanned,
+            # In the reply as well as in the warning: a model reading the
+            # number rather than the sentence took the preview limit for a
+            # total.
+            "references_truncated": more_than_shown,
             "references_found": len(references) if scanned else None,
             "references": references}
 
@@ -519,7 +600,7 @@ def _op_delete(request: _DbRequest, raw_op: dict[str, Any],
 _DB_OPS = {"update": _op_update, "create": _op_create, "delete": _op_delete}
 
 
-def _check_id(table: str, entry_id: int, container: Any, kind: str,
+def _check_id(request: "_DbRequest", entry_id: int,
               existing: bool = False) -> None:
     """Refuse an entry id that cannot mean what the caller intended.
 
@@ -528,14 +609,19 @@ def _check_id(table: str, entry_id: int, container: Any, kind: str,
     ``value[-1]``) and a huge one padded the table with nil slots -- both
     reported as a successful create.
     """
+    container, kind = request.container, request.kind
     if entry_id < 0:
         raise ToolError(
             "id must not be negative, got %d. Database entries are numbered "
             "from 1." % entry_id)
-    if kind == ARRAY and entry_id == 0:
+    if entry_id == 0 and _carries_id(request):
+        # Asked of the same property as everything else about ids, rather than
+        # of ARRAY-versus-HASH: VX's `areas` is Hash-keyed and numbers its
+        # entries from 1 like every other table, so id 0 was accepted there
+        # and then written with @id = 0.
         raise ToolError(
             "id 0 is not an entry: RPG Maker keeps slot 0 empty so that every "
-            "id matches its position in the array. Ids start at 1.")
+            "id matches its position. Ids start at 1.")
     if existing:
         return
     ceiling = (min(MAX_ENTRY_ID, len(container) + ARRAY_GROWTH_HEADROOM)
@@ -548,16 +634,31 @@ def _check_id(table: str, entry_id: int, container: Any, kind: str,
                         entry_id - len(container)))
 
 
-def _carries_id(kind: str) -> bool:
-    """Whether entries in this container carry their own @id.
+def _carries_id(request: "_DbRequest") -> bool:
+    """Whether entries in this table carry their own @id.
 
-    An id-indexed Array does: the engine subscripts it by id, and each entry
-    repeats that id in @id. A Hash-keyed table does not -- MapInfos entries are
-    found by their key, and RPG::MapInfo has no @id to set. Keyed off the
-    container rather than the documented field list, because the field tables
-    describe what the editor shows and do not list @id at all.
+    Every id-indexed Array does: the engine subscripts it by id and each entry
+    repeats that id in @id. Most Hash-keyed tables do not -- a MapInfos entry
+    is found by its key and RPG::MapInfo has no id field.
+
+    But not all of them. VX's `areas` is Hash-keyed and RPG::Area documents an
+    `id`, so deciding this from ARRAY-versus-HASH -- as this did, in a
+    docstring that asserted a Hash-keyed table never carries one -- meant an
+    area created here was written with no @id at all, and a patch moving @id to
+    another number was accepted. So it is decided from the class this table
+    holds, which is the thing the question is actually about.
+
+    Asked of the documented fields and of a live sibling, because either alone
+    is incomplete: a table this server has no field list for is still readable,
+    and a table whose entries are all blank has no sibling to ask.
     """
-    return kind == ARRAY
+    if request.kind == ARRAY:
+        return True
+    held = request.ctx.project.data_files[request.table].cls
+    documented = request.ctx.project.profile.class_fields.get(held or "", {})
+    if "id" in documented:
+        return True
+    return "id" in request.sibling_fields()
 
 
 def _next_free_id(container: Any, kind: str) -> int:

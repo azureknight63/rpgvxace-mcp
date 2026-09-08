@@ -18,7 +18,14 @@ from . import __version__
 from .convert import ConversionError
 from .docs import RESOURCES, server_instructions
 from .project import Project, ProjectError, ReadOnlyError, StaleFileError
-from .tools import db_tools, event_tools, map_tools, misc_tools  # noqa: F401
+from .tools import (  # noqa: F401
+    db_tools,
+    event_tools,
+    map_tools,
+    misc_tools,
+    raw_tools,
+    search_tools,
+)
 # Imported for the side effect: each module's @tool decorators register its
 # tools in REGISTRY, which all_tools() then reads. Removing these as unused
 # imports empties the tool list.
@@ -327,7 +334,14 @@ def _answer_batch(server: "Server", message: list[Any]) -> list[dict[str, Any]]:
     fit is answered with its own error under its own id.
     """
     responses: list[dict[str, Any]] = []
-    spent = 0
+    # Two characters for the enclosing brackets, and one comma per response
+    # after the first, counted as each is appended. The members' own sizes
+    # alone let a batch that summed to exactly the cap pass here and then trip
+    # `_write`'s check -- where the payload is a list, so `isinstance(payload,
+    # dict)` is false and the substitute carries `id: null`, leaving every
+    # member of the batch unanswered. That is the regression this accounting
+    # exists to prevent, so it has to count the frame it is measuring.
+    spent = 2
     for entry in message:
         if not isinstance(entry, dict):
             answer = _error(None, INVALID_REQUEST,
@@ -344,7 +358,8 @@ def _answer_batch(server: "Server", message: list[Any]) -> list[dict[str, Any]]:
                 "the answers to this batch do not fit in one response. Send "
                 "these requests separately, or ask for less in each.")
             size = len(json.dumps(answer))
-        spent += size
+        # The comma this response needs if it is not the first.
+        spent += size + (1 if responses else 0)
         responses.append(answer)
     return responses
 

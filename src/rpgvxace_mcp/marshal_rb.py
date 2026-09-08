@@ -244,7 +244,19 @@ class MarshalReader:
         return table[index]
 
     def _read_symbol_ref(self, depth: int = 0) -> RubySymbol:
-        """Read a value that must be a symbol (class names, ivar names)."""
+        """Read a value that must be a symbol (class names, ivar names).
+
+        Depth-checked like `_read_value`, and for the same reason: the T_IVAR
+        branch below recurses, so a name position filled with encoding records
+        -- 1.2KB of them is enough -- raised RecursionError. That is a
+        RuntimeError, so it escapes every `except MarshalError` on the way out
+        and `Project.__init__` reported a traceback rather than a bad file.
+        """
+        if depth > MAX_DEPTH:
+            raise MarshalError(
+                "a symbol is nested more than %d records deep at byte %d; "
+                "this file is not one the editor wrote"
+                % (MAX_DEPTH, self.pos))
         tag = self._byte()
         if tag == T_SYMBOL:
             return self._read_symbol_def(depth)
@@ -336,6 +348,14 @@ class MarshalReader:
         inner = self._read_value(depth + 1)
         ivars = self._read_ivars(depth + 1)
         if not ivars:
+            # An `I` record carrying no instance variables. Ruby never writes
+            # one, so this is a crafted or damaged file; dropping it is the
+            # right read, but it means the bytes will not come back identical,
+            # and every other unreproducible construct here says so.
+            self.warnings.append(
+                "an instance-variable record with no variables was dropped at "
+                "byte %d; this file will not write back byte-identically"
+                % self.pos)
             return inner
         if isinstance(inner, (RubyString, RubyUserDef, RubyObject, RubySymbol)):
             inner.ivars.update(ivars)

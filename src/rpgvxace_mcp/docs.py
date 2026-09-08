@@ -48,6 +48,16 @@ def server_instructions(project: Project) -> str:
         "expects.",
         "* Anything with dry_run will show you the change before it touches disk. "
         "Writes back up the file first, and backups can be listed and restored.",
+        "* One op carries only its own arguments. Every tool that takes an op "
+        "declares which arguments each op reads, and anything else is refused "
+        "rather than ignored -- so \"rename this event and rewrite its "
+        "commands\" is two ops, not one. The refusal names the ops that do "
+        "read what you passed.",
+        "* A refusal is information, not a wall: each one names what it found "
+        "and what to do instead, and is worth reading before rephrasing. A "
+        "reply that reports what it did *not* do -- scopes it could not read, "
+        "counts it had to truncate, text it matched only part of -- is telling "
+        "you the answer is incomplete, not that nothing is there.",
         "* Before writing a command whose parameter layout you are unsure of, read "
         "an event that already uses it with event_get include_raw, and copy the "
         "shape.",
@@ -78,7 +88,18 @@ def _modelling_banner(project: Project) -> list[str]:
     ]
 
 
-def _bullets(mapping: dict) -> list[str]:
+# How each container kind reads in the reference table. A `.get` with a
+# fallback rather than a subscript: an unrecognised kind is a reason to say so
+# in one row, not to fail the whole document with a bare KeyError.
+CONTAINER_SHAPES = {
+    "array": "Array indexed by id (slot 0 is nil)",
+    "hash": "Hash of id => object",
+    "single": "One object",
+    "scripts": "Array of [id, name, zlib code]",
+}
+
+
+def _bullets(mapping: "dict[str, str]") -> list[str]:
     return ["* `%s` -- %s" % (key, value) for key, value in mapping.items()]
 
 
@@ -99,10 +120,7 @@ def data_format_reference(project: Project) -> str:
         "| --- | --- | --- | --- |",
     ]
     for key, entry in profile.data_files.items():
-        shape = {"array": "Array indexed by id (slot 0 is nil)",
-                 "hash": "Hash of id => object",
-                 "single": "One object",
-                 "scripts": "Array of [id, name, zlib code]"}[entry.container]
+        shape = CONTAINER_SHAPES.get(entry.container, "an unrecognised shape")
         lines.append("| `%s` | `%s` | %s | %s |"
                      % (key, entry.filename(extension), shape, entry.description))
     lines += [
@@ -161,7 +179,11 @@ def data_format_reference(project: Project) -> str:
     for sheet, (low, high) in TILE_ID_RANGES.items():
         lines.append("* `%s` -- %d to %d" % (sheet, low, high))
 
-    if profile.key == "vx_ace":
+    # The capability, not the engine key: `_schema_report` asks the
+    # capability for this same content, and naming the engine here meant a
+    # profile that gained a tileset database would lose the flags table
+    # without anything saying so.
+    if profile.has_tileset_database:
         lines += [
             "",
             "### Tileset flags",

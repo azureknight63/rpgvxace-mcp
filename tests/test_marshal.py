@@ -336,6 +336,20 @@ class TestHostileInput(unittest.TestCase):
         self.assertIn("above the", str(caught.exception))
 
 
+
+    def test_rejects_a_deeply_nested_symbol(self):
+        """A symbol in a name position can carry an encoding record.
+
+        `_read_symbol_ref` recurses on that record and did not consult
+        MAX_DEPTH, so a small file raised RecursionError -- a RuntimeError,
+        which is not a MarshalError and so escaped every caller between the
+        reader and `main`, ending the session on a traceback.
+        """
+        payload = b"\x04\x08" + b"o" + b"I" * 1200 + b":\x08Foo\x00"
+        with self.assertRaises(MarshalError) as caught:
+            load(payload)
+        self.assertIn("nested", str(caught.exception))
+
 class TestLosslessEdgeCases(unittest.TestCase):
     """Constructs the codec does not interpret must still round trip exactly."""
 

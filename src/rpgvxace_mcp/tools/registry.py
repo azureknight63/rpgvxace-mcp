@@ -310,6 +310,84 @@ def check_args(schema_def: dict[str, Any], args: dict[str, Any],
                     check_args(item, entry, "%s[%d]" % (key, index))
 
 
+def known_fields(ctx: "Context", obj: Any, cls: str) -> "set[str]":
+    """What a patch to this object may name: what it has, plus what it documents.
+
+    Both halves are needed and neither alone will do. The fields an object
+    carries are the ones certainly real, but a map or a page can legitimately
+    be given a field the editor left off this particular instance -- and the
+    reference tables cover exactly those classes. So the union, which
+    `refuse_unknown_fields` then holds a patch to.
+
+    Written once because it had been written three times -- for a map, for an
+    event page, and inline for a common event -- and the inline copy was both
+    the one that would drift and the one with no comment saying why the union
+    is the right set.
+    """
+    documented = ctx.project.profile.class_fields.get(cls, {})
+    return set(obj.fields()) | set(documented)
+
+
+def scopes_arg(args: dict[str, Any], key: str,
+                allowed: "tuple[str, ...] | list[str]") -> list[str]:
+    """The scopes a caller asked for, refusing names that do nothing.
+
+    Dropping an unrecognised name and running everything instead is the
+    opposite of what the rest of these tools do with a bad argument: the
+    caller believes it narrowed the search and is handed the whole project.
+    """
+    asked = opt_list(args, key)
+    unknown = [s for s in asked if s not in allowed]
+    if unknown:
+        raise ToolError("unknown %s %s; choose from %s"
+                        % (key, ", ".join(echo(u) for u in unknown),
+                           ", ".join(allowed)))
+    return [s for s in asked if s in allowed] or list(allowed)
+
+
+def check_op_args(op: str, args: dict[str, Any],
+                  uses: "dict[str, set[str]]", where: str = "this tool") -> None:
+    """Refuse an argument the chosen op does not read.
+
+    ``check_args`` refuses a name no op knows. This refuses a name that is
+    real but inert here: ``event_edit`` op "update" reads name and patch and
+    never looks at ``commands``, so a single op asking to rename an event and
+    rewrite its command list renamed it, dropped the commands, and reported
+    "updated event 1". The caller has no way to see the difference between
+    that and the whole request landing, which makes a silent drop worse than
+    a refusal -- it will not retry what it believes already happened.
+
+    ``uses`` maps each op to every argument it reads, including the ones the
+    tool reads for every op. An op absent from the table is not refused here:
+    ``one_of`` has already said which ops exist, and duplicating that list
+    would mean two places to update.
+
+    Every tool that takes an ``op`` calls this -- the three editing tools, both
+    of event_edit's paths, and map_tiles, raw_data, scripts and backups. That
+    is not a claim to be taken on trust: the first version of this docstring
+    said "nothing is ignored silently here" while four of those tools had no
+    table at all, so ``TestEveryOpSelectingToolHasATable`` walks the registry
+    and fails if one appears without one.
+    """
+    allowed = uses.get(op)
+    if allowed is None:
+        return
+    inert = sorted(key for key in args if key not in allowed)
+    if not inert:
+        return
+    details = []
+    for key in inert:
+        takers = sorted(name for name, keys in uses.items() if key in keys)
+        details.append("%s (op %s)" % (echo(key), ", ".join('"%s"' % t for t in takers))
+                       if takers else "%s (no op here reads it)" % echo(key))
+    raise ToolError(
+        "op \"%s\" in %s does not read %s. It reads %s. Nothing is ignored "
+        "silently here, because a dropped argument reports the same success "
+        "as one that was applied -- split the request into one op per "
+        "change, or drop the argument."
+        % (op, where, "; ".join(details), ", ".join(sorted(allowed - {"op"}))))
+
+
 def _check_declared(key: str, value: Any, spec: dict[str, Any]) -> None:
     """Apply one property's declared bounds to the value given for it."""
     if value is None:

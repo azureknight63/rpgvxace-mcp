@@ -20,6 +20,7 @@ import re
 from typing import Any
 
 from .rubytypes import (
+    CELL_MASK,
     Color,
     RGSSFloats,
     RubyClassRef,
@@ -216,14 +217,30 @@ def detect_encoding(samples: list[bytes]) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def to_json(value: Any, codec: TextCodec, tables: str = "summary") -> Any:
+def to_json(value: Any, codec: TextCodec, tables: str = "summary",
+            walk: "_Walk | None" = None) -> Any:
     """Convert a loaded Ruby value into JSON-safe data.
 
     ``tables`` selects how :class:`Table` cells are rendered: ``"summary"``
     reports the shape only, ``"full"`` includes every cell up to
     :data:`TABLE_FULL_LIMIT`.
+
+    ``walk`` lets a caller converting several values in one response share one
+    work budget across all of them. Without it, each call got its own, so a
+    tool reading two hundred entries had two hundred times the allowance the
+    budget was chosen to give -- see `new_walk`.
     """
-    return _to_json(value, codec, tables, _Walk())
+    return _to_json(value, codec, tables, walk or _Walk())
+
+
+def new_walk() -> "_Walk":
+    """One shared conversion budget, for a caller rendering many values.
+
+    Named rather than exposing `_Walk`, so the reason it exists stays with it:
+    a per-value budget bounds one value and says nothing about a response
+    built from hundreds of them.
+    """
+    return _Walk()
 
 
 class _Walk:
@@ -291,7 +308,7 @@ def _to_json_value(value: Any, codec: TextCodec, tables: str, walk: _Walk) -> An
     if isinstance(value, RubySymbol):  # before RubyString/str checks
         return {"__symbol__": printable_text(str(value))}
     if isinstance(value, RubyString):
-        return _string_to_json(value, codec)
+        return _string_to_json(value, codec, tables, walk)
     if isinstance(value, (bytes, bytearray)):
         return _string_to_json(RubyString(bytes(value)), codec)
     if isinstance(value, list):
@@ -348,7 +365,8 @@ def _to_json_value(value: Any, codec: TextCodec, tables: str, walk: _Walk) -> An
     raise ConversionError("cannot represent a %s as JSON" % type(value).__name__)
 
 
-def _string_to_json(value: RubyString, codec: TextCodec) -> Any:
+def _string_to_json(value: RubyString, codec: TextCodec, tables: str,
+                    walk: "_Walk") -> Any:
     try:
         # One strict decode, rather than is_clean() decoding and throwing the
         # result away before decoding again. Strings are the commonest value in
@@ -361,7 +379,14 @@ def _string_to_json(value: RubyString, codec: TextCodec) -> Any:
             # The common case: nothing to say beyond the text itself.
             return text
         return {"__string__": text,
-                "__ivars__": {k: to_json(v, codec) for k, v in value.ivars.items()}}
+                # The caller's walk, not a fresh one. `to_json` here started a
+                # new budget and a new depth counter for every string that
+                # carried an ivar record, so MAX_JSON_NODES and MAX_JSON_DEPTH
+                # were both bypassable from a small file -- and the shared
+                # budget threaded through for whole responses was bypassable
+                # with them.
+                "__ivars__": {k: _to_json(v, codec, tables, walk)
+                              for k, v in value.ivars.items()}}
     # Undecodable bytes: hand them over as base64 so nothing is lost and the
     # caller can see that this is not ordinary text. Any string form the value
     # carried goes with it, so the round trip stays exact.
@@ -370,7 +395,8 @@ def _string_to_json(value: RubyString, codec: TextCodec) -> Any:
         "__note__": "bytes that are not valid %s" % codec.name,
     }
     if not codec.is_default_style(value):
-        out["__ivars__"] = {k: to_json(v, codec) for k, v in value.ivars.items()}
+        out["__ivars__"] = {k: _to_json(v, codec, tables, walk)
+                            for k, v in value.ivars.items()}
     return out
 
 
@@ -505,7 +531,19 @@ def table_from_json(value: dict[str, Any]) -> Table:
                 % (xsize * ysize * zsize)
             )
         return Table(xsize, ysize, zsize, dim=dim)
-    return Table(xsize, ysize, zsize, dim=dim, data=[int(c) for c in cells])
+    # Range-checked rather than left to `array("H", ...)`, which raises
+    # OverflowError -- an ArithmeticError, so not in server.py's caught list,
+    # so a wrong argument was reported as an internal error. `Table.set` masks
+    # to 16 bits for the same reason.
+    checked = []
+    for index, cell in enumerate(cells):
+        number = int(cell)
+        if not 0 <= number <= CELL_MASK:
+            raise ConversionError(
+                "cell %d is %d, outside the 0 to %d a Table holds"
+                % (index, number, CELL_MASK))
+        checked.append(number)
+    return Table(xsize, ysize, zsize, dim=dim, data=checked)
 
 
 # ---------------------------------------------------------------------------
@@ -540,9 +578,15 @@ def apply_patch(target: Any, patch: dict[str, Any], codec: TextCodec,
     of human-readable descriptions of what changed.
     """
     changes: list[str] = []
-    # Two passes: convert every value before assigning any of them. A failure
-    # in the middle of one pass would otherwise leave the cached file partly
-    # patched, and the next successful save would persist that.
+    # Two passes over the *scalar* values: each is converted before any is
+    # assigned, so a value this project's code page cannot hold is refused
+    # before anything is written. A nested merge is not pre-converted here --
+    # it is validated when the recursion reaches it, by which point this
+    # object's own scalars have landed in the cached copy.
+    #
+    # So this pass is not what keeps a half-applied patch off disk. What does
+    # is `Context.staged`, which forgets every file whose save did not happen;
+    # an earlier version of this comment claimed the guarantee for itself.
     for key, new_value in patch.items():
         if key.startswith("__"):
             continue
@@ -574,6 +618,8 @@ def apply_patch(target: Any, patch: dict[str, Any], codec: TextCodec,
                  and not any(k.startswith("__") for k in new_value)
                  and isinstance(existing, (RubyObject, RubyHash)))
         if merge:
+            if isinstance(existing, RubyObject):
+                _refuse_invented_fields(existing, new_value, field_path)
             changes.extend(apply_patch(existing, new_value, codec, field_path))
             continue
 
@@ -590,6 +636,54 @@ def apply_patch(target: Any, patch: dict[str, Any], codec: TextCodec,
         target.set(lookup, converted)
         changes.append("%s: %s -> %s" % (field_path, before, _brief(converted, codec)))
     return changes
+
+
+def _refuse_invented_fields(target: RubyObject, patch: dict[str, Any],
+                            path: str) -> None:
+    """Refuse a nested field the object being merged into does not carry.
+
+    The tools guard the top level of a patch with ``refuse_unknown_fields``,
+    which compares against the fields the entry has. Nothing looked one level
+    down, so ``{"bgm": {"nmae": "Town"}}`` merged into the RPG::BGM, added
+    ``@nmae`` and came back as ``bgm.nmae: <unset> -> "Town"`` -- a typo
+    reported as the change the caller asked for, in a file the editor then
+    refuses to open.
+
+    Only for a nested ``RubyObject``, and only on the merge path. A Hash
+    legitimately gains keys, and a value carrying ``__class__`` is replacing
+    the object rather than merging into it, so neither comes through here.
+
+    An object the *editor* wrote carries its complete field set, because
+    Marshal writes every instance variable an object has -- which is what makes
+    this safe to refuse on rather than warn about. A file the editor did not
+    write is untrusted like any other, so the refusal names the fields the
+    object does carry and an object carrying none is left alone.
+
+    Not closed by this: an object inside an *array*, given wholesale with a
+    ``__class__``. That is not a merge, so it never reaches here, and
+    ``from_json`` builds it with only `check_ivar_name` -- a typo in
+    ``{"learnings": [{"__class__": "RPG::Class::Learning", "levl": 5}]}``
+    still invents a field.
+    """
+    if not target.ivars:
+        # Nothing to compare against, so nothing is refused -- the same escape
+        # `refuse_unknown_fields` makes one level up. Without it a nested
+        # object carrying no ivars refused every field with "it carries no
+        # fields at all", while the identical patch at the top level was
+        # allowed.
+        return
+    unknown = sorted(name for name in patch
+                     if not name.startswith("__") and not target.has(name))
+    if not unknown:
+        return
+    raise ConversionError(
+        "%s is %s and has no field%s %s. It carries %s. Nothing here invents "
+        "a field, because the editor rejects an object with instance "
+        "variables it does not expect -- check the spelling, or pass a "
+        "\"__class__\" to replace the whole object."
+        % (path, target.cls, "s" if len(unknown) > 1 else "",
+           ", ".join(repr(name) for name in unknown),
+           ", ".join(target.fields()) or "no fields at all"))
 
 
 def normalize_strings(value: Any, codec: TextCodec, depth: int = 0) -> Any:
