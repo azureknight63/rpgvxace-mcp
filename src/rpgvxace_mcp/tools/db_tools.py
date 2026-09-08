@@ -5,12 +5,14 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from ..analysis import find_references
+from ..analysis import REFERENCE_RULES, find_references
 from ..convert import apply_patch, to_json
 from ..project import ProjectError
 from ..rubytypes import RubyObject, RubyString
 from ..schema import ALL_DATABASE_TABLES, ALL_TABLE_KEYS, ARRAY, HASH
 from .registry import (
+    echo,
+    int_list,
     ARR,
     Context,
     DRY_RUN,
@@ -51,7 +53,27 @@ SUMMARY_FIELDS: dict[str, list[str]] = {
 # Tool schemas are built before a project is open, so the enum is the union of
 # every engine's tables; the runtime check below rejects the ones this project
 # does not have, and says why.
+# The highest entry id this server will create. RPG Maker's own editor tops out
+# far below this; the point is to refuse an id that would pad a database array
+# with hundreds of thousands of nil slots.
+MAX_ENTRY_ID = 9999
+
+# How far past the end of an id-indexed array one create may reach. Creating
+# beyond this would pad the table with empty slots the caller did not ask for.
+ARRAY_GROWTH_HEADROOM = 1000
+
+# How many ids one db_get call will fetch. Each one is a lookup plus its own
+# JSON conversion budget.
+MAX_IDS_PER_CALL = 200
+
 TABLE_LIST = ", ".join(ALL_DATABASE_TABLES)
+
+# Everything db_edit will actually change. map_infos is left out
+# deliberately: the tree and the map files have to move together, and
+# only map_edit does both, so advertising it here would offer an edit
+# that is always refused.
+EDITABLE_DATABASE_TABLES = [t for t in ALL_DATABASE_TABLES
+                            if t != "map_infos"]
 
 
 def _table_arg(ctx: Context, args: dict[str, Any]) -> str:
@@ -60,8 +82,9 @@ def _table_arg(ctx: Context, args: dict[str, Any]) -> str:
     if entry is None:
         if table in ALL_TABLE_KEYS:
             raise ToolError(
-                "%s has no %s table. %s" % (ctx.project.profile.label, table,
-                                            _absence_hint(ctx, table)))
+                "%s has no %s table. %s"
+                % (ctx.project.profile.label, table,
+                   ctx.project.profile.absence_hint(table)))
         raise ToolError("unknown table %r; this project has %s"
                         % (table, ", ".join(sorted(ctx.project.data_files))))
     if entry.container not in (ARRAY, HASH):
@@ -70,14 +93,6 @@ def _table_arg(ctx: Context, args: dict[str, Any]) -> str:
             "tool for the script editor." % (table, table)
         )
     return table
-
-
-def _absence_hint(ctx: Context, table: str) -> str:
-    try:
-        ctx.project.profile.data_file(table)
-    except KeyError as exc:
-        return str(exc.args[0]).split(". ", 1)[-1]
-    return ""
 
 
 def _brief_field(ctx: Context, value: Any) -> Any:
@@ -113,6 +128,7 @@ def _brief_field(ctx: Context, value: Any) -> Any:
     }, ["table"]),
 )
 def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
+    """One table, summarised, filtered and paged. Reads only."""
     table = _table_arg(ctx, args)
     refresh = opt_bool(args, "refresh")
     entries = ctx.project.entries(table, refresh)
@@ -163,11 +179,13 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     "db_get",
     "Read database entries",
     "Read complete database entries, with every field as stored in the file. "
-    "Field names match the RGSS2 instance variables minus the leading @, which "
+    "Field names match the RGSS instance variables minus the leading @, which "
     "is what db_edit patches expect.",
     schema({
         "table": prop(STR, "Which table to read from.", enum=ALL_TABLE_KEYS),
-        "ids": prop(ARR, "Entry ids to read.", items={"type": INT}),
+        "ids": prop(ARR, "Entry ids to read; at most %d per call."
+                    % MAX_IDS_PER_CALL, items={"type": INT},
+                    maxItems=MAX_IDS_PER_CALL),
         "id": prop(INT, "A single entry id, if you only want one."),
         "tables": prop(STR, "How to render RGSS Table fields such as parameter "
                             "curves: summary (shape only, the default) or full "
@@ -176,6 +194,7 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     }, ["table"]),
 )
 def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
+    """Whole entries, every field as stored. Reads only."""
     table = need_str(args, "table")
     if table not in ctx.project.data_files:
         raise ToolError("this %s project has no %r table; it has %s"
@@ -188,7 +207,7 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         value = ctx.project.load_data(table, refresh)
         return {"table": table, "entry": to_json(value, ctx.codec, mode)}
 
-    ids = [int(i) for i in opt_list(args, "ids")]
+    ids = int_list(args, "ids", MAX_IDS_PER_CALL, minimum=0)
     single = opt_int(args, "id")
     if single is not None:
         ids.append(single)
@@ -223,7 +242,10 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     "editor expects. Every write backs the file up first; pass dry_run to "
     "preview.",
     schema({
-        "table": prop(STR, "Which table to edit.", enum=ALL_DATABASE_TABLES),
+        "table": prop(STR, "Which table to edit. map_infos is not editable "
+                           "here: a tree entry and its Map### file have to "
+                           "change together, so use map_edit for those.",
+                      enum=EDITABLE_DATABASE_TABLES),
         "ops": prop(ARR, "Operations, applied in order.", items={
             "type": OBJ,
             "properties": {
@@ -233,7 +255,7 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 "clone_from": {"type": INT, "description":
                                "For create: copy this entry, then apply the patch."},
                 "patch": {"type": OBJ, "description":
-                          "Fields to set, using RGSS2 field names without the @."},
+                          "Fields to set, using RGSS field names without the @."},
             },
             "required": ["op"],
         }),
@@ -242,7 +264,23 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     writes=True,
 )
 def db_edit(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
+    """Apply ops to one table and save it.
+
+    Refuses map_infos, an id outside 1..MAX_ENTRY_ID or far past the end
+    of the table, slot 0 of an id-indexed array, and a patch that would
+    move an entry's own id. Every mutation is staged, so nothing
+    survives unless the write lands.
+    """
     table = _table_arg(ctx, args)
+    if table == "map_infos":
+        # A tree entry and its Map### file have to change together, and
+        # map_edit is what knows how: it refuses to orphan a child map, warns
+        # about transfers into the map, and removes the file alongside the
+        # entry. Editing the tree from here left the two out of step.
+        raise ToolError(
+            "map_infos cannot be edited here, because a tree entry and its "
+            "Map### file have to change together. Use map_edit with op "
+            "\"create\", \"delete\" or \"update\" instead.")
     ops = opt_list(args, "ops")
     if not ops:
         raise ToolError("ops must contain at least one operation")
@@ -252,91 +290,166 @@ def db_edit(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     kind = ctx.project.container_kind(table, container)
     applied: list[dict[str, Any]] = []
     warnings: list[str] = []
-
-    for raw_op in ops:
-        if not isinstance(raw_op, dict):
-            raise ToolError("each op must be an object, got %r" % (raw_op,))
-        op = one_of(raw_op, "op", ["update", "create", "delete"])
-        patch = raw_op.get("patch") or {}
-        if patch and not isinstance(patch, dict):
-            raise ToolError("patch must be an object")
-
-        if op == "update":
-            entry_id = opt_int(raw_op, "id")
-            if entry_id is None:
-                raise ToolError("update needs an id")
-            entry = ctx.project.get_entry(table, entry_id)
-            if entry is None:
-                raise ToolError(
-                    "%s has no entry %d. Use op \"create\" (optionally with "
-                    "clone_from) to add it." % (table, entry_id)
-                )
-            changes = apply_patch(entry, patch, ctx.codec)
-            applied.append({"op": op, "id": entry_id, "changes": changes})
-
-        elif op == "create":
-            entry_id = opt_int(raw_op, "id")
-            if entry_id is None:
-                entry_id = _next_free_id(container, kind)
-            elif ctx.project.get_entry(table, entry_id) is not None:
-                raise ToolError(
-                    "%s already has an entry %d; use op \"update\" to change it"
-                    % (table, entry_id)
-                )
-            clone_from = opt_int(raw_op, "clone_from")
-            if clone_from is not None:
-                template = ctx.project.get_entry(table, clone_from)
-                if template is None:
-                    raise ToolError("cannot clone %s %d: there is no such entry"
-                                    % (table, clone_from))
-                entry = copy.deepcopy(template)
-            else:
-                entry = _blank_entry(ctx, table)
-                warnings.append(
-                    "entry %d was built from a blank %s rather than cloned, so it "
-                    "carries only the fields given in the patch. If the editor "
-                    "complains, create it with clone_from instead."
-                    % (entry_id, ctx.project.data_files[table].cls)
-                )
-            if isinstance(entry, RubyObject) and entry.has("id"):
-                entry.set("id", entry_id)
-            changes = apply_patch(entry, patch, ctx.codec) if patch else []
-            ctx.project.set_entry(table, entry_id, entry)
-            applied.append({
-                "op": op, "id": entry_id, "cloned_from": clone_from, "changes": changes,
-            })
-
-        else:  # delete
-            entry_id = opt_int(raw_op, "id")
-            if entry_id is None:
-                raise ToolError("delete needs an id")
-            if ctx.project.get_entry(table, entry_id) is None:
-                raise ToolError("%s has no entry %d" % (table, entry_id))
-            references = find_references(ctx.project, table, entry_id, limit=25)
-            if kind == ARRAY:
-                # Keep the slot so every later id keeps its position, which is
-                # what the editor does when you clear an entry.
-                ctx.project.set_entry(table, entry_id, None)
-            else:
-                container.delete(entry_id)
-            applied.append({
-                "op": op, "id": entry_id,
-                "references_found": len(references),
-                "references": references,
-            })
-            if references:
-                warnings.append(
-                    "entry %d is still referenced by %d event command(s); those "
-                    "commands now point at nothing" % (entry_id, len(references))
-                )
-
     filename = ctx.project.filename_for(table)
-    summary = "; ".join(
-        "%s %s" % (item["op"], item["id"]) for item in applied
-    )
-    write = ctx.project.save_file(filename, dry_run=dry_run, tool="db_edit",
-                                 summary=summary)
+
+    # Everything below mutates the cached container. `staged` drops that cache
+    # again unless the write actually lands, so a dry run, a refusal, or an op
+    # that fails halfway leaves nothing behind for a later write to pick up.
+    with ctx.staged(filename) as write_landed:
+        for raw_op in ops:
+            if not isinstance(raw_op, dict):
+                raise ToolError("each op must be an object, got %r" % (raw_op,))
+            op = one_of(raw_op, "op", ["update", "create", "delete"])
+            patch = raw_op.get("patch") or {}
+            if patch and not isinstance(patch, dict):
+                raise ToolError("patch must be an object")
+
+            if op == "update":
+                entry_id = opt_int(raw_op, "id")
+                if entry_id is None:
+                    raise ToolError("update needs an id")
+                _check_id(table, entry_id, container, kind, existing=True)
+                entry = ctx.project.get_entry(table, entry_id)
+                if entry is None:
+                    raise ToolError(
+                        "%s has no entry %d. Use op \"create\" (optionally with "
+                        "clone_from) to add it." % (table, entry_id)
+                    )
+                changes = apply_patch(entry, patch, ctx.codec)
+                applied.append({"op": op, "id": entry_id, "changes": changes})
+
+            elif op == "create":
+                entry_id = opt_int(raw_op, "id")
+                if entry_id is None:
+                    entry_id = _next_free_id(container, kind)
+                else:
+                    _check_id(table, entry_id, container, kind)
+                    if ctx.project.get_entry(table, entry_id) is not None:
+                        raise ToolError(
+                            "%s already has an entry %d; use op \"update\" to "
+                            "change it" % (table, entry_id)
+                        )
+                clone_from = opt_int(raw_op, "clone_from")
+                if clone_from is not None:
+                    template = ctx.project.get_entry(table, clone_from)
+                    if template is None:
+                        raise ToolError("cannot clone %s %d: there is no such entry"
+                                        % (table, clone_from))
+                    entry = copy.deepcopy(template)
+                else:
+                    entry = _blank_entry(ctx, table)
+                    warnings.append(
+                        "entry %d was built from a blank %s rather than cloned, so it "
+                        "carries only the fields given in the patch. If the editor "
+                        "complains, create it with clone_from instead."
+                        % (entry_id, ctx.project.data_files[table].cls)
+                    )
+                changes = apply_patch(entry, patch, ctx.codec) if patch else []
+                if isinstance(entry, RubyObject) and _carries_id(kind):
+                    # After the patch, and unconditionally: every RGSS data
+                    # class carries @id equal to its own slot, a blank entry has
+                    # no fields at all to test for, and a patch naming a
+                    # different id would break the invariant the engine
+                    # subscripts these arrays on.
+                    if patch.get("id") not in (None, entry_id):
+                        raise ToolError(
+                            "the patch sets id %s but this entry lives in slot "
+                            "%d; an RGSS entry's id is its position, so leave "
+                            "id out of the patch"
+                            % (echo(patch.get("id")), entry_id))
+                    entry.set("id", entry_id)
+                ctx.project.set_entry(table, entry_id, entry)
+                applied.append({
+                    "op": op, "id": entry_id, "cloned_from": clone_from, "changes": changes,
+                })
+
+            else:  # delete
+                entry_id = opt_int(raw_op, "id")
+                if entry_id is None:
+                    raise ToolError("delete needs an id")
+                _check_id(table, entry_id, container, kind, existing=True)
+                if ctx.project.get_entry(table, entry_id) is None:
+                    raise ToolError("%s has no entry %d" % (table, entry_id))
+                scanned = table in REFERENCE_RULES
+                references = (find_references(ctx.project, table, entry_id, limit=25)
+                              if scanned else [])
+                if kind == ARRAY:
+                    # Keep the slot so every later id keeps its position, which is
+                    # what the editor does when you clear an entry.
+                    ctx.project.set_entry(table, entry_id, None)
+                else:
+                    container.delete(entry_id)
+                applied.append({
+                    "op": op, "id": entry_id,
+                    "references_checked": scanned,
+                    "references_found": len(references) if scanned else None,
+                    "references": references,
+                })
+                if references:
+                    warnings.append(
+                        "entry %d is still referenced by %d event command(s); "
+                        "those commands now point at nothing"
+                        % (entry_id, len(references))
+                    )
+                elif not scanned:
+                    # A zero here would read as "nothing points at it", when in
+                    # fact nothing was looked at: only some tables have command
+                    # parameter rules to scan for.
+                    warnings.append(
+                        "no reference scan exists for %s, so this deletion was "
+                        "not checked against anything that might point at entry "
+                        "%d. Run validate afterwards." % (table, entry_id)
+                    )
+
+        summary = "; ".join(
+            "%s %s" % (item["op"], item["id"]) for item in applied
+        )
+        write = ctx.project.save_file(filename, dry_run=dry_run, tool="db_edit",
+                                      summary=summary)
+        if not dry_run:
+            write_landed.done()
     return {"table": table, "applied": applied, "warnings": warnings, "write": write}
+
+
+def _check_id(table: str, entry_id: int, container: Any, kind: str,
+              existing: bool = False) -> None:
+    """Refuse an entry id that cannot mean what the caller intended.
+
+    ``project.set_entry`` pads an array up to the id it is given and indexes it
+    directly, so a negative id used to write over the *last* entry (Python's
+    ``value[-1]``) and a huge one padded the table with nil slots -- both
+    reported as a successful create.
+    """
+    if entry_id < 0:
+        raise ToolError(
+            "id must not be negative, got %d. Database entries are numbered "
+            "from 1." % entry_id)
+    if kind == ARRAY and entry_id == 0:
+        raise ToolError(
+            "id 0 is not an entry: RPG Maker keeps slot 0 empty so that every "
+            "id matches its position in the array. Ids start at 1.")
+    if existing:
+        return
+    ceiling = (min(MAX_ENTRY_ID, len(container) + ARRAY_GROWTH_HEADROOM)
+               if kind == ARRAY else MAX_ENTRY_ID)
+    if entry_id > ceiling:
+        raise ToolError(
+            "id %d is too high; this table has %d entries, so ids up to %d can "
+            "be created. Creating id %d would fill the table with %d empty "
+            "slots." % (entry_id, len(container), ceiling, entry_id,
+                        entry_id - len(container)))
+
+
+def _carries_id(kind: str) -> bool:
+    """Whether entries in this container carry their own @id.
+
+    An id-indexed Array does: the engine subscripts it by id, and each entry
+    repeats that id in @id. A Hash-keyed table does not -- MapInfos entries are
+    found by their key, and RPG::MapInfo has no @id to set. Keyed off the
+    container rather than the documented field list, because the field tables
+    describe what the editor shows and do not list @id at all.
+    """
+    return kind == ARRAY
 
 
 def _next_free_id(container: Any, kind: str) -> int:

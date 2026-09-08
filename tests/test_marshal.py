@@ -8,11 +8,19 @@ the separate symbol and object link tables, and Ruby 1.8's bare strings.
 """
 
 import math
+import struct
 import unittest
 
-from rpgvxace_mcp.marshal_rb import MarshalError, dump, load
+from rpgvxace_mcp.marshal_rb import (
+    MarshalError,
+    MarshalReader,
+    dump,
+    load,
+    load_with_warnings,
+)
 from rpgvxace_mcp.rubytypes import (
     Color,
+    RubyClassRef,
     RubyFloat,
     RubyHash,
     RubyObject,
@@ -181,7 +189,7 @@ class TestRGSSTypes(unittest.TestCase):
     def test_corrupt_table_degrades_to_opaque_bytes(self):
         # A file we cannot fully understand must still be readable and rewritable.
         encoded = dump(RubyUserDef("Table", b"\x01\x02\x03"))
-        value, warnings = load(encoded, with_warnings=True)
+        value, warnings = load_with_warnings(encoded)
         self.assertIsInstance(value, RubyUserDef)
         self.assertTrue(warnings)
         self.assertEqual(dump(value), encoded)
@@ -198,7 +206,7 @@ class TestRGSSTypes(unittest.TestCase):
         self.assertEqual(bigger.get(2, 2, 0), 9)
         self.assertEqual(bigger.get(3, 3, 0), 0)
         smaller = table.resize(2, 2, 1)
-        self.assertEqual(smaller.data, [1, 2, 4, 5])
+        self.assertEqual(list(smaller.data), [1, 2, 4, 5])
 
 
 class TestUnknownConstructs(unittest.TestCase):
@@ -230,8 +238,172 @@ class TestUnknownConstructs(unittest.TestCase):
             load(b"\x04\x08[\x08i\x06")
 
     def test_reports_trailing_bytes(self):
-        _, warnings = load(b"\x04\x08i\x06\xff\xff", with_warnings=True)
+        _, warnings = load_with_warnings(b"\x04\x08i\x06\xff\xff")
         self.assertTrue(any("trailing" in w for w in warnings))
+
+
+class TestHostileInput(unittest.TestCase):
+    """A corrupt or crafted file must fail cleanly, not quietly.
+
+    Every case here decodes to something plausible-looking, or hangs, or
+    allocates without bound, if its guard is removed -- and the value would then
+    be written back over the user's game. The proof that each guard still checks
+    something is `scripts/prove_guards.py`, which reverts each one and requires
+    the matching test to fail.
+    """
+
+    def test_rejects_negative_object_link(self):
+        # Python would read index -1 as "the last entry" and hand back a
+        # plausible but wrong object.
+        with self.assertRaises(MarshalError) as caught:
+            load(b'\x04\x08[\x07"\x06x@\xfa')
+        self.assertIn("object link -1", str(caught.exception))
+
+    def test_rejects_negative_symbol_link(self):
+        with self.assertRaises(MarshalError) as caught:
+            load(b"\x04\x08[\x07:\x06a;\xfa")
+        self.assertIn("symbol link -1", str(caught.exception))
+
+    def test_rejects_out_of_range_object_link(self):
+        with self.assertRaises(MarshalError) as caught:
+            load(b"\x04\x08@\x08")
+        self.assertIn("out of range", str(caught.exception))
+
+    def test_rejects_negative_array_count(self):
+        # range(-1) is empty, so without the guard this is a silent empty array.
+        with self.assertRaises(MarshalError) as caught:
+            load(b"\x04\x08[\xfa")
+        self.assertIn("negative array element count", str(caught.exception))
+
+    def test_rejects_negative_hash_count(self):
+        with self.assertRaises(MarshalError) as caught:
+            load(b"\x04\x08{\xfa")
+        self.assertIn("negative hash pair count", str(caught.exception))
+
+    def test_rejects_negative_ivar_count(self):
+        with self.assertRaises(MarshalError) as caught:
+            load(b"\x04\x08o:\x08Foo\xfa")
+        self.assertIn("negative instance variable count", str(caught.exception))
+
+    def test_rejects_excessive_nesting(self):
+        # 300 nested arrays. Without the depth cap this is a RecursionError
+        # raised from an arbitrary point in the parse, which is not a
+        # MarshalError and so escapes the caller's error handling.
+        deep = b"\x04\x08" + b"[\x06" * 300 + b"0"
+        with self.assertRaises(MarshalError) as caught:
+            load(deep)
+        self.assertIn("nested more than", str(caught.exception))
+
+    def test_rejects_bad_bignum_sign(self):
+        with self.assertRaises(MarshalError) as caught:
+            load(b"\x04\x08lX\x06\x01\x00")
+        self.assertIn("neither '+' nor '-'", str(caught.exception))
+
+    def test_table_with_absurd_extents_degrades_to_opaque_bytes(self):
+        # xsize 0xFFFFFFFF with ysize 0 has a product of 0, so a product-only
+        # check accepts it -- and every later consumer iterates 4 billion times.
+        payload = struct.pack("<5I", 3, 0xFFFFFFFF, 0, 0, 0)
+        encoded = dump(RubyUserDef("Table", payload))
+        value, warnings = load_with_warnings(encoded)
+        self.assertIsInstance(value, RubyUserDef)
+        self.assertTrue(any("could not decode Table" in w for w in warnings))
+        self.assertEqual(dump(value), encoded)
+
+    def test_table_with_impossible_dimension_degrades(self):
+        payload = struct.pack("<5I", 7, 1, 1, 1, 1) + b"\x00\x00"
+        value, warnings = load_with_warnings(dump(RubyUserDef("Table", payload)))
+        self.assertIsInstance(value, RubyUserDef)
+        self.assertTrue(any("dimensions" in w for w in warnings))
+
+    def test_table_with_trailing_payload_bytes_degrades(self):
+        # Accepting these would mean to_payload silently drops them.
+        payload = struct.pack("<5I", 1, 1, 1, 1, 1) + b"\x07\x00" + b"\xff"
+        encoded = dump(RubyUserDef("Table", payload))
+        value, _ = load_with_warnings(encoded)
+        self.assertIsInstance(value, RubyUserDef)
+        self.assertEqual(dump(value), encoded)
+
+    def test_table_refuses_an_out_of_range_axis(self):
+        # Reachable from the map resize tool, which only checks for >= 1.
+        with self.assertRaises(ValueError) as caught:
+            Table(100000, 100000, 1)
+        self.assertIn("xsize of 100000 exceeds", str(caught.exception))
+
+    def test_table_refuses_an_absurd_cell_count(self):
+        # Each axis is individually legal; the product is 3.6 billion cells.
+        with self.assertRaises(ValueError) as caught:
+            Table(60000, 60000, 1)
+        self.assertIn("above the", str(caught.exception))
+
+
+class TestLosslessEdgeCases(unittest.TestCase):
+    """Constructs the codec does not interpret must still round trip exactly."""
+
+    def assert_round_trips(self, encoded: bytes) -> object:
+        value = load(encoded)
+        self.assertEqual(dump(value), encoded)
+        return value
+
+    def test_ivar_wrapped_array_keeps_its_record(self):
+        # An Array has nowhere to store instance variables, so the wrapper is
+        # preserved instead of dropped.
+        encoded = b"\x04\x08I[\x06i\x06\x06:\x06Ei\x07"
+        value = self.assert_round_trips(encoded)
+        self.assertEqual(value.inner, [1])
+        self.assertEqual(value.ivars, {"E": 2})
+
+    def test_ivar_wrapped_hash_keeps_its_record(self):
+        encoded = b"\x04\x08I{\x06i\x06i\x07\x06:\x06ET"
+        value = self.assert_round_trips(encoded)
+        self.assertEqual(value.ivars, {"E": True})
+
+    def test_ivar_wrapped_symbol_round_trips(self):
+        # Ruby >= 1.9 wraps a non-ASCII symbol in an encoding record.
+        encoded = b"\x04\x08I:\x08foo\x06:\x06ET"
+        value = self.assert_round_trips(encoded)
+        self.assertEqual(str(value), "foo")
+        self.assertEqual(value.ivars, {"E": True})
+
+    def test_c_level_data_record_round_trips(self):
+        # Type 'd' used to be refused outright, failing the whole file.
+        encoded = b"\x04\x08d:\x0aThingi\x06"
+        value = self.assert_round_trips(encoded)
+        self.assertEqual(value.cls, "Thing")
+        self.assertEqual(value.value, 1)
+
+    def test_non_utf8_class_name_round_trips(self):
+        encoded = b"\x04\x08c\x09Caf\xe9"
+        value = self.assert_round_trips(encoded)
+        self.assertEqual(value.kind, "class")
+
+    def test_older_minor_version_can_be_reproduced(self):
+        encoded = b"\x04\x07i\x06"
+        reader = MarshalReader(encoded)
+        self.assertEqual(reader.read(), 1)
+        self.assertEqual(reader.minor_version, 7)
+        self.assertEqual(dump(1, minor=reader.minor_version), encoded)
+
+    def test_out_of_range_fixnum_is_reported(self):
+        # Ruby only writes a Fixnum below 2**30, so this one will come back out
+        # as a Bignum; the warning is what makes that visible.
+        _, warnings = load_with_warnings(b"\x04\x08i\x04\x00\x00\x00@")
+        self.assertTrue(any("Fixnum" in w for w in warnings))
+
+    def test_separate_empty_strings_are_not_aliased(self):
+        # CPython hands out one object for every b"", so an id()-keyed link
+        # table would emit the second as a link and Ruby would load them as one
+        # shared, mutable String.
+        encoded = dump([b"", b""])
+        self.assertEqual(encoded, b'\x04\x08[\x07"\x00"\x00')
+
+    def test_integral_float_is_written_the_way_ruby_writes_it(self):
+        self.assertEqual(dump(RubyFloat(1.0)), b"\x04\x08f\x061")
+        self.assertEqual(dump(RubyFloat(2.5)), b"\x04\x08f\x082.5")
+
+    def test_unknown_class_ref_kind_is_refused(self):
+        with self.assertRaises(MarshalError) as caught:
+            dump(RubyClassRef("Foo", "typo"))
+        self.assertIn("unknown class reference kind", str(caught.exception))
 
 
 if __name__ == "__main__":

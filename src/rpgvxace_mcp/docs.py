@@ -17,8 +17,13 @@ from .commands import (
     command_table,
     param_specs,
 )
-from .project import Project
-from .schema import TILESET_FLAG_BITS, TILE_ID_RANGES
+from .project import CHANGE_LOG, WORK_DIR, Project
+from .schema import (
+    TILESET_FLAG_BITS,
+    TILESET_FLAG_BITS_NOTE,
+    TILE_ID_RANGES,
+    TILE_ID_RANGES_NOTE,
+)
 
 
 def server_instructions(project: Project) -> str:
@@ -54,12 +59,36 @@ def server_instructions(project: Project) -> str:
     return "\n".join(lines)
 
 
+def _modelling_banner(project: Project) -> list[str]:
+    """A warning for a project whose engine is not the one being described.
+
+    An engine opened with --allow-other-engines is described with the closest
+    model available. Saying so beats a document that titles itself one engine
+    and lists another's details.
+    """
+    if project.engine == project.profile.key:
+        return []
+    return [
+        "> **This is a %s project described with the %s model**, because %s is "
+        "not modelled by this server. The file names, class fields and command "
+        "codes below are %s's. Treat every detail here as unconfirmed for this "
+        "project." % (project.engine, project.profile.label, project.engine,
+                      project.profile.label),
+        "",
+    ]
+
+
+def _bullets(mapping: dict) -> list[str]:
+    return ["* `%s` -- %s" % (key, value) for key, value in mapping.items()]
+
+
 def data_format_reference(project: Project) -> str:
     profile = project.profile
     extension = project.extension
     lines = [
         "# %s data format" % profile.label,
         "",
+        *_modelling_banner(project),
         "Every file under `Data/` is Ruby `Marshal.dump` output (format 4.8).",
         "This server reads and writes that format directly, so no Ruby",
         "installation is needed.",
@@ -82,7 +111,7 @@ def data_format_reference(project: Project) -> str:
         "",
     ]
 
-    if profile.key == "vx_ace":
+    if profile.has_tileset_database:
         lines += [
             "VX Ace has a `Tilesets` database and each map names one with",
             "`tileset_id`. It has no `Areas` file: encounter regions are painted",
@@ -111,8 +140,7 @@ def data_format_reference(project: Project) -> str:
     for cls in sorted(profile.class_fields):
         lines.append("### %s" % cls)
         lines.append("")
-        for field, description in profile.class_fields[cls].items():
-            lines.append("* `%s` -- %s" % (field, description))
+        lines += _bullets(profile.class_fields[cls])
         lines.append("")
 
     lines += [
@@ -127,8 +155,7 @@ def data_format_reference(project: Project) -> str:
         lines.append("* `z = %d` -- %s" % (layer, meaning))
     lines += [
         "",
-        "Tile id ranges for a tileset's sheets (advisory -- derived from the RGSS",
-        "tilemap layout, so confirm against a working map before relying on one):",
+        "Tile id ranges for a tileset's sheets. " + TILE_ID_RANGES_NOTE,
         "",
     ]
     for sheet, (low, high) in TILE_ID_RANGES.items():
@@ -139,12 +166,11 @@ def data_format_reference(project: Project) -> str:
             "",
             "### Tileset flags",
             "",
-            "`RPG::Tileset#flags` is a 1-dimensional `Table` of 8192 words, one per",
-            "tile id (advisory -- read from how RGSS3 interprets them at runtime):",
+            "`RPG::Tileset#flags` is a 1-dimensional `Table` of 8192 words, one",
+            "per tile id. " + TILESET_FLAG_BITS_NOTE,
             "",
+            *_bullets(TILESET_FLAG_BITS),
         ]
-        for mask, meaning in TILESET_FLAG_BITS.items():
-            lines.append("* `%s` -- %s" % (mask, meaning))
 
     lines += [
         "",
@@ -156,7 +182,7 @@ def data_format_reference(project: Project) -> str:
         "## Text encoding",
         "",
     ]
-    if profile.key == "vx_ace":
+    if profile.strings_carry_encoding:
         lines += [
             "RGSS3 runs Ruby 1.9, so strings carry their encoding and are normally",
             "UTF-8. The server detects the code page at startup and reports it in",
@@ -177,12 +203,16 @@ def data_format_reference(project: Project) -> str:
 
 
 def command_reference_document(project: Project) -> str:
-    engine = project.engine
+    # Keyed off the *modelled* engine, not the detected one: an unmodelled
+    # engine has no command table of its own, and titling the document with one
+    # engine while listing another's codes is worse than saying so plainly.
+    engine = project.profile.key
     table = command_table(engine)
     specs = param_specs(engine)
     lines = [
         "# %s event command codes" % project.profile.label,
         "",
+        *_modelling_banner(project),
         "Codes are those this engine's `Game_Interpreter` dispatches, plus the",
         "continuation codes that only appear in data. A command is",
         "`{code, indent, parameters}`; a command list ends with a blank command",
@@ -242,7 +272,9 @@ def command_reference_document(project: Project) -> str:
 
 def workflow_document(project: Project) -> str:
     label = project.profile.label
-    ace = project.profile.key == "vx_ace"
+    regions_note = ("\n\nRegions: on VX Ace, tile layer 3 holds region ids, so "
+                    "paint them with\n`map_tiles z=3`."
+                    if project.profile.has_region_layer else "")
     return """\
 # Working on a %(label)s project through this server
 
@@ -291,12 +323,12 @@ Scripts: `scripts` reads and replaces the script editor slots.
 
 * `dry_run` on any writing tool shows the change without touching disk.
 * The first time a run writes to a file, that file is copied into
-  `.rpgvxace-mcp/backups/`. `backups op=create` snapshots everything on demand,
+  `%(work_dir)s/backups/`. `backups op=create` snapshots everything on demand,
   and `backups op=restore` rolls back.
 * `validate` after a batch of edits. It finds broken transfers, missing assets,
   dangling database references, hidden event pages and autorun pages that never
   release control.
-* Changes are appended to `.rpgvxace-mcp/changes.jsonl`.
+* Changes are appended to `%(work_dir)s/%(change_log)s`.
 
 ## What this server does not do
 
@@ -305,8 +337,9 @@ screenshotting and no playtest control. Encrypted archives are not read -- point
 the server at an unpacked project.
 """ % {
         "label": label,
-        "tiles": ("\n\nRegions: on VX Ace, tile layer 3 holds region ids, so paint "
-                  "them with\n`map_tiles z=3`." if ace else ""),
+        "tiles": regions_note,
+        "work_dir": WORK_DIR,
+        "change_log": CHANGE_LOG,
     }
 
 
@@ -315,7 +348,8 @@ RESOURCES = [
         "uri": "rpgvxace://reference/data-format",
         "name": "data_format",
         "title": "Data format",
-        "description": "Which file holds what, the fields of each RPG:: class, "
+        "description": "Which file holds what, the documented fields of the "
+                       "map, event, command and (on VX Ace) tileset classes, "
                        "tile data layout and text encoding, for this project's "
                        "engine.",
         "mimeType": "text/markdown",

@@ -5,18 +5,38 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..analysis import Location, iter_command_lists, validate as run_validate
+from ..analysis import (
+    DEFAULT_LIMIT,
+    Location,
+    MAX_FINDINGS,
+    VALIDATE_SCOPES,
+    iter_command_lists,
+    validate as run_validate,
+)
 from ..commands import command_name, summarize
-from ..convert import from_json, to_json
-from ..project import ProjectError
-from ..rubytypes import RubyHash, RubyObject, RubyString, Table
+from ..convert import TextCodec, _hash_key, from_json, to_json
+from ..project import MAX_MAP_ID, ProjectError
+from ..rubytypes import (
+    RubyHash,
+    RubyIvars,
+    RubyObject,
+    RubyString,
+    Table,
+    _bare_name,
+)
 from ..schema import (
     ALL_TABLE_KEYS,
+    ARRAY,
+    HASH,
+    SCRIPTS,
+    SchemaWalk,
     TILESET_FLAG_BITS,
+    TILESET_FLAG_BITS_NOTE,
     TILE_ID_RANGES,
-    observe_class_fields,
+    TILE_ID_RANGES_NOTE,
 )
 from .registry import (
+    echo,
     ARR,
     BOOL,
     Context,
@@ -38,8 +58,35 @@ from .registry import (
     tool,
 )
 
+# One search's ceiling on hits, on how much of a hit's text comes back, and on
+# the size of a caller-supplied pattern.
+MAX_HITS = 1000
+MAX_HIT_CHARS = 300
+MAX_PATTERN_CHARS = 512
+
+
 SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
-VALIDATE_SCOPES = ["maps", "events", "assets", "database"]
+
+# A script body this server will write. Well under the whole-file inflate
+# budget, so a project stays readable by the tool that wrote it.
+MAX_SCRIPT_CHARS = 2 * 1024 * 1024
+MAX_SCRIPT_NAME_CHARS = 200
+
+
+# How many maps one validate call will look at. A caller asking for more
+# than a project could hold is asking by mistake.
+MAX_MAP_IDS = 4096
+
+
+def need_map_id(value: Any) -> int:
+    """A map id from a caller, refusing anything that would silently move.
+
+    ``int(1.9)`` is 1, so coercing a float here would check a different map
+    than the caller asked about and report the answer as if it were theirs.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ToolError("map id %r is not a whole number" % (value,))
+    return value
 
 
 @tool(
@@ -58,6 +105,7 @@ VALIDATE_SCOPES = ["maps", "events", "assets", "database"]
     }),
 )
 def project_info(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
+    """What this server has open, and what is in it. Reads only."""
     refresh = opt_bool(args, "refresh")
     info = ctx.project.describe()
 
@@ -66,10 +114,12 @@ def project_info(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         if not ctx.project.exists(ctx.project.filename_for(key)):
             continue
         try:
-            if entry.container in ("array", "hash"):
+            if entry.container in (ARRAY, HASH):
                 counts[key] = len(ctx.project.entries(key, refresh))
-            elif entry.container == "scripts":
-                counts[key] = len(ctx.project.load_scripts())
+            elif entry.container == SCRIPTS:
+                # Only the slot count is wanted here, so skip inflating every
+                # script body.
+                counts[key] = len(ctx.project.load_scripts(with_code=False))
             else:
                 ctx.project.load_data(key, refresh)
                 counts[key] = 1
@@ -82,7 +132,7 @@ def project_info(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     info["entry_counts"] = counts
     if warnings:
         info["file_warnings"] = warnings
-    info["maps"] = ctx.project.map_ids_on_disk()
+    info["maps"] = ctx.project.map_ids_on_disk(refresh=refresh)
     if opt_bool(args, "include_schema"):
         info["schema"] = _schema_report(ctx, refresh)
     if opt_bool(args, "include_changes"):
@@ -91,20 +141,22 @@ def project_info(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _schema_report(ctx: Context, refresh: bool) -> dict[str, Any]:
-    observed: dict[str, dict[str, int]] = {}
+    # One walk for the whole project, so its work budget is a project budget.
+    walk = SchemaWalk()
     for key, entry in ctx.project.data_files.items():
-        if entry.container == "scripts" or not ctx.project.exists(
+        if entry.container == SCRIPTS or not ctx.project.exists(
                 ctx.project.filename_for(key)):
             continue
         try:
-            observe_class_fields(ctx.project.load_data(key, refresh), observed)
+            walk.visit(ctx.project.load_data(key, refresh))
         except (ProjectError, ValueError):
             continue
     for map_id in ctx.project.map_ids_on_disk():
         try:
-            observe_class_fields(ctx.project.load_map(map_id), observed)
+            walk.visit(ctx.project.load_map(map_id, refresh))
         except (ProjectError, ValueError):
             continue
+    observed = walk.fields
 
     documented_all = ctx.project.profile.class_fields
     classes = {}
@@ -119,16 +171,27 @@ def _schema_report(ctx: Context, refresh: bool) -> dict[str, Any]:
             "undocumented_fields": [f for f in sorted(observed[cls])
                                     if f not in documented],
         }
-    return {
+    report: dict[str, Any] = {
         "classes": classes,
         "note": "Fields are those observed in this project's files. Descriptions "
-                "come from the RGSS2 reference where one exists; a field with an "
-                "empty description is real but undocumented here.",
+                "come from the RGSS reference for %s where one exists; a field "
+                "with an empty description is real but undocumented here."
+                % ctx.project.profile.label,
         "tile_id_ranges": TILE_ID_RANGES,
+        "tile_id_ranges_note": TILE_ID_RANGES_NOTE,
         "map_layers": ctx.project.profile.map_layers,
-        "tileset_flag_bits": (TILESET_FLAG_BITS
-                              if "tilesets" in ctx.project.data_files else None),
     }
+    if ctx.project.profile.has_tileset_database:
+        report["tileset_flag_bits"] = TILESET_FLAG_BITS
+        report["tileset_flag_bits_note"] = TILESET_FLAG_BITS_NOTE
+    if walk.truncated:
+        # Say so rather than present a partial tally as the whole picture.
+        report["incomplete"] = (
+            "the walk stopped after %d values, so this list of fields may be "
+            "missing some. That normally means a data file contains an unusual "
+            "amount of shared structure." % walk.nodes_visited
+        )
+    return report
 
 
 @tool(
@@ -143,14 +206,24 @@ def _schema_report(ctx: Context, refresh: bool) -> dict[str, Any]:
         "scopes": prop(ARR, "Which checks to run (default all): "
                             + ", ".join(VALIDATE_SCOPES),
                        items={"type": STR, "enum": VALIDATE_SCOPES}),
-        "map_ids": prop(ARR, "Only check these maps.", items={"type": INT}),
-        "limit": prop(INT, "Maximum findings to return (default 200).", minimum=1),
+        "map_ids": prop(ARR, "Only check these maps -- this narrows the map-based\n                             checks only, since common events and troop pages\n                             belong to the project rather than to a map. At\n                             most %d." % MAX_MAP_IDS, items={"type": INT},
+                        maxItems=MAX_MAP_IDS),
+        "limit": prop(INT, "Maximum findings to return (default %d)."
+                      % DEFAULT_LIMIT, minimum=1, maximum=MAX_FINDINGS),
     }),
 )
 def validate(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
-    scopes = [s for s in opt_list(args, "scopes") if s in VALIDATE_SCOPES] or VALIDATE_SCOPES
-    map_ids = [int(m) for m in opt_list(args, "map_ids")] or None
-    return run_validate(ctx.project, scopes, map_ids, opt_int(args, "limit", 200) or 200)
+    """Run the cross-reference checks. Reads only."""
+    scopes = _scopes_arg(args, "scopes", VALIDATE_SCOPES)
+    requested = opt_list(args, "map_ids")
+    if len(requested) > MAX_MAP_IDS:
+        raise ToolError("map_ids lists %d maps; this server checks at most "
+                        "%d at a time" % (len(requested), MAX_MAP_IDS))
+    # Not int(m): a float would truncate silently and check a different
+    # map than the caller named.
+    map_ids = [need_map_id(m) for m in requested] or None
+    return run_validate(ctx.project, scopes, map_ids,
+                        opt_int(args, "limit", DEFAULT_LIMIT) or DEFAULT_LIMIT)
 
 
 @tool(
@@ -158,7 +231,7 @@ def validate(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     "Search the whole project",
     "Find text or command codes anywhere in the project: dialogue and comments "
     "in event command lists, database entry names and descriptions, map names, "
-    "and the RGSS2 scripts. Every hit says exactly where it lives so you can go "
+    "and the Ruby scripts. Every hit says exactly where it lives so you can go "
     "straight to it with event_get or db_get.",
     schema({
         "query": prop(STR, "Text to look for (case-insensitive substring, or a "
@@ -168,32 +241,41 @@ def validate(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                                   "instead of searching text."),
         "scopes": prop(ARR, "Where to look (default all): " + ", ".join(SEARCH_SCOPES),
                        items={"type": STR, "enum": SEARCH_SCOPES}),
-        "limit": prop(INT, "Maximum hits to return (default 100).", minimum=1),
+        "limit": prop(INT, "Maximum hits to return (default 100, at most "
+                           "%d)." % MAX_HITS, minimum=1, maximum=MAX_HITS),
     }),
 )
 def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
-    scopes = [s for s in opt_list(args, "scopes") if s in SEARCH_SCOPES] or SEARCH_SCOPES
-    limit = opt_int(args, "limit", 100) or 100
+    """Find text or a command code across the project.
+
+    Reports which scopes it actually read, because an empty result means
+    nothing without knowing where the search went.
+    """
+    scopes = _scopes_arg(args, "scopes", SEARCH_SCOPES)
+    limit = opt_int(args, "limit", 100, minimum=1, maximum=MAX_HITS) or 100
     code_filter = opt_int(args, "command_code")
     query = opt_str(args, "query")
     if code_filter is None and not query:
         raise ToolError("pass query (text to find) or command_code")
 
-    matcher = None
-    if query:
-        if opt_bool(args, "regex"):
-            try:
-                pattern = re.compile(query, re.IGNORECASE)
-            except re.error as exc:
-                raise ToolError("invalid regular expression: %s" % exc)
-            matcher = pattern.search
-        else:
-            needle = query.lower()
-            matcher = lambda text: needle in text.lower()  # noqa: E731
+    matcher = _matcher(args, query)
 
+    # A command_code search only has anything to look at in event command
+    # lists, so the other scopes are skipped. Recorded as it goes, because
+    # reporting the scopes that were *asked for* told the model those had been
+    # searched and come back empty.
+    searched: list[str] = []
+    # A scope whose file would not load was not searched either, and saying it
+    # came back empty is the same lie as reporting a skipped scope: recorded
+    # separately so the caller can tell "nothing there" from "could not look".
+    unsearchable: dict[str, str] = {}
     hits: list[dict[str, Any]] = []
 
     def add(location: Location, text: str, extra: dict[str, Any] | None = None) -> bool:
+        # Capped like a finding's text: one minified script line or crafted
+        # note would otherwise be reflected whole into the response.
+        if len(text) > MAX_HIT_CHARS:
+            text = text[:MAX_HIT_CHARS] + "... (%d characters)" % len(text)
         row = {"where": location.describe(), "location": location.as_dict(),
                "text": text}
         if extra:
@@ -202,6 +284,7 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         return len(hits) >= limit
 
     if "events" in scopes:
+        searched.append("events")
         for location, commands in iter_command_lists(ctx.project):
             for index, command in enumerate(commands):
                 if not isinstance(command, RubyObject):
@@ -210,26 +293,29 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 if code_filter is not None:
                     if code != code_filter:
                         continue
-                    here = _at(location, index)
+                    here = location.at(index)
                     if add(here, summarize(command, ctx.codec),
                            {"code": code, "command": command_name(code)}):
-                        return _result(hits, limit, scopes)
+                        return _result(hits, limit, searched, None, unsearchable)
                     continue
                 for text in _command_texts(ctx, command):
                     if matcher and matcher(text):
-                        here = _at(location, index)
+                        here = location.at(index)
                         if add(here, text, {"code": code,
                                             "command": command_name(code)}):
-                            return _result(hits, limit, scopes)
+                            return _result(hits, limit, searched, None, unsearchable)
 
+    read_any = False
     if code_filter is None and "database" in scopes:
         for key, entry in ctx.project.data_files.items():
-            if entry.container not in ("array", "hash"):
+            if entry.container not in (ARRAY, HASH):
                 continue
             try:
                 rows = ctx.project.entries(key)
-            except (ProjectError, ValueError):
+            except (ProjectError, ValueError) as exc:
+                unsearchable[key] = str(exc)
                 continue
+            read_any = True
             for entry_id, item in rows:
                 if not isinstance(item, RubyObject):
                     continue
@@ -239,9 +325,12 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                     text = ctx.codec.decode(value.data)
                     if text and matcher and matcher(text):
                         location = Location("database", table=key, entry_id=entry_id,
-                                            field=field.lstrip("@"))
+                                            field=_bare_name(field))
                         if add(location, text):
-                            return _result(hits, limit, scopes)
+                            return _result(hits, limit, searched, None, unsearchable)
+
+    if code_filter is None and "database" in scopes and read_any:
+        searched.append("database")
 
     if code_filter is None and "maps" in scopes:
         try:
@@ -252,37 +341,111 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 text = ctx.codec.decode(name.data) if isinstance(name, RubyString) else ""
                 if text and matcher and matcher(text):
                     if add(Location("map", map_id=map_id, field="name"), text):
-                        return _result(hits, limit, scopes)
-        except (ProjectError, ValueError):
-            pass
+                        return _result(hits, limit, searched, None, unsearchable)
+            searched.append("maps")
+        except (ProjectError, ValueError) as exc:
+            unsearchable["map_infos"] = str(exc)
 
+    unreadable: list[int] = []
     if code_filter is None and "scripts" in scopes:
         try:
             scripts_list = ctx.project.load_scripts()
-        except (ProjectError, ValueError):
+            searched.append("scripts")
+        except (ProjectError, ValueError) as exc:
+            unsearchable["scripts"] = str(exc)
             scripts_list = []
         for script in scripts_list:
-            code_text = script.get("code") or ""
-            for line_number, line in enumerate(code_text.splitlines(), start=1):
+            if "code" not in script:
+                # A slot whose body would not inflate was not searched, and
+                # saying so beats reporting no hits in it.
+                unreadable.append(script["index"])
+                continue
+            for line_number, line in enumerate(script["code"].splitlines(),
+                                               start=1):
                 if matcher and matcher(line):
-                    location = Location("script", entry_id=script["index"],
-                                        index=line_number)
-                    if add(location, line.strip(),
+                    if add(_script_at(script, line_number), line.strip(),
                            {"script_name": script.get("name")}):
-                        return _result(hits, limit, scopes)
+                        return _result(hits, limit, searched, unreadable, unsearchable)
 
-    return _result(hits, limit, scopes)
-
-
-def _result(hits: list[dict[str, Any]], limit: int, scopes: list[str]) -> dict[str, Any]:
-    return {"hits": hits, "count": len(hits), "truncated": len(hits) >= limit,
-            "scopes": scopes}
+    return _result(hits, limit, searched, unreadable, unsearchable)
 
 
-def _at(location: Location, index: int) -> Location:
-    return Location(location.kind, location.map_id, location.event_id,
-                    location.event_name, location.page, index, location.entry_id,
-                    location.table, location.field)
+def _result(hits: list[dict[str, Any]], limit: int, searched: list[str],
+            unreadable: list[int] | None = None,
+            unsearchable: dict[str, str] | None = None) -> dict[str, Any]:
+    """One search's answer, saying what it looked at as well as what it found.
+
+    An empty result means nothing without knowing where the search went: a
+    command_code search skips the text scopes, and a file that would not load
+    was never read. Both are reported rather than folded into "no hits".
+    """
+    out: dict[str, Any] = {
+        "hits": hits, "count": len(hits), "truncated": len(hits) >= limit,
+        "scopes_searched": searched,
+    }
+    if unreadable:
+        out["scripts_not_searched"] = unreadable
+    if unsearchable:
+        out["could_not_read"] = unsearchable
+    return out
+
+
+def _script_at(script: dict[str, Any], line: int) -> Location:
+    """Where a script hit is, named the way the scripts tool takes it.
+
+    A script slot is not an event command list: the fields are a slot index
+    and a line number, so they are named that rather than reusing `entry_id`
+    and `index`, which mean something else everywhere else.
+    """
+    location = Location("script", entry_id=script["index"], index=line)
+    return location
+
+
+def _matcher(args: dict[str, Any], query: str | None):
+    """The text test one search uses, compiled once.
+
+    A caller-supplied pattern is bounded in length and rejected if it nests
+    too deeply to compile: `re` runs uninterruptibly, so a pattern that
+    backtracks badly would wedge this single-threaded server, and the pattern
+    can be suggested by project text the model has just read.
+    """
+    if not query:
+        return None
+    if not opt_bool(args, "regex"):
+        needle = query.lower()
+        return lambda text: needle in text.lower()
+    if len(query) > MAX_PATTERN_CHARS:
+        raise ToolError(
+            "the pattern is %d characters, above the %d this server compiles. "
+            "Search for a plain substring instead, or narrow the pattern."
+            % (len(query), MAX_PATTERN_CHARS))
+    try:
+        pattern = re.compile(query, re.IGNORECASE)
+    except re.error as exc:
+        raise ToolError("invalid regular expression: %s" % exc)
+    except RecursionError:
+        raise ToolError("that pattern nests too deeply to compile")
+    return pattern.search
+
+
+def _scopes_arg(args: dict[str, Any], key: str,
+                allowed: "tuple[str, ...] | list[str]") -> list[str]:
+    """The scopes a caller asked for, refusing names that do nothing.
+
+    Dropping an unrecognised name and running everything instead is the
+    opposite of what the rest of these tools do with a bad argument: the
+    caller believes it narrowed the search and is handed the whole project.
+    """
+    asked = opt_list(args, key)
+    unknown = [s for s in asked if s not in allowed]
+    if unknown:
+        raise ToolError("unknown %s %s; choose from %s"
+                        % (key, ", ".join(echo(u) for u in unknown),
+                           ", ".join(allowed)))
+    return [s for s in asked if s in allowed] or list(allowed)
+
+
+
 
 
 def _command_texts(ctx: Context, command: RubyObject) -> list[str]:
@@ -298,7 +461,7 @@ def _command_texts(ctx: Context, command: RubyObject) -> list[str]:
 
 @tool(
     "scripts",
-    "Read or replace RGSS2 scripts",
+    "Read or replace Ruby scripts",
     "The contents of the script editor, stored zlib-compressed in "
     "Scripts.rvdata. Reading is safe; replacing a script changes game logic, so "
     "it is backed up first. Editing scripts while the RPG Maker editor is open "
@@ -308,14 +471,37 @@ def _command_texts(ctx: Context, command: RubyObject) -> list[str]:
                    enum=["list", "get", "set"]),
         "index": prop(INT, "Which script slot, as reported by list."),
         "name": prop(STR, "For set: rename the slot."),
-        "code": prop(STR, "For set: the new Ruby source for the slot."),
+        "code": prop(STR, "For set: the new Ruby source for the slot, up "
+                          "to %d characters." % MAX_SCRIPT_CHARS),
         "dry_run": DRY_RUN,
     }, ["op"]),
     writes=True,
 )
 def scripts(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
+    """List, read or replace a slot in the script editor.
+
+    A body is bounded well below the whole-file inflate budget, so a
+    project stays readable by the tool that wrote it. Staged.
+    """
     op = one_of(args, "op", ["list", "get", "set"])
-    entries = ctx.project.load_scripts()
+    if op == "set":
+        code = opt_str(args, "code")
+        if code is not None and len(code) > MAX_SCRIPT_CHARS:
+            raise ToolError(
+                "code is %d characters, above the %d this server writes. A "
+                "script that large would also push the file past what it can "
+                "read back." % (len(code), MAX_SCRIPT_CHARS))
+        name = opt_str(args, "name")
+        if name is not None and len(name) > MAX_SCRIPT_NAME_CHARS:
+            raise ToolError("name is %d characters; the editor shows at most "
+                            "about %d" % (len(name), MAX_SCRIPT_NAME_CHARS))
+    # `list` reports line and character counts, so it needs every body; `get`
+    # needs one; `set` needs only the slot count. Inflating a project's whole
+    # script pack for a `set` is the common case here.
+    index = need_int(args, "index") if op in ("get", "set") else None
+    entries = ctx.project.load_scripts(
+        with_code=op != "set",
+        indices={index} if op == "get" and index is not None else None)
 
     if op == "list":
         return {"scripts": [
@@ -326,20 +512,25 @@ def scripts(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             for s in entries
         ], "total": len(entries)}
 
-    index = need_int(args, "index")
+    if index is None:  # never: the branch above sets it for get and set
+        raise ToolError("op %s needs an index" % op)
     if not 0 <= index < len(entries):
         raise ToolError("script index %d is outside 0..%d" % (index, len(entries) - 1))
 
     if op == "get":
         return entries[index]
 
-    name, code = opt_str(args, "name"), opt_str(args, "code")
     if name is None and code is None:
         raise ToolError("set needs a name, code, or both")
-    ctx.project.set_script(index, name, code)
-    write = ctx.project.save_file(
-        ctx.project.filename_for("scripts"), dry_run=opt_bool(args, "dry_run"),
-        tool="scripts", summary="updated script %d" % index)
+    dry_run = opt_bool(args, "dry_run")
+    filename = ctx.project.filename_for("scripts")
+    with ctx.staged(filename) as write_landed:
+        ctx.project.set_script(index, name, code)
+        write = ctx.project.save_file(
+            filename, dry_run=dry_run, tool="scripts",
+            summary="updated script %d" % index)
+        if not dry_run:
+            write_landed.done()
     return {"index": index, "name": name, "write": write}
 
 
@@ -362,20 +553,35 @@ def scripts(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     writes=True,
 )
 def backups(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
+    """List, take, restore or prune snapshots of the Data folder."""
     op = one_of(args, "op", ["list", "create", "restore", "prune"])
     if op == "list":
         return {"backups": ctx.project.list_backups(),
                 "directory": str(ctx.project.backup_root()),
                 "kept": ctx.project.backup_keep}
+    dry_run = opt_bool(args, "dry_run")
     if op == "create":
         label = re.sub(r"[^A-Za-z0-9._-]", "-", opt_str(args, "label") or "manual")
+        if dry_run:
+            return {"would_snapshot": sorted(
+                p.name for p in ctx.project.data_dir.glob(
+                    "*" + ctx.project.extension)),
+                "label": label, "dry_run": True}
         return ctx.project.snapshot(label)
     if op == "prune":
-        return {"removed": ctx.project.prune_backups(), "kept": ctx.project.backup_keep}
+        if dry_run:
+            # Asked of prune_backups itself: building the candidate list here
+            # got both the key name and the rules wrong -- it claimed it would
+            # delete this run's own snapshot and any folder a person had put
+            # under backups/.
+            return {"would_remove": ctx.project.prune_backups(dry_run=True),
+                    "kept": ctx.project.backup_keep, "dry_run": True}
+        return {"removed": ctx.project.prune_backups(),
+                "kept": ctx.project.backup_keep}
     return ctx.project.restore_backup(
         need_str(args, "backup"),
         [str(f) for f in opt_list(args, "files")] or None,
-        opt_bool(args, "dry_run"),
+        dry_run,
     )
 
 
@@ -404,8 +610,17 @@ def backups(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     writes=True,
 )
 def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
+    """Read or write any field by path: the unvalidated escape hatch.
+
+    Deliberately permissive about values, and deliberately not about
+    shapes: it refuses replacing an object, hash, array or Table with a
+    value of another kind, and refuses a map's data, width, height or
+    events wholesale, because those produce a file the editor cannot
+    open. Staged like every other write.
+    """
     op = one_of(args, "op", ["get", "set"], "get")
-    table, map_id = opt_str(args, "table"), opt_int(args, "map_id")
+    table = opt_str(args, "table")
+    map_id = opt_int(args, "map_id", minimum=1, maximum=MAX_MAP_ID)
     if (table is None) == (map_id is None):
         raise ToolError("pass exactly one of table or map_id")
     refresh = opt_bool(args, "refresh")
@@ -421,7 +636,7 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     mode = one_of(args, "tables", ["summary", "full"], "summary")
 
     if op == "get":
-        value = _resolve(root, path)
+        value = _resolve(root, path, ctx.codec)
         return {"file": filename, "path": "/".join(path),
                 "type": type(value).__name__,
                 "value": to_json(value, ctx.codec, mode)}
@@ -432,19 +647,70 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             or "value" not in args["value"]:
         raise ToolError('set needs value as {"value": <the new value>}')
 
-    parent = _resolve(root, path[:-1])
+    if map_id is not None:
+        _check_structural(path)
+    parent = _resolve(root, path[:-1], ctx.codec)
     key = path[-1]
     new_value = from_json(args["value"]["value"], ctx.codec)
-    before = to_json(_resolve(root, path), ctx.codec, "summary")
-    _assign(parent, key, new_value)
-    write = ctx.project.save_file(filename, dry_run=opt_bool(args, "dry_run"),
-                                  tool="raw_data",
-                                  summary="set %s" % "/".join(path))
+    existing = _resolve(root, path, ctx.codec)
+    _check_same_kind(existing, new_value, "/".join(path))
+    before = to_json(existing, ctx.codec, "summary")
+
+    dry_run = opt_bool(args, "dry_run")
+    with ctx.staged(filename) as write_landed:
+        _assign(parent, key, new_value)
+        write = ctx.project.save_file(filename, dry_run=dry_run,
+                                      tool="raw_data",
+                                      summary="set %s" % "/".join(path))
+        if not dry_run:
+            write_landed.done()
     return {"file": filename, "path": "/".join(path), "before": before,
             "after": to_json(new_value, ctx.codec, "summary"), "write": write}
 
 
-def _resolve(value: Any, path: list[str]) -> Any:
+# Map fields whose value has to agree with the tile table or with the map's own
+# structure. raw_data is the unvalidated escape hatch, but writing one of these
+# on its own produces a file the editor refuses to open, which is not reach --
+# it is just breakage.
+STRUCTURAL_MAP_PATHS = ("data", "width", "height", "events")
+
+
+def _check_structural(path: list[str]) -> None:
+    if len(path) == 1 and path[0] in STRUCTURAL_MAP_PATHS:
+        raise ToolError(
+            "%s cannot be replaced through raw_data, because the rest of the "
+            "map has to agree with it. Use map_edit op=\"resize\" for the "
+            "size, map_tiles for tiles, and event_edit for events."
+            % path[0])
+
+
+def _check_same_kind(existing: Any, replacement: Any, path: str) -> None:
+    """Refuse swapping a structure for something that is not one.
+
+    ``apply_patch`` refuses this and raw_data did not, so an Integer could take
+    the place of an event Hash or a tile Table -- a file neither the editor nor
+    the game can open. Anything else raw_data still allows: this is the one
+    guard it keeps, because being able to write an odd *value* is the point,
+    and being able to write an odd *shape* is not.
+    """
+    kinds = ((RubyObject, "an object"), (RubyHash, "a hash"),
+             (Table, "an RGSS Table"), (list, "an array"))
+    for kind, described in kinds:
+        if isinstance(existing, kind) and not isinstance(replacement, kind):
+            raise ToolError(
+                "%s currently holds %s, and replacing it with %s would leave a "
+                "file the editor cannot open. Set a field inside it instead, or "
+                "use the tool that owns this structure."
+                % (path, described, type(replacement).__name__))
+
+
+def _resolve(value: Any, path: list[str], codec: TextCodec) -> Any:
+    """Walk a path into a loaded file.
+
+    The codec is needed because a Ruby Hash can be keyed by RubyStrings as well
+    as by integers, and looking such a key up as a bare Python string finds
+    nothing while reporting that the key does not exist.
+    """
     current = value
     for depth, key in enumerate(path):
         trail = "/".join(path[:depth]) or "the top of the file"
@@ -456,11 +722,17 @@ def _resolve(value: Any, path: list[str]) -> Any:
         elif isinstance(current, list):
             current = _index_list(current, key, trail)
         elif isinstance(current, RubyHash):
-            lookup = int(key) if _is_int(key) else key
+            lookup = _hash_key(current, key, codec)
             if lookup not in current:
                 raise ToolError("%s has no key %r (keys: %s)"
                                 % (trail, key, current.keys()[:20]))
             current = current.get(lookup)
+        elif isinstance(current, RubyIvars):
+            # A value the codec wrapped to keep an instance-variable record it
+            # could not store inline. Descending into what it wraps is what the
+            # caller meant.
+            current = current.value
+            continue
         elif isinstance(current, Table):
             raise ToolError("%s is an RGSS Table; use map_tiles to read or write "
                             "its cells" % trail)

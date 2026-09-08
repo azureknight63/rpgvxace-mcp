@@ -15,14 +15,19 @@ base64 rather than silently mangled.
 from __future__ import annotations
 
 import base64
+import codecs
+import re
 from typing import Any
 
 from .rubytypes import (
     Color,
+    RGSSFloats,
     RubyClassRef,
+    RubyData,
     RubyExtended,
     RubyFloat,
     RubyHash,
+    RubyIvars,
     RubyObject,
     RubyRegexp,
     RubyString,
@@ -32,20 +37,88 @@ from .rubytypes import (
     RubyUserDef,
     RubyUserMarshal,
     Table,
+    Tone,
+    _bare_name,
+    printable_text,
 )
+
+# How a Table's cells are rendered.
+TABLE_MODES = ("summary", "full")
 
 # Cells are omitted from generic views above this size; map data is far bigger
 # than anything worth pasting into a tool result.
 TABLE_INLINE_LIMIT = 256
 
+# Even when a caller asks for every cell, there is a size past which the answer
+# is not usable as a JSON response. A 500x500x4 map is a million cells; nobody
+# can read that, and map_tiles reads a region far more cheaply.
+TABLE_FULL_LIMIT = 20_000
+
+# A loaded value is a graph, not a tree: Marshal links resolve to the same
+# object, and a file may legally contain a cycle. Both caps bound the walk.
+MAX_JSON_DEPTH = 64
+MAX_NORMALIZE_DEPTH = 24
+
+# Path-based cycle detection has to repeat a shared value at every reference,
+# because JSON has no links. This bounds what that can add up to.
+MAX_JSON_NODES = 2_000_000
+
+# The most a single opaque _dump payload may carry, so a base64 blob cannot be
+# used to inflate a data file without bound.
+MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
+
+# Ruby's own rules for these names. Writing one Ruby rejects produces a file
+# the editor can no longer open, which is a corruption we can refuse up front.
+_IVAR_NAME = re.compile(r"^@[A-Za-z_][A-Za-z0-9_]*$")
+_CLASS_PATH = re.compile(r"^[A-Z][A-Za-z0-9_]*(::[A-Z][A-Za-z0-9_]*)*$")
+
+
+def check_ivar_name(name: str) -> str:
+    """Refuse a field name Ruby would not accept as an instance variable."""
+    if not _IVAR_NAME.match(name if name.startswith("@") else "@" + name):
+        raise ConversionError(
+            "%r is not a usable field name. Ruby instance variables are a "
+            "letter or underscore followed by letters, digits or underscores; "
+            "a name outside that produces a file the editor cannot open."
+            % name
+        )
+    return name
+
+
+def check_class_name(name: str) -> str:
+    """Refuse a class name Ruby would not resolve."""
+    if not isinstance(name, str) or not _CLASS_PATH.match(name):
+        raise ConversionError(
+            "%r is not a usable Ruby class name. Expected something like "
+            "RPG::Item or Table." % (name,)
+        )
+    return name
+
+
+def _payload_from_base64(value: Any, what: str) -> bytes:
+    """Decode a base64 payload strictly, so what we write is what was sent."""
+    if not isinstance(value, str):
+        raise ConversionError("%s must be a base64 string, got %r" % (what, value))
+    try:
+        # validate=True: without it, characters outside the alphabet are
+        # silently dropped and the bytes written differ from the bytes sent.
+        payload = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ConversionError("%s is not valid base64: %s" % (what, exc)) from None
+    if len(payload) > MAX_PAYLOAD_BYTES:
+        raise ConversionError(
+            "%s decodes to %d bytes, above the %d byte limit"
+            % (what, len(payload), MAX_PAYLOAD_BYTES))
+    return payload
+
 
 class ConversionError(ValueError):
-    pass
+    """Raised when a value cannot cross the Ruby/JSON boundary.
 
-
-# Ivars Ruby uses to record a string's own encoding. They are bookkeeping, not
-# content, so they do not belong in a tool result.
-ENCODING_IVARS = ("E", "encoding")
+    Reported to the caller as a tool error, so the message has to say what to
+    do instead -- these are usually reachable by a model sending a plausible
+    but wrong argument.
+    """
 
 
 class TextCodec:
@@ -57,6 +130,13 @@ class TextCodec:
     """
 
     def __init__(self, name: str = "utf-8", string_ivars: dict[str, Any] | None = None):
+        try:
+            codecs.lookup(name)
+        except LookupError:
+            raise ConversionError(
+                "%r is not a known text encoding; pass --encoding with one Python "
+                "recognises, such as utf-8, cp932 or cp1252." % name
+            ) from None
         self.name = name
         self.string_ivars = dict(string_ivars or {})
 
@@ -64,8 +144,25 @@ class TextCodec:
         return data.decode(self.name, "surrogateescape")
 
     def make_string(self, text: str) -> RubyString:
-        """A RubyString in this project's style, ready to write back."""
-        return RubyString(self.encode(text), dict(self.string_ivars) or None)
+        """A RubyString in this project's style, ready to write back.
+
+        Encoded strictly: this is the path caller-supplied text takes, and a
+        lone surrogate (which JSON permits) would otherwise become arbitrary
+        raw bytes inside a string the engine has tagged as UTF-8.
+        """
+        return RubyString(self.encode_strict(text), dict(self.string_ivars) or None)
+
+    def encode_strict(self, text: str) -> bytes:
+        """Encode text that came from a caller rather than from a file."""
+        try:
+            return text.encode(self.name)
+        except UnicodeEncodeError as exc:
+            bad = text[exc.start:exc.end]
+            raise ConversionError(
+                "%r cannot be written in this project's %s encoding. Either use "
+                "characters that fit that code page, or restart the server with "
+                "--encoding set to a codec that covers them." % (bad, self.name)
+            ) from None
 
     def is_default_style(self, value: RubyString) -> bool:
         return value.ivars == self.string_ivars
@@ -102,7 +199,7 @@ def detect_encoding(samples: list[bytes]) -> tuple[str, str]:
 
     Returns ``(encoding, reason)``.
     """
-    non_ascii = [s for s in samples if any(b > 0x7F for b in s)]
+    non_ascii = [s for s in samples if not s.isascii()]
     if not non_ascii:
         return "utf-8", "all sampled text is ASCII, so any code page reads the same"
     for name in CANDIDATE_ENCODINGS:
@@ -123,8 +220,68 @@ def to_json(value: Any, codec: TextCodec, tables: str = "summary") -> Any:
     """Convert a loaded Ruby value into JSON-safe data.
 
     ``tables`` selects how :class:`Table` cells are rendered: ``"summary"``
-    reports the shape only, ``"full"`` includes every cell.
+    reports the shape only, ``"full"`` includes every cell up to
+    :data:`TABLE_FULL_LIMIT`.
     """
+    return _to_json(value, codec, tables, _Walk())
+
+
+class _Walk:
+    """Bookkeeping for one conversion: the path taken, and the work left.
+
+    ``path`` holds the id of every container between the root and here, so a
+    value that contains itself is reported instead of recursed into. It is one
+    mutable set with entries added and removed around each recursion rather
+    than a fresh copy per node -- copying made the walk quadratic in the size of
+    a map.
+
+    ``budget`` bounds the total nodes visited. Path-based cycle detection is the
+    right answer for JSON output, which has no links and so must repeat a shared
+    value at each reference, but that means a crafted graph sharing a child at
+    every level can still expand exponentially. The budget is what stops it.
+    """
+
+    __slots__ = ("path", "depth", "budget")
+
+    def __init__(self, budget: int = MAX_JSON_NODES):
+        self.path: set[int] = set()
+        self.depth = 0
+        self.budget = budget
+
+
+def _to_json(value: Any, codec: TextCodec, tables: str, walk: _Walk) -> Any:
+    """One step of the conversion."""
+    if walk.depth > MAX_JSON_DEPTH:
+        raise ConversionError(
+            "value nests deeper than %d levels; this file is not shaped like "
+            "project data" % MAX_JSON_DEPTH
+        )
+    walk.budget -= 1
+    if walk.budget < 0:
+        raise ConversionError(
+            "this value expands to more than %d pieces, which is too large for "
+            "one response. Read a smaller part of it -- a single entry, one "
+            "event, or a tile region with map_tiles." % MAX_JSON_NODES
+        )
+
+    container = isinstance(value, (list, RubyHash, RubyObject, RubyIvars))
+    if container:
+        if id(value) in walk.path:
+            # Report the cycle rather than recurse into it forever.
+            return {"__cycle__": type(value).__name__,
+                    "__note__": "this value contains itself; expanding it would "
+                                "not terminate"}
+        walk.path.add(id(value))
+    walk.depth += 1
+    try:
+        return _to_json_value(value, codec, tables, walk)
+    finally:
+        walk.depth -= 1
+        if container:
+            walk.path.discard(id(value))
+
+
+def _to_json_value(value: Any, codec: TextCodec, tables: str, walk: _Walk) -> Any:
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, RubyFloat):
@@ -132,65 +289,89 @@ def to_json(value: Any, codec: TextCodec, tables: str = "summary") -> Any:
     if isinstance(value, (int, float)):
         return value
     if isinstance(value, RubySymbol):  # before RubyString/str checks
-        return {"__symbol__": str(value)}
+        return {"__symbol__": printable_text(str(value))}
     if isinstance(value, RubyString):
         return _string_to_json(value, codec)
     if isinstance(value, (bytes, bytearray)):
         return _string_to_json(RubyString(bytes(value)), codec)
     if isinstance(value, list):
-        return [to_json(v, codec, tables) for v in value]
+        return [_to_json(v, codec, tables, walk) for v in value]
     if isinstance(value, RubyHash):
         out: dict[str, Any] = {
-            "__hash__": [[to_json(k, codec, tables), to_json(v, codec, tables)]
+            "__hash__": [[_to_json(k, codec, tables, walk),
+                          _to_json(v, codec, tables, walk)]
                          for k, v in value.pairs]
         }
         if value.default is not None:
-            out["__default__"] = to_json(value.default, codec, tables)
+            out["__default__"] = _to_json(value.default, codec, tables, walk)
         return out
     if isinstance(value, Table):
         return table_to_json(value, tables)
-    if isinstance(value, Color):
-        return dict({"__class__": "Color"}, **value.as_dict())
+    if isinstance(value, RGSSFloats):  # Color and Tone
+        return {"__class__": type(value).CLASS_NAME, **value.as_dict()}
     if isinstance(value, RubyObject):
-        result = {"__class__": value.cls}
+        result = {"__class__": printable_text(value.cls)}
         for name, item in value.ivars.items():
-            result[name.lstrip("@")] = to_json(item, codec, tables)
+            result[printable_text(_bare_name(name))] = _to_json(
+                item, codec, tables, walk)
         return result
+    if isinstance(value, RubyIvars):
+        return {"__ivar_wrapper__": _to_json(value.inner, codec, tables, walk),
+                "__ivars__": {printable_text(k): _to_json(v, codec, tables, walk)
+                              for k, v in value.ivars.items()}}
+    if isinstance(value, RubyData):
+        return {"__data__": printable_text(value.cls),
+                "value": _to_json(value.value, codec, tables, walk)}
     if isinstance(value, RubyUserDef):
         return {
-            "__class__": value.cls,
+            "__class__": printable_text(value.cls),
             "__payload_base64__": base64.b64encode(value.payload).decode("ascii"),
             "__note__": "opaque _dump payload, preserved verbatim",
         }
     if isinstance(value, RubyUserMarshal):
-        return {"__class__": value.cls,
-                "__marshal_value__": to_json(value.value, codec, tables)}
+        return {"__class__": printable_text(value.cls),
+                "__marshal_value__": _to_json(value.value, codec, tables, walk)}
     if isinstance(value, RubyStruct):
-        return {"__struct__": value.cls,
-                "members": {k: to_json(v, codec, tables) for k, v in value.members.items()}}
+        return {"__struct__": printable_text(value.cls),
+                "members": {printable_text(k): _to_json(v, codec, tables, walk)
+                            for k, v in value.members.items()}}
     if isinstance(value, RubyClassRef):
         return {"__class_ref__": value.name, "kind": value.kind}
     if isinstance(value, RubyRegexp):
         return {"__regexp__": codec.decode(value.source), "options": value.options}
     if isinstance(value, RubyUClass):
-        return {"__uclass__": value.cls, "inner": to_json(value.inner, codec, tables)}
+        return {"__uclass__": printable_text(value.cls),
+                "inner": _to_json(value.inner, codec, tables, walk)}
     if isinstance(value, RubyExtended):
-        return {"__extended__": value.modules, "inner": to_json(value.inner, codec, tables)}
+        return {"__extended__": value.modules,
+                "inner": _to_json(value.inner, codec, tables, walk)}
     raise ConversionError("cannot represent a %s as JSON" % type(value).__name__)
 
 
 def _string_to_json(value: RubyString, codec: TextCodec) -> Any:
-    if codec.is_clean(value.data):
-        text = codec.decode(value.data)
+    try:
+        # One strict decode, rather than is_clean() decoding and throwing the
+        # result away before decoding again. Strings are the commonest value in
+        # a project, so this runs a great many times.
+        text = value.data.decode(codec.name)
+    except UnicodeDecodeError:
+        text = None
+    if text is not None:
         if codec.is_default_style(value):
             # The common case: nothing to say beyond the text itself.
             return text
         return {"__string__": text,
                 "__ivars__": {k: to_json(v, codec) for k, v in value.ivars.items()}}
     # Undecodable bytes: hand them over as base64 so nothing is lost and the
-    # caller can see that this is not ordinary text.
-    return {"__bytes_base64__": base64.b64encode(value.data).decode("ascii"),
-            "__note__": "bytes that are not valid %s" % codec.name}
+    # caller can see that this is not ordinary text. Any string form the value
+    # carried goes with it, so the round trip stays exact.
+    out: dict[str, Any] = {
+        "__bytes_base64__": base64.b64encode(value.data).decode("ascii"),
+        "__note__": "bytes that are not valid %s" % codec.name,
+    }
+    if not codec.is_default_style(value):
+        out["__ivars__"] = {k: to_json(v, codec) for k, v in value.ivars.items()}
+    return out
 
 
 def table_to_json(table: Table, mode: str = "summary") -> dict[str, Any]:
@@ -202,11 +383,15 @@ def table_to_json(table: Table, mode: str = "summary") -> dict[str, Any]:
         "zsize": table.zsize,
         "size": table.size,
     }
-    if mode == "full" or table.size <= TABLE_INLINE_LIMIT:
+    if table.size <= TABLE_INLINE_LIMIT or (
+            mode == "full" and table.size <= TABLE_FULL_LIMIT):
         out["cells"] = list(table.data)
     else:
         out["cells_omitted"] = table.size
-        out["hint"] = "use map_tiles to read or write regions of this table"
+        out["hint"] = ("use map_tiles to read or write regions of this table"
+                       if table.size > TABLE_FULL_LIMIT and mode == "full"
+                       else "pass tables=\"full\" for the cells, or use "
+                            "map_tiles to read a region")
     return out
 
 
@@ -231,7 +416,13 @@ def _dict_from_json(value: dict[str, Any], codec: TextCodec) -> Any:
     if "__symbol__" in value:
         return RubySymbol(value["__symbol__"])
     if "__bytes_base64__" in value:
-        return RubyString(base64.b64decode(value["__bytes_base64__"]))
+        # The string form travels with the bytes, so an undecodable string with
+        # a non-default encoding record still round trips.
+        ivars = {k: from_json(v, codec)
+                 for k, v in (value.get("__ivars__") or {}).items()}
+        return RubyString(
+            _payload_from_base64(value["__bytes_base64__"], "__bytes_base64__"),
+            ivars or None)
     if "__string__" in value:
         ivars = {k: from_json(v, codec)
                  for k, v in (value.get("__ivars__") or {}).items()}
@@ -240,6 +431,17 @@ def _dict_from_json(value: dict[str, Any], codec: TextCodec) -> Any:
         pairs = [(from_json(k, codec), from_json(v, codec)) for k, v in value["__hash__"]]
         default = from_json(value["__default__"], codec) if "__default__" in value else None
         return RubyHash(pairs, default)
+    if "__ivar_wrapper__" in value:
+        return RubyIvars(
+            from_json(value["__ivar_wrapper__"], codec),
+            {k: from_json(v, codec) for k, v in (value.get("__ivars__") or {}).items()})
+    if "__data__" in value:
+        return RubyData(value["__data__"], from_json(value.get("value"), codec))
+    if "__cycle__" in value:
+        raise ConversionError(
+            "this value was reported as a cycle when it was read, so it cannot "
+            "be written back. Edit the field that contains it instead."
+        )
     if "__struct__" in value:
         return RubyStruct(value["__struct__"],
                           {k: from_json(v, codec)
@@ -261,22 +463,24 @@ def _dict_from_json(value: dict[str, Any], codec: TextCodec) -> Any:
             % sorted(value)
         )
     if "__payload_base64__" in value:
-        return RubyUserDef(cls, base64.b64decode(value["__payload_base64__"]))
+        return RubyUserDef(
+            check_class_name(cls),
+            _payload_from_base64(value["__payload_base64__"], "__payload_base64__"))
     if "__marshal_value__" in value:
-        return RubyUserMarshal(cls, from_json(value["__marshal_value__"], codec))
+        return RubyUserMarshal(check_class_name(cls),
+                               from_json(value["__marshal_value__"], codec))
     if cls == "Table":
         return table_from_json(value)
     if cls == "Color":
         return Color([float(value.get(f, 0.0)) for f in Color.FIELDS])
     if cls == "Tone":
-        from .rubytypes import Tone
         return Tone([float(value.get(f, 0.0)) for f in Tone.FIELDS])
 
-    obj = RubyObject(cls)
+    obj = RubyObject(check_class_name(cls))
     for key, item in value.items():
         if key.startswith("__"):
             continue
-        obj.set(key, from_json(item, codec))
+        obj.set(check_ivar_name(key), from_json(item, codec))
     return obj
 
 
@@ -284,15 +488,46 @@ def table_from_json(value: dict[str, Any]) -> Table:
     xsize = int(value.get("xsize", 0))
     ysize = int(value.get("ysize", 1))
     zsize = int(value.get("zsize", 1))
+    dim = value.get("dim")
+    if dim is not None and (not isinstance(dim, int) or not 1 <= dim <= 3):
+        raise ConversionError(
+            "a Table has 1, 2 or 3 dimensions, not %r" % (dim,))
     cells = value.get("cells")
     if cells is None:
-        return Table(xsize, ysize, zsize, dim=value.get("dim"))
-    return Table(xsize, ysize, zsize, dim=value.get("dim"), data=[int(c) for c in cells])
+        # A summary view omits the cells, so accepting one here would write a
+        # table of zeros over whatever was there -- silently wiping a map's
+        # tiles on a read-then-write round trip.
+        if xsize * ysize * zsize:
+            raise ConversionError(
+                "this Table has %d cells but no \"cells\" to write. It was read "
+                "as a summary, which does not carry them. Use map_tiles to "
+                "change tile data, or read it again with tables=\"full\"."
+                % (xsize * ysize * zsize)
+            )
+        return Table(xsize, ysize, zsize, dim=dim)
+    return Table(xsize, ysize, zsize, dim=dim, data=[int(c) for c in cells])
 
 
 # ---------------------------------------------------------------------------
 # Patching
 # ---------------------------------------------------------------------------
+
+
+def _hash_key(target: RubyHash, key: str, codec: TextCodec) -> Any:
+    """The key to use when patching into a Ruby Hash.
+
+    JSON object keys are always strings, but a project's hashes are keyed by
+    integers (a map's events, the map tree) or by Ruby strings. Looking up the
+    raw JSON string would miss every one of them and append a new entry the
+    engine cannot use.
+    """
+    existing = target.keys()
+    if key.lstrip("-").isdigit() and any(
+            isinstance(k, int) and not isinstance(k, bool) for k in existing):
+        return int(key)
+    if any(isinstance(k, RubyString) for k in existing):
+        return codec.make_string(key)
+    return key
 
 
 def apply_patch(target: Any, patch: dict[str, Any], codec: TextCodec,
@@ -305,17 +540,32 @@ def apply_patch(target: Any, patch: dict[str, Any], codec: TextCodec,
     of human-readable descriptions of what changed.
     """
     changes: list[str] = []
+    # Two passes: convert every value before assigning any of them. A failure
+    # in the middle of one pass would otherwise leave the cached file partly
+    # patched, and the next successful save would persist that.
+    for key, new_value in patch.items():
+        if key.startswith("__"):
+            continue
+        if isinstance(target, RubyObject):
+            check_ivar_name(key)
+        merge_only = (isinstance(new_value, dict)
+                      and not any(k.startswith("__") for k in new_value))
+        if not merge_only:
+            from_json(new_value, codec)
+
     for key, new_value in patch.items():
         if key.startswith("__"):
             continue
         field_path = "%s.%s" % (path, key) if path else key
 
         if isinstance(target, RubyObject):
+            lookup: Any = key
             existing = target.get(key)
             has_field = target.has(key)
         elif isinstance(target, RubyHash):
-            existing = target.get(key)
-            has_field = key in target
+            lookup = _hash_key(target, key, codec)
+            existing = target.get(lookup)
+            has_field = lookup in target
         else:
             raise ConversionError("cannot patch a %s at %s"
                                   % (type(target).__name__, field_path or "the root"))
@@ -328,11 +578,16 @@ def apply_patch(target: Any, patch: dict[str, Any], codec: TextCodec,
             continue
 
         converted = from_json(new_value, codec)
+        if has_field and isinstance(existing, (RubyObject, RubyHash, Table)) \
+                and not isinstance(converted, type(existing)):
+            raise ConversionError(
+                "%s currently holds %s; replacing it with %s would produce a "
+                "file the editor rejects. Patch its fields instead, or pass an "
+                "object with a matching \"__class__\"."
+                % (field_path, _brief(existing, codec), _brief(converted, codec))
+            )
         before = _brief(existing, codec) if has_field else "<unset>"
-        if isinstance(target, RubyObject):
-            target.set(key, converted)
-        else:
-            target.set(key, converted)
+        target.set(lookup, converted)
         changes.append("%s: %s -> %s" % (field_path, before, _brief(converted, codec)))
     return changes
 
@@ -340,13 +595,20 @@ def apply_patch(target: Any, patch: dict[str, Any], codec: TextCodec,
 def normalize_strings(value: Any, codec: TextCodec, depth: int = 0) -> Any:
     """Restyle every string in a freshly built object tree for this project.
 
-    Templates are written once, in one style; this puts the engine's own string
-    form on them so a new event or map is byte-shaped like the editor's output.
-    Only ever applied to objects this server just created, never to loaded data.
+    Templates are written once, in UTF-8 and with no string form; this re-encodes
+    them into the project's code page and puts the engine's own string form on
+    them, so a new event or map is shaped like the editor's own output.
+
+    Only ever applied to objects this server just created: it assumes the bytes
+    it finds are the UTF-8 the templates in :mod:`schema` produce.
     """
-    if depth > 24:
+    if depth > MAX_NORMALIZE_DEPTH:
+        # Templates are a handful of levels deep, so this is unreachable for
+        # them; it exists so the function cannot recurse without bound.
         return value
     if isinstance(value, RubyString):
+        if codec.name != "utf-8":
+            value.data = codec.encode(value.data.decode("utf-8", "surrogateescape"))
         value.ivars = dict(codec.string_ivars)
         return value
     if isinstance(value, RubyObject):
@@ -356,7 +618,8 @@ def normalize_strings(value: Any, codec: TextCodec, depth: int = 0) -> Any:
         for item in value:
             normalize_strings(item, codec, depth + 1)
     elif isinstance(value, RubyHash):
-        for _, item in value.pairs:
+        for key, item in value.pairs:
+            normalize_strings(key, codec, depth + 1)
             normalize_strings(item, codec, depth + 1)
     return value
 
@@ -364,10 +627,13 @@ def normalize_strings(value: Any, codec: TextCodec, depth: int = 0) -> Any:
 def _brief(value: Any, codec: TextCodec) -> str:
     """A short, log-friendly rendering of a value."""
     if isinstance(value, RubyString):
-        text = codec.decode(value.data) if codec.is_clean(value.data) else "<binary>"
+        try:
+            text = value.data.decode(codec.name)
+        except UnicodeDecodeError:
+            text = "<binary>"
         return '"%s"' % (text if len(text) <= 40 else text[:37] + "...")
     if isinstance(value, RubyObject):
-        return "<%s>" % value.cls
+        return "<%s>" % printable_text(value.cls)
     if isinstance(value, Table):
         return "<Table %dx%dx%d>" % (value.xsize, value.ysize, value.zsize)
     if isinstance(value, RubyHash):

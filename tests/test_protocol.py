@@ -353,5 +353,106 @@ class TestStartupFailures(unittest.TestCase):
         self.assertIn("no such directory", result.stderr)
 
 
+class TestTransportHardening(unittest.TestCase):
+    """A stdio server reads from a pipe it does not control.
+
+    These start a server WITHOUT the handshake, because most of what they
+    check happens before or instead of it.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-hard-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.project = self.tmp / "project"
+        build(self.project)
+        self.server = ServerProcess(self.project)
+        self.addCleanup(self._shutdown)
+
+    def _shutdown(self):
+        try:
+            self.server.close()
+        except (OSError, ValueError):
+            pass
+
+    def handshake(self):
+        self.server.request("initialize", {
+            "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
+            "clientInfo": {"name": "t", "version": "1"}})
+
+    def test_tools_are_refused_before_initialize(self):
+        """Serving a call before the handshake lets a client skip protocol
+        version negotiation entirely."""
+        response = self.server.request("tools/call",
+                                       {"name": "project_info", "arguments": {}})
+        self.assertIn("error", response)
+        self.assertIn("initialize", response["error"]["message"])
+        # ping is answered, so a client can check liveness first.
+        self.assertIn("result", self.server.request("ping"))
+        self.handshake()
+        self.assertIn("result", self.server.request("tools/list"))
+
+    def test_positional_params_are_invalid_params_not_internal_error(self):
+        """A malformed request must not be reported as a broken server."""
+        self.handshake()
+        response = self.server.send_raw(json.dumps({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": [{"name": "project_info"}]}))
+        self.assertEqual(response["error"]["code"], -32602)
+        self.assertIn("object", response["error"]["message"])
+
+    def test_a_forwarded_response_is_not_answered(self):
+        """Answering a response would land in the client's own pending table."""
+        self.handshake()
+        self.server.notify("notifications/initialized")
+        self.server._send(json.dumps(
+            {"jsonrpc": "2.0", "id": 7, "result": {}}))
+        # Nothing was written for it, so the next request's reply is the next
+        # thing on the pipe.
+        self.assertEqual(self.server.request("ping")["id"], 2)
+
+    def test_an_empty_batch_is_answered(self):
+        self.handshake()
+        response = self.server.send_raw("[]")
+        self.assertEqual(response["error"]["code"], -32600)
+
+    def test_a_batch_of_non_objects_is_answered(self):
+        """Dropping them silently leaves the client waiting forever."""
+        self.handshake()
+        responses = self.server.send_raw("[1, 2, 3]")
+        self.assertEqual(len(responses), 3)
+        for entry in responses:
+            self.assertEqual(entry["error"]["code"], -32600)
+
+    def test_an_oversized_batch_is_refused(self):
+        self.handshake()
+        batch = [{"jsonrpc": "2.0", "id": i, "method": "ping"}
+                 for i in range(200)]
+        response = self.server.send_raw(json.dumps(batch))
+        self.assertEqual(response["error"]["code"], -32600)
+        self.assertIn("at most", response["error"]["message"])
+
+    def test_an_oversized_line_is_discarded_without_being_parsed(self):
+        """The cap has to apply before the line is held in memory, and the
+        rest of the line must be dropped so the next one still parses."""
+        self.handshake()
+        huge = '{"jsonrpc": "2.0", "id": 1, "method": "ping", "pad": "'
+        self.server.process.stdin.write(huge)
+        # Written without a newline, in pieces, the way a hostile client would.
+        for _ in range(40):
+            self.server.process.stdin.write("A" * (1024 * 1024))
+        self.server.process.stdin.write('"}\n')
+        self.server.process.stdin.flush()
+        response = json.loads(self.server._readline())
+        self.assertEqual(response["error"]["code"], -32600)
+        self.assertIn("discarded unread", response["error"]["message"])
+        # The session survived and the framing is still aligned.
+        self.assertIn("result", self.server.request("ping"))
+
+    def test_a_rejected_method_is_not_echoed_in_full(self):
+        self.handshake()
+        response = self.server.send_raw(json.dumps(
+            {"jsonrpc": "2.0", "id": 3, "method": "x" * 5000}))
+        self.assertLess(len(response["error"]["message"]), 400)
+
 if __name__ == "__main__":
     unittest.main()

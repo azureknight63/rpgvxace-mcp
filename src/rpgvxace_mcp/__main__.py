@@ -7,13 +7,13 @@ import io
 import sys
 
 from . import __version__
-from .project import Project, ProjectError
-from .server import Server
+from .project import DEFAULT_BACKUP_KEEP, Project, ProjectError
+from .server import SERVER_NAME, Server
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="rpgvxace-mcp",
+        prog=SERVER_NAME,
         description="MCP server for RPG Maker VX Ace and VX projects. Speaks "
                     "JSON-RPC over stdio; run it from an MCP client rather than "
                     "by hand.",
@@ -35,8 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refuse every write. Useful for exploring a project you do not want "
              "touched.")
     parser.add_argument(
-        "--backup-keep", type=int, default=10, metavar="N",
-        help="How many backup snapshots to keep (default 10, 0 disables pruning).")
+        "--backup-keep", type=int, default=DEFAULT_BACKUP_KEEP, metavar="N",
+        help="How many backup snapshots to keep (default %d; 0 or less disables "
+             "pruning)." % DEFAULT_BACKUP_KEEP)
     parser.add_argument(
         "--allow-other-engines", action="store_true",
         help="Open an XP project anyway. The Marshal codec handles it, but XP's "
@@ -71,7 +72,10 @@ def main(argv: list[str] | None = None) -> int:
             allow_other_engines=args.allow_other_engines,
             rtp_paths=args.rtp,
         )
-    except ProjectError as exc:
+    except (ProjectError, ValueError, OSError) as exc:
+        # ValueError covers an unknown --encoding (ConversionError), a bad
+        # Marshal file (MarshalError) and a map id no filename can express;
+        # OSError an unreadable project. All used to escape as a traceback.
         print("error: %s" % exc, file=sys.stderr)
         return 1
 
@@ -84,12 +88,17 @@ def main(argv: list[str] | None = None) -> int:
     # decode error on stdin would otherwise kill the session.
     stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace",
                              newline="\n")
-    stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n")
+    # errors="replace" is a backstop, not the fix: names are sanitised where
+    # they enter a response (rubytypes.printable_text). Without it, a single
+    # unencodable character would raise inside the write and end the session,
+    # because that write happens outside any request's error handling.
+    stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
+                              errors="replace", newline="\n")
     server = Server(project, verbose=args.verbose)
     try:
         server.serve(stdin, stdout)
     except KeyboardInterrupt:
-        return 0
+        pass
     return 0
 
 

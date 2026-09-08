@@ -5,18 +5,83 @@ first ten minutes will show you: a transfer pointing at coordinates outside its
 target map, an event graphic whose file was renamed, an autorun page that can
 never stop, a page that a later page permanently shadows.
 
-Every rule states what it looked at, so a finding can be judged rather than
-trusted. Where the parameter layout of a command is not certain, no rule is
-written for it -- a silent wrong answer would be worse than no answer.
+**Every finding must be real.** The model reading these will act on them, so a
+false positive is worse than a missed problem: it sends an agent editing
+something that was never broken. Two whole classes of false positive have been
+removed from this file, and they are the pattern to follow:
+
+* Asset misses were reported for files that live in the RTP -- the shared pool
+  outside the project. Now, when a declared RTP cannot be located, those
+  findings drop to ``info`` and say so.
+* Autorun pages were all reported as unstoppable. RPG Maker runs the *last*
+  page whose conditions match, so an earlier unconditional autorun page is the
+  ordinary way to write a cutscene. Only the last page is checked, only when it
+  has no escape, and a page whose escape this file cannot see through is left
+  alone.
+
+Where the parameter layout of a command is not certain, no rule is written for
+it. Project files are untrusted input besides -- a ``.rvdata2`` need not be one
+the editor wrote -- so anything read out of one is type-checked before it is
+used, through the ``_seq``/``_int``/``_text`` helpers, rather than trusted to be
+the shape its class implies.
 """
 
 from __future__ import annotations
 
-from typing import Any, Iterator
+from collections.abc import Iterator, Set as AbstractSet
+from typing import Any, NamedTuple
 
-from .commands import command_name, summarize
-from .project import Project
-from .rubytypes import RubyHash, RubyObject, RubyString
+from .commands import (
+    AUDIO_COMMAND_KINDS,
+    CODE_BLANK,
+    CODE_CALL_COMMON_EVENT,
+    CODE_JUMP_TO_LABEL,
+    CODE_LABEL,
+    CODE_SCRIPT,
+    CODE_SCRIPT_MORE,
+    CODE_SHOW_TEXT,
+    CODE_TRANSFER_PLAYER,
+    COND_ACTOR,
+    COND_ARMOR,
+    COND_ITEM,
+    COND_WEAPON,
+    TRANSFER_X,
+    TRANSFER_Y,
+    command_name,
+    summarize,
+)
+from .project import (
+    ASSET_DIRS,
+    MAX_MAP_ID,
+    MODELLED_ENGINES,
+    Project,
+    ProjectError,
+)
+from .rubytypes import RubyHash, RubyObject, RubyString, Table, printable_text
+from .schema import PAGE_CONDITION_FLAGS, TILESET_SHEET_NAMES, TRIGGER_AUTORUN
+
+# The checks `validate` knows how to run. It implements them, so it owns the
+# list; the tool layer advertises this rather than keeping its own copy.
+VALIDATE_SCOPES = ("maps", "events", "assets", "database")
+
+ERROR, WARNING, INFO = "error", "warning", "info"
+
+# Most serious first. The sort order, the counts and the severity constants all
+# come from this one sequence.
+SEVERITIES = (ERROR, WARNING, INFO)
+
+DEFAULT_LIMIT = 200
+
+# A ceiling on findings collected, not just findings returned. A project broken
+# enough (or crafted carefully enough) to produce a finding per event command
+# would otherwise have this build millions of them to report two hundred. It is
+# far above any real project's count, so reaching it means something is wrong
+# with the project rather than with the rules.
+MAX_FINDINGS = 5000
+
+# Text out of a project file, quoted back in a message. A crafted event name can
+# be megabytes; a real one is a few words.
+MAX_TEXT_CHARS = 200
 
 
 class Location:
@@ -39,31 +104,112 @@ class Location:
         self.table = table
         self.field = field
 
+    def at(self, index: int) -> Location:
+        """This location, pointing at one command in the list it names.
+
+        Copies by slot name: building the copy positionally is how two earlier
+        versions of this ended up silently dropping ``table`` and ``field``.
+        """
+        clone = Location(self.kind)
+        for name in Location.__slots__[1:]:
+            setattr(clone, name, getattr(self, name))
+        clone.index = index
+        return clone
+
     def as_dict(self) -> dict[str, Any]:
         out = {"kind": self.kind}
-        for name in ("map_id", "event_id", "event_name", "page", "index",
-                     "entry_id", "table", "field"):
+        for name in Location.__slots__[1:]:
             value = getattr(self, name)
             if value is not None:
                 out[name] = value
         return out
 
     def describe(self) -> str:
+        """A one-line "where" for a person or a model to read.
+
+        Ids here are as the tools take them, so a model can act on a finding
+        without translating anything: page and command indexes are 0-based, and
+        a clause is left out entirely rather than printed as None -- claiming a
+        command position that was never examined would be a lie about what the
+        rule looked at.
+        """
         if self.kind == "map_event":
-            return "map %s event %s (%s) page %s command %s" % (
-                self.map_id, self.event_id, self.event_name, self.page, self.index)
+            where = "map %s event %s (%s) page %s" % (
+                self.map_id, self.event_id, self.event_name, self.page)
+            return where + self._command_clause()
         if self.kind == "common_event":
-            return "common event %s command %s" % (self.entry_id, self.index)
+            return "common event %s%s" % (self.entry_id, self._command_clause())
         if self.kind == "troop_page":
-            return "troop %s battle page %s command %s" % (
-                self.entry_id, self.page, self.index)
+            return "troop %s battle page %s%s" % (
+                self.entry_id, self.page, self._command_clause())
         if self.kind == "database":
             where = "%s %s" % (self.table, self.entry_id)
             return where + (" field %s" % self.field if self.field else "")
         if self.kind == "map":
             where = "map %s" % self.map_id
             return where + (" field %s" % self.field if self.field else "")
+        if self.kind == "script":
+            # A script slot has no fields of its own here: the slot index rides
+            # in entry_id and the 1-based line number in index.
+            return "script %s line %s" % (self.entry_id, self.index)
         return self.kind
+
+    def _command_clause(self) -> str:
+        return "" if self.index is None else " command %s" % self.index
+
+
+def _map_at(map_id: int, field: str = "") -> Location:
+    return Location("map", map_id=map_id, field=field or None)
+
+
+def _db_at(table: str, entry_id: int, field: str = "") -> Location:
+    return Location("database", table=table, entry_id=entry_id, field=field or None)
+
+
+def _event_at(map_id: int, event_id: int, event_name: str, page: int) -> Location:
+    return Location("map_event", map_id=map_id, event_id=event_id,
+                    event_name=event_name, page=page)
+
+
+# ---------------------------------------------------------------------------
+# Reading untrusted values
+# ---------------------------------------------------------------------------
+
+def _seq(value: Any) -> list[Any]:
+    """A value from a project file, as something safe to iterate.
+
+    An ivar the class model says is an Array can hold anything at all in a file
+    this server did not write, and ``for x in 7`` is a TypeError that escapes
+    the whole validate run rather than becoming one finding.
+    """
+    return value if isinstance(value, list) else []
+
+
+def _int(value: Any) -> int | None:
+    """An id from a project file, or None if it is not usable as one."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _text(project: Project, value: Any) -> str:
+    """Text from a project file, ready to put in a message.
+
+    Sanitised and length-capped: decoding uses ``surrogateescape``, and one
+    crafted name would otherwise be repeated into every finding about it.
+    """
+    if isinstance(value, RubyString):
+        text = project.codec.decode(value.data)
+    elif value is None:
+        return ""
+    elif isinstance(value, (str, int, float, bool)):
+        text = str(value)
+    else:
+        # A name that is an Array or a Hash is not a name. Say what it was
+        # rather than stringify the whole structure.
+        return "<%s>" % type(value).__name__
+    text = printable_text(text)
+    if len(text) > MAX_TEXT_CHARS:
+        return text[:MAX_TEXT_CHARS] + "... (%d characters)" % len(text)
+    return text
 
 
 def iter_command_lists(project: Project, map_ids: list[int] | None = None
@@ -72,12 +218,12 @@ def iter_command_lists(project: Project, map_ids: list[int] | None = None
 
     Covers map event pages, common events and troop battle event pages -- the
     three places an RPG Maker project stores an interpreter program.
+
+    ``map_ids`` narrows the map pages only. Common events and troop pages
+    belong to the project rather than to any map, so they are always included;
+    every caller that reports a map count says so separately.
     """
-    for map_id in (map_ids if map_ids is not None else project.map_ids_on_disk()):
-        try:
-            game_map = project.load_map(map_id)
-        except Exception:  # a map we cannot read is reported by check_map_tree
-            continue
+    for map_id, game_map in iter_maps(project, map_ids):
         events = game_map.get("events")
         if not isinstance(events, RubyHash):
             continue
@@ -85,36 +231,41 @@ def iter_command_lists(project: Project, map_ids: list[int] | None = None
             if not isinstance(event, RubyObject):
                 continue
             name = _text(project, event.get("name"))
-            for page_index, page in enumerate(event.get("pages") or []):
+            for page_index, page in enumerate(_seq(event.get("pages"))):
                 if isinstance(page, RubyObject):
-                    yield (Location("map_event", map_id=map_id, event_id=event_id,
-                                    event_name=name, page=page_index),
-                           page.get("list") or [])
+                    yield (_event_at(map_id, event_id, name, page_index),
+                           _seq(page.get("list")))
 
-    try:
-        for entry_id, common in project.entries("common_events"):
-            if isinstance(common, RubyObject):
-                yield (Location("common_event", entry_id=entry_id),
-                       common.get("list") or [])
-    except Exception:
-        pass
+    for entry_id, common in _safe_entries(project, "common_events"):
+        if isinstance(common, RubyObject):
+            yield (Location("common_event", entry_id=entry_id),
+                   _seq(common.get("list")))
 
-    try:
-        for entry_id, troop in project.entries("troops"):
-            if not isinstance(troop, RubyObject):
-                continue
-            for page_index, page in enumerate(troop.get("pages") or []):
-                if isinstance(page, RubyObject):
-                    yield (Location("troop_page", entry_id=entry_id, page=page_index),
-                           page.get("list") or [])
-    except Exception:
-        pass
+    for entry_id, troop in _safe_entries(project, "troops"):
+        if not isinstance(troop, RubyObject):
+            continue
+        for page_index, page in enumerate(_seq(troop.get("pages"))):
+            if isinstance(page, RubyObject):
+                yield (Location("troop_page", entry_id=entry_id, page=page_index),
+                       _seq(page.get("list")))
 
 
-def _text(project: Project, value: Any) -> str:
-    if isinstance(value, RubyString):
-        return project.codec.decode(value.data)
-    return "" if value is None else str(value)
+def iter_maps(project: Project, map_ids: list[int] | None = None
+              ) -> Iterator[tuple[int, RubyObject]]:
+    """Each map that loads, with its id.
+
+    A map that will not load is skipped silently here. ``check_maps`` is the
+    one rule that reports unreadable maps, so reporting it again from every
+    walk would mean one broken file produced half a dozen findings.
+    """
+    ids = project.map_ids_on_disk() if map_ids is None else map_ids
+    for map_id in ids:
+        try:
+            game_map = project.load_map(map_id)
+        except (ProjectError, ValueError, OSError):
+            continue
+        if isinstance(game_map, RubyObject):
+            yield map_id, game_map
 
 
 # ---------------------------------------------------------------------------
@@ -126,26 +277,32 @@ def _text(project: Project, value: Any) -> str:
 # refers to an item when its type parameter says so). Only layouts confirmed
 # against the engines' own interpreters are listed, and they are the layouts VX
 # Ace and VX share.
+#
+# MAP_TARGET is not a database table; it is here because Transfer Player names a
+# map the same way these name an entry, and the walk that checks one should
+# check the other.
+MAP_TARGET = "maps"
+
 REFERENCE_RULES: dict[str, list[dict[str, Any]]] = {
     "items": [
         {"code": 126, "index": 0},
-        {"code": 111, "index": 1, "requires": {0: 8}},
+        {"code": 111, "index": 1, "requires": {0: COND_ITEM}},
         {"code": 302, "index": 1, "requires": {0: 0}},
         {"code": 605, "index": 1, "requires": {0: 0}},
     ],
     "weapons": [
         {"code": 127, "index": 0},
-        {"code": 111, "index": 1, "requires": {0: 9}},
+        {"code": 111, "index": 1, "requires": {0: COND_WEAPON}},
         {"code": 302, "index": 1, "requires": {0: 1}},
         {"code": 605, "index": 1, "requires": {0: 1}},
     ],
     "armors": [
         {"code": 128, "index": 0},
-        {"code": 111, "index": 1, "requires": {0: 10}},
+        {"code": 111, "index": 1, "requires": {0: COND_ARMOR}},
         {"code": 302, "index": 1, "requires": {0: 2}},
         {"code": 605, "index": 1, "requires": {0: 2}},
     ],
-    "common_events": [{"code": 117, "index": 0}],
+    "common_events": [{"code": CODE_CALL_COMMON_EVENT, "index": 0}],
     "troops": [{"code": 301, "index": 1, "requires": {0: 0}}],
     "animations": [{"code": 212, "index": 1}, {"code": 337, "index": 1}],
     "actors": [
@@ -154,45 +311,35 @@ REFERENCE_RULES: dict[str, list[dict[str, Any]]] = {
         {"code": 320, "index": 0},
         {"code": 321, "index": 0},
         {"code": 322, "index": 0},
-        {"code": 111, "index": 1, "requires": {0: 4}},
+        {"code": 111, "index": 1, "requires": {0: COND_ACTOR}},
     ],
-    "maps": [{"code": 201, "index": 1, "requires": {0: 0}}],
+    MAP_TARGET: [{"code": CODE_TRANSFER_PLAYER, "index": 1, "requires": {0: 0}}],
 }
 
+# What one row of each table is called, for messages and rule ids. Derived from
+# the table name by hand because English is not a rule: stripping an "s" turns
+# "classes" into "classe".
+TABLE_NOUNS = {
+    "items": "item",
+    "weapons": "weapon",
+    "armors": "armor",
+    "troops": "troop",
+    "common_events": "common event",
+    "actors": "actor",
+    "animations": "animation",
+    "classes": "class",
+    "skills": "skill",
+    "enemies": "enemy",
+    "tilesets": "tileset",
+}
 
-def find_references(project: Project, table: str, entry_id: int,
-                    limit: int = 200) -> list[dict[str, Any]]:
-    """Find event commands that mention ``entry_id`` from ``table``."""
-    rules = REFERENCE_RULES.get(table)
-    if not rules:
-        return []
-    hits: list[dict[str, Any]] = []
-    for location, commands in iter_command_lists(project):
-        for index, command in enumerate(commands):
-            if not isinstance(command, RubyObject):
-                continue
-            code = command.get("code", 0)
-            params = command.get("parameters") or []
-            for rule in rules:
-                if code != rule["code"]:
-                    continue
-                if not _requires_met(params, rule.get("requires")):
-                    continue
-                position = rule["index"]
-                if len(params) > position and params[position] == entry_id:
-                    located = Location(location.kind, location.map_id, location.event_id,
-                                       location.event_name, location.page, index,
-                                       location.entry_id)
-                    hits.append({
-                        "where": located.describe(),
-                        "location": located.as_dict(),
-                        "command": command_name(code),
-                        "summary": summarize(command, project.codec),
-                    })
-                    break
-            if len(hits) >= limit:
-                return hits
-    return hits
+# The rules again, keyed by the command code they apply to. Most commands match
+# nothing, and a project has tens of thousands of them, so the walk asks this
+# once per command instead of trying every rule.
+_RULES_BY_CODE: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+for _table, _rules in REFERENCE_RULES.items():
+    for _rule in _rules:
+        _RULES_BY_CODE.setdefault(_rule["code"], []).append((_table, _rule))
 
 
 def _requires_met(params: list[Any], requires: dict[int, Any] | None) -> bool:
@@ -205,12 +352,59 @@ def _requires_met(params: list[Any], requires: dict[int, Any] | None) -> bool:
     return True
 
 
+def _referenced_ids(code: Any, params: list[Any]) -> Iterator[tuple[str, int]]:
+    """Every ``(table, id)`` one command refers to.
+
+    The single place the rules table is interpreted. Two copies of this walk
+    used to exist and had already drifted apart on whether a non-integer
+    parameter counted as a reference.
+    """
+    for table, rule in _RULES_BY_CODE.get(code, ()):
+        if not _requires_met(params, rule.get("requires")):
+            continue
+        position = rule["index"]
+        if position >= len(params):
+            continue
+        value = _int(params[position])
+        if value is not None:
+            yield table, value
+
+
+def find_references(project: Project, table: str, entry_id: int,
+                    limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
+    """Find event commands that mention ``entry_id`` from ``table``."""
+    if table not in REFERENCE_RULES:
+        return []
+    hits: list[dict[str, Any]] = []
+    for location, commands in iter_command_lists(project):
+        for index, command in enumerate(commands):
+            if not isinstance(command, RubyObject):
+                continue
+            code = command.get("code", CODE_BLANK)
+            params = _seq(command.get("parameters"))
+            if not any(found == table and value == entry_id
+                       for found, value in _referenced_ids(code, params)):
+                continue
+            located = location.at(index)
+            hits.append({
+                "where": located.describe(),
+                "location": located.as_dict(),
+                "command": command_name(code),
+                "summary": summarize(command, project.codec),
+            })
+            if len(hits) >= limit:
+                return hits
+    return hits
+
+
 # ---------------------------------------------------------------------------
 # Linting
 # ---------------------------------------------------------------------------
 
 
 class Finding:
+    """One rule violation: what was wrong, where, and what the rule inspected."""
+
     __slots__ = ("severity", "rule", "message", "location", "checked")
 
     def __init__(self, severity: str, rule: str, message: str,
@@ -231,130 +425,363 @@ class Finding:
         return out
 
 
-ERROR, WARNING, INFO = "error", "warning", "info"
+def _missing(rule: str, sentence: str, remedy: str,
+             location: Location | None = None, checked: str = "") -> Finding:
+    """The commonest finding in this file: a reference with nothing behind it.
+
+    Phrased in one place, and always with a remedy -- a message that only says
+    what is wrong leaves the model to guess what to do about it.
+    """
+    return Finding(ERROR, rule, "%s, which does not exist. %s" % (sentence, remedy),
+                   location, checked)
+
+
+class _Tables:
+    """The database tables the rules read, loaded once and asked many times.
+
+    Two things live here. First, a table that could not be read is *not* an
+    empty table: treating it as one turns every reference into a dangling
+    reference, so a Troops file caught half-written by the editor would make
+    every encounter in the project report a missing troop. Second, one run
+    asks for the same tables from several checks, and a broken file should be
+    reported once rather than once per check that noticed it.
+
+    Loading is lazy, so a narrowly scoped run only reads what it needs.
+    """
+
+    def __init__(self, project: Project):
+        self.project = project
+        self._rows: dict[str, list[tuple[int, Any]]] = {}
+        self._failures: dict[str, str] = {}
+
+    def _load(self, name: str) -> None:
+        if name in self._rows or name in self._failures:
+            return
+        if name not in self.project.data_files:
+            # Not a table this engine has at all. Absence is a fact about
+            # the engine rather than damage to the project, so it is not
+            # reported; the rules that need such a table ask the profile.
+            self._rows[name] = []
+            return
+        try:
+            self._rows[name] = self.project.entries(name)
+        except (ProjectError, ValueError, OSError) as exc:
+            self._failures[name] = str(exc)
+
+    def ids(self, name: str) -> set[int] | None:
+        """The ids in a table, or None if it could not be read.
+
+        None and ``set()`` mean different things to every caller here, which
+        is the point of this class: an empty table has no matching entry, an
+        unreadable one cannot be asked.
+        """
+        self._load(name)
+        if name in self._failures:
+            return None
+        return {i for i, _ in self._rows[name]}
+
+    def rows_of(self, name: str) -> list[tuple[int, Any]]:
+        """Rows of a table, or none when it could not be read.
+
+        Safe to walk without checking first: a table that failed to load is
+        reported by :meth:`findings`, so there is nothing further to say
+        about rows it does not have.
+        """
+        self._load(name)
+        return self._rows.get(name, [])
+
+    def findings(self) -> list[Finding]:
+        """One finding per table that was asked for and could not be read."""
+        return [
+            Finding(ERROR, "table_unreadable",
+                    "%s could not be read (%s), so nothing that refers to it "
+                    "could be checked. Fix or restore that file, then "
+                    "validate again." % (name, reason),
+                    _db_at(name, 0), "the file itself")
+            for name, reason in sorted(self._failures.items())
+        ]
+
+
+def _safe_entries(project: Project, table: str) -> list[tuple[int, Any]]:
+    """Rows of a table, or nothing when it cannot be read.
+
+    Only for walks that do not turn absence into a finding. Anything comparing
+    ids against a table must use :class:`_Tables`, which can tell "empty" from
+    "unreadable".
+    """
+    try:
+        return project.entries(table)
+    except (ProjectError, ValueError, OSError):
+        return []
 
 
 def validate(project: Project, scopes: list[str], map_ids: list[int] | None = None,
-             limit: int = 200) -> dict[str, Any]:
+             limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+    """Run the rules in ``scopes`` and report what they found.
+
+    ``scopes`` takes any of :data:`VALIDATE_SCOPES`; a name outside that set is
+    ignored so a caller may pass a superset. ``map_ids`` narrows the map-based
+    rules to those maps, is de-duplicated, and reports any id that is not on
+    disk. ``counts`` covers every finding collected, while ``findings`` is
+    ordered most severe first and truncated to ``limit``.
+    """
+    limit = max(1, _int(limit) or DEFAULT_LIMIT)
     findings: list[Finding] = []
     ran: list[str] = []
+    # One loader for the whole run: several checks want the same tables,
+    # and a file that will not load should be reported once, not once per
+    # check that happened to notice.
+    tables = _Tables(project)
 
-    ids = project.map_ids_on_disk() if map_ids is None else map_ids
+    on_disk = project.map_ids_on_disk()
+    if map_ids is None:
+        ids = on_disk
+        absent: list[int] = []
+    else:
+        # De-duplicated: a caller repeating an id would otherwise multiply
+        # every per-map rule by however many times they repeated it.
+        wanted = sorted({i for i in (_int(m) for m in map_ids) if i is not None})
+        present = set(on_disk)
+        ids = [i for i in wanted if i in present]
+        absent = [i for i in wanted if i not in present]
+
+    for map_id in absent:
+        findings.append(Finding(
+            WARNING, "no_such_map",
+            "map %s was asked for but there is no map file with that id, so "
+            "nothing about it was checked" % map_id, _map_at(map_id)))
 
     if "maps" in scopes:
-        ran.append("map tree and map properties")
+        ran.append("map tree, map properties and encounters")
         findings += check_map_tree(project)
-        findings += check_encounters(project, ids)
-        findings += check_tilesets(project, ids)
+        findings += check_maps(project, ids, tables)
+        findings += check_tilesets(project, ids, tables)
     if "events" in scopes:
-        ran.append("event command structure and references")
-        findings += check_commands(project, ids)
+        ran.append("event command structure and references (plus every common "
+                   "event and troop page, which belong to the project rather "
+                   "than to a map)")
+        findings += check_commands(project, ids, tables)
+        findings += check_event_pages(project, ids)
     if "assets" in scopes:
         ran.append("graphic and audio file references")
         findings += check_assets(project, ids)
     if "database" in scopes:
         ran.append("database cross-references")
-        findings += check_database(project)
+        findings += check_database(project, tables)
 
-    order = {ERROR: 0, WARNING: 1, INFO: 2}
-    findings.sort(key=lambda f: (order.get(f.severity, 3), f.rule))
+    # Last, so it covers every table any check actually asked for.
+    findings += tables.findings()
+
+    stopped = len(findings) >= MAX_FINDINGS
+    if stopped:
+        findings = findings[:MAX_FINDINGS]
+
+    order = {level: rank for rank, level in enumerate(SEVERITIES)}
+    findings.sort(key=lambda f: (order.get(f.severity, len(SEVERITIES)), f.rule))
     counts = {level: sum(1 for f in findings if f.severity == level)
-              for level in (ERROR, WARNING, INFO)}
-    return {
+              for level in SEVERITIES}
+    report = {
         "checks_run": ran,
         "maps_examined": len(ids),
         "counts": counts,
         "findings": [f.as_dict() for f in findings[:limit]],
         "truncated": len(findings) > limit,
         "note": "Rules only cover event command parameters whose layout is "
-                "confirmed for VX; commands outside that set are not checked.",
+                "confirmed for both VX Ace and VX; commands outside that set "
+                "are not checked.",
     }
+    if project.engine not in MODELLED_ENGINES:
+        report["engine_warning"] = (
+            "this is a %s project, whose event command layouts are not modelled "
+            "here, so command parameter rules were skipped. Only structural and "
+            "database checks ran." % project.engine
+        )
+    if stopped:
+        report["stopped_early"] = (
+            "collection stopped at %d findings, so this is not the whole "
+            "picture. That many findings means something is wrong with the "
+            "project as a whole -- start with the errors listed here."
+            % MAX_FINDINGS
+        )
+    return report
 
 
 def check_map_tree(project: Project) -> list[Finding]:
+    """The editor's map tree against the files on disk."""
     findings = []
     try:
         infos = dict(project.entries("map_infos"))
-    except Exception as exc:
-        return [Finding(ERROR, "map_infos_unreadable", str(exc))]
+    except (ProjectError, ValueError, OSError) as exc:
+        return [Finding(ERROR, "map_infos_unreadable",
+                        "MapInfos could not be read (%s), so the map tree could "
+                        "not be checked. Restore that file, then validate again."
+                        % exc)]
     on_disk = set(project.map_ids_on_disk())
 
     for map_id, info in infos.items():
         name = _text(project, info.get("name")) if isinstance(info, RubyObject) else "?"
+        if _int(map_id) is None or not 1 <= map_id <= MAX_MAP_ID:
+            findings.append(Finding(
+                ERROR, "bad_map_id",
+                "MapInfos has an entry keyed %r, which is not an id any map "
+                "file can have (they run 1 to %d). Remove that entry in the "
+                "editor." % (map_id, MAX_MAP_ID), None, "MapInfos keys"))
+            continue
         if map_id not in on_disk:
             findings.append(Finding(
                 ERROR, "missing_map_file",
-                "MapInfos lists map %s (%s) but %s is not on disk"
-                % (map_id, name, project.map_file(map_id)),
-                Location("map", map_id=map_id), "MapInfos against Data/Map*.rvdata"))
-        parent = info.get("parent_id") if isinstance(info, RubyObject) else 0
+                "MapInfos lists map %s (%s) but %s is not on disk. Either "
+                "restore that file or delete the tree entry."
+                % (map_id, name, _map_file_name(project, map_id)),
+                _map_at(map_id), "MapInfos against the map files present"))
+        parent = _int(info.get("parent_id")) if isinstance(info, RubyObject) else None
         if parent and parent not in infos:
             findings.append(Finding(
                 WARNING, "missing_parent_map",
-                "map %s (%s) has parent_id %s, which is not in the map tree"
-                % (map_id, name, parent),
-                Location("map", map_id=map_id, field="parent_id")))
+                "map %s (%s) has parent_id %s, which is not in the map tree, so "
+                "the editor cannot place it. Set parent_id to an existing map "
+                "or to 0 for the top level." % (map_id, name, parent),
+                _map_at(map_id, "parent_id")))
 
     for map_id in sorted(on_disk - set(infos)):
         findings.append(Finding(
             WARNING, "orphan_map_file",
             "%s exists but no MapInfos entry points at it, so the editor will "
-            "not show it" % project.map_file(map_id),
-            Location("map", map_id=map_id)))
+            "not show it. Add a tree entry or delete the file."
+            % _map_file_name(project, map_id), _map_at(map_id)))
 
-    # Parent cycles would make the editor's tree infinite.
-    for map_id in infos:
-        seen = set()
-        current = map_id
-        while current:
-            if current in seen:
-                findings.append(Finding(
-                    ERROR, "map_tree_cycle",
-                    "map %s sits in a parent_id cycle" % map_id,
-                    Location("map", map_id=map_id, field="parent_id")))
-                break
-            seen.add(current)
-            info = infos.get(current)
-            current = info.get("parent_id") if isinstance(info, RubyObject) else 0
+    findings += _parent_cycles(infos)
     return findings
 
 
-def check_encounters(project: Project, map_ids: list[int]) -> list[Finding]:
+def _map_file_name(project: Project, map_id: int) -> str:
+    """The file a map id names, or a description of why it names none."""
+    try:
+        return project.map_file(map_id)
+    except (ProjectError, ValueError):
+        return "no file name is possible for id %s" % map_id
+
+
+def _parent_cycles(infos: dict[Any, Any]) -> list[Finding]:
+    """Maps whose parent chain never reaches the top of the tree.
+
+    One pass over the whole tree: walking each map's ancestry separately is
+    quadratic, and a MapInfos chained parent-to-parent is a small file that
+    would take a very long time.
+    """
     findings = []
-    troop_ids = {i for i, _ in _safe_entries(project, "troops")}
+    settled: dict[int, bool] = {}   # map id -> is its chain sound
+    for start in infos:
+        if _int(start) is None or start in settled:
+            continue
+        chain: list[int] = []
+        seen: set[int] = set()
+        current: Any = start
+        looped = False
+        while True:
+            current = _int(current)
+            if current is None or current == 0:
+                break               # reached the top of the tree
+            if current in settled:
+                looped = not settled[current]
+                break
+            if current in seen:
+                looped = True
+                break
+            seen.add(current)
+            chain.append(current)
+            info = infos.get(current)
+            current = info.get("parent_id") if isinstance(info, RubyObject) else 0
+        for map_id in chain:
+            settled[map_id] = not looped
+            if looped:
+                findings.append(Finding(
+                    ERROR, "map_tree_cycle",
+                    "map %s has a parent chain that never reaches the top of "
+                    "the tree, so the editor's tree is infinite. Set parent_id "
+                    "to 0 on one map in the loop." % map_id,
+                    _map_at(map_id, "parent_id"), "every parent_id chain"))
+    return findings
+
+
+def check_maps(project: Project, map_ids: list[int],
+               tables: _Tables) -> list[Finding]:
+    """Per-map properties: readability, encounters and the tile table."""
+    findings = []
+    troop_ids = tables.ids("troops")
+
     for map_id in map_ids:
         try:
             game_map = project.load_map(map_id)
-        except Exception as exc:
-            findings.append(Finding(ERROR, "map_unreadable",
-                                    "map %s could not be read: %s" % (map_id, exc),
-                                    Location("map", map_id=map_id)))
+        except (ProjectError, ValueError, OSError) as exc:
+            findings.append(Finding(
+                ERROR, "map_unreadable",
+                "map %s could not be read: %s. Restore it from a backup, or "
+                "delete it and its MapInfos entry." % (map_id, exc),
+                _map_at(map_id)))
             continue
-        encounters = game_map.get("encounter_list") or []
+        if not isinstance(game_map, RubyObject):
+            findings.append(Finding(
+                ERROR, "map_unreadable",
+                "map %s does not hold an RPG::Map object, so nothing about it "
+                "could be checked" % map_id, _map_at(map_id)))
+            continue
+        findings += _check_encounters(project, map_id, game_map, troop_ids)
+        findings += _check_map_dimensions(map_id, game_map)
+    return findings
+
+
+def _check_encounters(project: Project, map_id: int, game_map: RubyObject,
+                      troop_ids: set[int] | None) -> list[Finding]:
+    findings = []
+    encounters = _seq(game_map.get("encounter_list"))
+    if troop_ids is not None:
         for entry in encounters:
             troop_id = _encounter_troop_id(entry)
-            if troop_id is None:
-                continue
-            if troop_id not in troop_ids:
-                findings.append(Finding(
-                    ERROR, "missing_troop",
-                    "map %s can encounter troop %s, which does not exist"
-                    % (map_id, troop_id),
-                    Location("map", map_id=map_id, field="encounter_list")))
-        if encounters and not game_map.get("encounter_step"):
-            findings.append(Finding(
-                WARNING, "zero_encounter_step",
-                "map %s has encounters but an encounter_step of 0" % map_id,
-                Location("map", map_id=map_id, field="encounter_step")))
-        data = game_map.get("data")
-        width, height = game_map.get("width"), game_map.get("height")
-        if data is not None and (data.xsize != width or data.ysize != height):
-            findings.append(Finding(
-                ERROR, "tile_data_size_mismatch",
-                "map %s says it is %sx%s but its tile table is %sx%s"
-                % (map_id, width, height, data.xsize, data.ysize),
-                Location("map", map_id=map_id, field="data")))
+            if troop_id is not None and troop_id not in troop_ids:
+                findings.append(_missing(
+                    "missing_troop",
+                    "map %s can encounter troop %s" % (map_id, troop_id),
+                    "Point that encounter at a troop in the Troops table, or "
+                    "remove the entry.",
+                    _map_at(map_id, "encounter_list")))
+    if encounters and not game_map.get("encounter_step"):
+        findings.append(Finding(
+            WARNING, "zero_encounter_step",
+            "map %s has encounters but an encounter_step of 0. Set it to the "
+            "number of steps between battles (the editor's default is 30)."
+            % map_id, _map_at(map_id, "encounter_step")))
     return findings
+
+
+def _check_map_dimensions(map_id: int, game_map: RubyObject) -> list[Finding]:
+    """The tile table against the size the map claims."""
+    data = game_map.get("data")
+    if data is None:
+        return []
+    if not isinstance(data, Table):
+        # The codec hands back the raw payload when a Table will not decode,
+        # and wraps a Table in RubyIvars when the file carried an encoding
+        # record. Either way there is no tile table to measure.
+        return [Finding(
+            ERROR, "tile_data_unreadable",
+            "map %s has a @data that is not a tile table (it decoded as %s), so "
+            "its size could not be checked and the map tools cannot edit it"
+            % (map_id, type(data).__name__), _map_at(map_id, "data"))]
+    width, height = _int(game_map.get("width")), _int(game_map.get("height"))
+    if width is None or height is None:
+        return [Finding(
+            ERROR, "map_size_unreadable",
+            "map %s does not give a usable width and height, so its tile table "
+            "could not be checked" % map_id, _map_at(map_id, "width"))]
+    if data.xsize != width or data.ysize != height:
+        return [Finding(
+            ERROR, "tile_data_size_mismatch",
+            "map %s says it is %sx%s but its tile table is %sx%s. Resize the "
+            "map in the editor so the two agree."
+            % (map_id, width, height, data.xsize, data.ysize),
+            _map_at(map_id, "data"))]
+    return []
 
 
 def _encounter_troop_id(entry: Any) -> int | None:
@@ -366,407 +793,556 @@ def _encounter_troop_id(entry: Any) -> int | None:
     if isinstance(entry, int):
         return entry
     if isinstance(entry, RubyObject):
-        troop_id = entry.get("troop_id")
-        return troop_id if isinstance(troop_id, int) else None
+        return _int(entry.get("troop_id"))
     return None
 
 
-def check_tilesets(project: Project, map_ids: list[int]) -> list[Finding]:
+def check_tilesets(project: Project, map_ids: list[int],
+                   tables: _Tables) -> list[Finding]:
     """VX Ace only: every map names a tileset, and tilesets name graphics."""
-    if "tilesets" not in project.data_files:
+    if not project.profile.has_tileset_database:
         return []
-    findings = []
-    tilesets = dict(_safe_entries(project, "tilesets"))
-    graphics = project.asset_names("tilesets")
-    for map_id in map_ids:
-        try:
-            game_map = project.load_map(map_id)
-        except Exception:
-            continue
-        tileset_id = game_map.get("tileset_id")
-        if isinstance(tileset_id, int) and tileset_id not in tilesets:
-            findings.append(Finding(
-                ERROR, "missing_tileset",
-                "map %s uses tileset %s, which does not exist"
-                % (map_id, tileset_id),
-                Location("map", map_id=map_id, field="tileset_id")))
-    for entry_id, tileset in tilesets.items():
+    findings: list[Finding] = []
+    tileset_ids = tables.ids("tilesets")
+    if tileset_ids is None:
+        return findings
+
+    for map_id, game_map in iter_maps(project, map_ids):
+        tileset_id = _int(game_map.get("tileset_id"))
+        if tileset_id is not None and tileset_id not in tileset_ids:
+            findings.append(_missing(
+                "missing_tileset",
+                "map %s uses tileset %s" % (map_id, tileset_id),
+                "Pick an existing tileset for the map, or add that tileset to "
+                "the database.", _map_at(map_id, "tileset_id")))
+
+    # The sheet names are asset references, so they go through the same checker
+    # as every other one: it is what knows about the RTP and about names that
+    # differ only in case.
+    checker = _AssetChecker(project)
+    for entry_id, tileset in tables.rows_of("tilesets"):
         if not isinstance(tileset, RubyObject):
             continue
-        for index, name in enumerate(tileset.get("tileset_names") or []):
-            text = _text(project, name)
-            if text and graphics and text not in graphics:
-                sheet = ["A1", "A2", "A3", "A4", "A5", "B", "C", "D", "E"][index] \
-                    if index < 9 else str(index)
-                findings.append(Finding(
-                    WARNING, "missing_graphic",
-                    'tileset %s (%s) sheet %s names "%s", which is not in '
-                    "Graphics/Tilesets" % (entry_id, _text(project, tileset.get("name")),
-                                           sheet, text),
-                    Location("database", table="tilesets", entry_id=entry_id,
-                             field="tileset_names")))
-    return findings
+        name = _text(project, tileset.get("name"))
+        for index, sheet_name in enumerate(_seq(tileset.get("tileset_names"))):
+            sheet = (TILESET_SHEET_NAMES[index]
+                     if index < len(TILESET_SHEET_NAMES) else str(index))
+            checker.check(sheet_name, "tilesets",
+                          _db_at("tilesets", entry_id, "tileset_names"),
+                          context="tileset %s (%s) sheet %s"
+                                  % (entry_id, name, sheet))
+    return findings + checker.findings
 
 
-def check_commands(project: Project, map_ids: list[int]) -> list[Finding]:
+def check_commands(project: Project, map_ids: list[int],
+                   tables: _Tables) -> list[Finding]:
+    """Every event command list: structure, and the ids the commands name."""
     findings = []
-    existing = {
-        "items": {i for i, _ in _safe_entries(project, "items")},
-        "weapons": {i for i, _ in _safe_entries(project, "weapons")},
-        "armors": {i for i, _ in _safe_entries(project, "armors")},
-        "troops": {i for i, _ in _safe_entries(project, "troops")},
-        "common_events": {i for i, _ in _safe_entries(project, "common_events")},
-        "actors": {i for i, _ in _safe_entries(project, "actors")},
-        "animations": {i for i, _ in _safe_entries(project, "animations")},
-    }
-    map_sizes = {}
-    for map_id in project.map_ids_on_disk():
-        try:
-            game_map = project.load_map(map_id)
-            map_sizes[map_id] = (game_map.get("width"), game_map.get("height"))
-        except Exception:
-            continue
+    # A table absent from this mapping is one that could not be read, so
+    # the rules comparing ids against it are skipped rather than answered
+    # wrongly.
+    existing = {name: ids for name in REFERENCE_RULES if name != MAP_TARGET
+                for ids in [tables.ids(name)] if ids is not None}
+
+    # Every map, not just the scoped ones: a transfer on map 1 can target any
+    # map in the project, so narrowing this would make the check wrong rather
+    # than faster.
+    map_sizes = {map_id: (_int(m.get("width")), _int(m.get("height")))
+                 for map_id, m in iter_maps(project)}
+    on_disk = set(project.map_ids_on_disk())
+    check_parameters = project.engine in MODELLED_ENGINES
 
     for location, commands in iter_command_lists(project, map_ids):
-        labels = {
-            _text(project, c.get("parameters")[0])
-            for c in commands
-            if isinstance(c, RubyObject) and c.get("code") == 118 and c.get("parameters")
-        }
+        labels: set[str] | None = None
         indent_previous = 0
         for index, command in enumerate(commands):
             if not isinstance(command, RubyObject):
                 continue
-            here = _at(location, index)
-            code = command.get("code", 0)
-            params = command.get("parameters") or []
-            indent = command.get("indent", 0) or 0
+            code = command.get("code", CODE_BLANK)
+            params = _seq(command.get("parameters"))
+
+            indent = _int(command.get("indent")) or 0
             if indent > indent_previous + 1:
                 findings.append(Finding(
                     WARNING, "indent_jump",
-                    "command %s jumps from indent %s to %s, which means the branch "
-                    "structure is inconsistent" % (index, indent_previous, indent), here))
+                    "command %s jumps from indent %s to %s, which means the "
+                    "branch structure is inconsistent. Re-check the branches "
+                    "around it in the editor."
+                    % (index, indent_previous, indent), location.at(index)))
             indent_previous = indent
 
-            for table, rules in REFERENCE_RULES.items():
-                if table not in existing and table != "maps":
-                    continue
-                for rule in rules:
-                    if code != rule["code"] or not _requires_met(params, rule.get("requires")):
-                        continue
-                    position = rule["index"]
-                    if len(params) <= position:
-                        continue
-                    value = params[position]
-                    if not isinstance(value, int):
-                        continue
-                    if table == "maps":
-                        if value not in map_sizes:
-                            findings.append(Finding(
-                                ERROR, "transfer_to_missing_map",
-                                "Transfer Player targets map %s, which does not exist"
-                                % value, here))
-                        elif len(params) > 3:
-                            width, height = map_sizes[value]
-                            x, y = params[2], params[3]
-                            if isinstance(x, int) and isinstance(y, int) and (
-                                    x >= width or y >= height):
-                                findings.append(Finding(
-                                    ERROR, "transfer_outside_map",
-                                    "Transfer Player sends the party to (%s, %s) on map "
-                                    "%s, which is only %sx%s" % (x, y, value, width, height),
-                                    here))
-                    elif value not in existing[table]:
-                        findings.append(Finding(
-                            ERROR, "missing_%s" % table.rstrip("s"),
-                            "%s refers to %s id %s, which does not exist"
-                            % (command_name(code), table.rstrip("s"), value), here))
+            if not check_parameters:
+                continue
 
-            if code == 119 and params:
+            for table, value in _referenced_ids(code, params):
+                if table == MAP_TARGET:
+                    findings += _check_transfer(value, params, on_disk, map_sizes,
+                                                location.at(index))
+                elif table in existing and value not in existing[table]:
+                    noun = TABLE_NOUNS[table]
+                    findings.append(_missing(
+                        "missing_%s" % noun.replace(" ", "_"),
+                        "%s refers to %s id %s" % (command_name(code), noun, value),
+                        "Point it at an existing entry, or add that entry to "
+                        "the database.", location.at(index),
+                        "command parameters against the %s table" % table))
+
+            if code == CODE_JUMP_TO_LABEL and params:
+                if labels is None:
+                    # Built on first use: most pages have no labels at all, and
+                    # this is a second pass over the whole command list.
+                    labels = _labels_in(project, commands)
                 target = _text(project, params[0])
                 if target not in labels:
                     findings.append(Finding(
                         ERROR, "missing_label",
-                        'Jump to Label "%s" has no matching Label in this command list'
-                        % target, here))
+                        'Jump to Label "%s" has no matching Label in this '
+                        "command list, so the jump does nothing. Add a Label "
+                        "command with that name, or remove the jump." % target,
+                        location.at(index)))
 
-        findings += check_page_reachability(project, location, commands)
-
-    findings += check_shadowed_pages(project, map_ids)
+        findings += check_list_terminator(location, commands)
     return findings
 
 
-def check_page_reachability(project: Project, location: Location,
-                            commands: list[Any]) -> list[Finding]:
-    """Flag command lists that cannot terminate or are missing their end marker."""
-    findings = []
+def _labels_in(project: Project, commands: list[Any]) -> set[str]:
+    return {
+        _text(project, command.get("parameters")[0])
+        for command in commands
+        if isinstance(command, RubyObject) and command.get("code") == CODE_LABEL
+        and _seq(command.get("parameters"))
+    }
+
+
+def _check_transfer(map_id: int, params: list[Any], on_disk: AbstractSet[int],
+                    map_sizes: dict[int, tuple[int | None, int | None]],
+                    here: Location) -> list[Finding]:
+    """Transfer Player: does the target map exist, and are the coordinates on it?
+
+    Existence is decided by the files present, not by which maps happened to
+    load: a map that exists but will not parse is a different problem, reported
+    by ``check_maps``, and saying "does not exist" about it would send an agent
+    recreating a file that is already there.
+    """
+    if map_id not in on_disk:
+        return [_missing(
+            "transfer_to_missing_map",
+            "Transfer Player targets map %s" % map_id,
+            "Point the transfer at an existing map.", here,
+            "every Transfer Player against the map files present")]
+    width, height = map_sizes.get(map_id, (None, None))
+    if width is None or height is None:
+        return []       # unreadable or size-less; check_maps reports that
+    if len(params) <= max(TRANSFER_X, TRANSFER_Y):
+        return []
+    x, y = _int(params[TRANSFER_X]), _int(params[TRANSFER_Y])
+    if x is None or y is None:
+        return []
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return [Finding(
+            ERROR, "transfer_outside_map",
+            "Transfer Player sends the party to (%s, %s) on map %s, which is "
+            "only %sx%s, so the party would land off the map. Move the "
+            "destination inside it." % (x, y, map_id, width, height), here,
+            "Transfer Player coordinates against the target map's size")]
+    return []
+
+
+def check_list_terminator(location: Location, commands: list[Any]) -> list[Finding]:
+    """Flag command lists whose final command is not the blank end marker.
+
+    The interpreter reads a code-0 command as "this page is finished"; a list
+    that ends on a real command runs off the end of the array instead. An
+    entirely empty list is fine -- there is no marker to be missing, and the
+    interpreter stops immediately.
+    """
     if not commands:
-        return findings
+        return []
     last = commands[-1]
-    if isinstance(last, RubyObject) and (last.get("code", 0) or 0) != 0:
-        findings.append(Finding(
+    if isinstance(last, RubyObject) and last.get("code") != CODE_BLANK:
+        return [Finding(
             WARNING, "missing_list_terminator",
             "this command list does not end with a blank command, which the "
-            "interpreter uses to know the page is finished",
-            _at(location, len(commands) - 1)))
-    return findings
+            "interpreter uses to know the page is finished. Append an empty "
+            "command (code 0) at indent 0.",
+            location.at(len(commands) - 1))]
+    return []
 
 
-def check_shadowed_pages(project: Project, map_ids: list[int]) -> list[Finding]:
-    """A page with no conditions hides every page before it.
+def check_event_pages(project: Project, map_ids: list[int]) -> list[Finding]:
+    """Page-level rules: pages a later page hides, and autoruns that never end.
 
-    VX picks the *last* page whose conditions are satisfied, so an
-    unconditional page 2 means page 1 can never run.
+    Both turn on the same engine fact: RPG Maker runs the *last* page whose
+    conditions are satisfied, so a page with no conditions at all hides every
+    page before it, and it is the final page being an unconditional Autorun
+    that traps the player.
     """
     findings = []
-    condition_flags = ("switch1_valid", "switch2_valid", "variable_valid",
-                       "self_switch_valid", "item_valid", "actor_valid")
-    for map_id in map_ids:
-        try:
-            game_map = project.load_map(map_id)
-        except Exception:
-            continue
+    for map_id, game_map in iter_maps(project, map_ids):
         events = game_map.get("events")
         if not isinstance(events, RubyHash):
             continue
         for event_id, event in events.sorted_items():
             if not isinstance(event, RubyObject):
                 continue
-            pages = event.get("pages") or []
+            pages = _seq(event.get("pages"))
             name = _text(project, event.get("name"))
-
-            def unconditional(page: Any) -> bool:
-                condition = page.get("condition") if isinstance(page, RubyObject) else None
-                if not isinstance(condition, RubyObject):
-                    return False
-                return not any(condition.get(flag) for flag in condition_flags)
-
-            for index, page in enumerate(pages):
-                if index == 0 or not isinstance(page, RubyObject):
-                    continue
-                if unconditional(page):
-                    findings.append(Finding(
-                        WARNING, "shadowed_pages",
-                        "page %s of event %s (%s) has no conditions, so pages 1 to %s "
-                        "can never run -- the last page whose conditions match is the "
-                        "one that runs" % (index + 1, event_id, name, index),
-                        Location("map_event", map_id=map_id, event_id=event_id,
-                                 event_name=name, page=index),
-                        "page conditions of every multi-page event"))
-
-            # Only the last page matters here. Because the last matching page
-            # wins, an earlier unconditional Autorun page is the normal way to
-            # write a cutscene: it sets a self switch, and a later conditioned
-            # page then takes over. It is the *final* page being an
-            # unconditional Autorun that traps the player.
-            if pages and isinstance(pages[-1], RubyObject) and unconditional(pages[-1]):
-                last = pages[-1]
-                if last.get("trigger") == 3 and not _releases_control(last):
-                    findings.append(Finding(
-                        WARNING, "unstoppable_autorun",
-                        "the last page (%s) of event %s (%s) is Autorun with no page "
-                        "conditions and never transfers the player, erases itself or "
-                        "ends the game, so it restarts as soon as it finishes and the "
-                        "player never regains control"
-                        % (len(pages), event_id, name),
-                        Location("map_event", map_id=map_id, event_id=event_id,
-                                 event_name=name, page=len(pages) - 1),
-                        "the last page of every event, since that is the page that "
-                        "wins when its conditions match"))
+            findings += _check_shadowing(map_id, event_id, name, pages)
+            findings += _check_autorun(map_id, event_id, name, pages)
     return findings
+
+
+def _is_unconditional(page: Any) -> bool:
+    """Whether a page's conditions are all switched off.
+
+    Such a page always matches, so it wins whenever the engine reaches it.
+    """
+    if not isinstance(page, RubyObject):
+        return False
+    condition = page.get("condition")
+    if not isinstance(condition, RubyObject):
+        return False
+    return not any(condition.get(flag) for flag in PAGE_CONDITION_FLAGS)
+
+
+def _check_shadowing(map_id: int, event_id: int, name: str,
+                     pages: list[Any]) -> list[Finding]:
+    """Report the highest unconditional page, and only that one.
+
+    Reporting each of several would make overlapping claims and name the wrong
+    culprit: with pages 2 and 3 both unconditional it is page 3, the last one,
+    that actually decides.
+    """
+    last_unconditional = None
+    for index, page in enumerate(pages):
+        if index and _is_unconditional(page):
+            last_unconditional = index
+    if last_unconditional is None:
+        return []
+    return [Finding(
+        WARNING, "shadowed_pages",
+        "page %s of event %s (%s) has no conditions, so pages 0 to %s can "
+        "never run -- the last page whose conditions match is the one that "
+        "runs. Give this page a condition, or move it before the ones it hides."
+        % (last_unconditional, event_id, name, last_unconditional - 1),
+        _event_at(map_id, event_id, name, last_unconditional),
+        "page conditions of every multi-page event")]
+
+
+def _check_autorun(map_id: int, event_id: int, name: str,
+                   pages: list[Any]) -> list[Finding]:
+    if not pages:
+        return []
+    last = pages[-1]
+    if not isinstance(last, RubyObject) or not _is_unconditional(last):
+        return []
+    if last.get("trigger") != TRIGGER_AUTORUN:
+        return []
+    commands = _seq(last.get("list"))
+    if _has_code(commands, OPAQUE_ESCAPE_CODES):
+        # A common event or a script could transfer the player, erase the event
+        # or change scene, and this file cannot see through either. Suppressing
+        # the finding costs a real one now and then; reporting it would send an
+        # agent editing a cutscene that works.
+        return []
+    if _has_code(commands, CONTROL_RELEASING_CODES):
+        return []
+    return [Finding(
+        WARNING, "unstoppable_autorun",
+        "the last page (%s) of event %s (%s) is Autorun with no page "
+        "conditions and never transfers the player, erases itself or ends the "
+        "game, so it restarts as soon as it finishes and the player never "
+        "regains control. Give the page a condition it can turn off (a self "
+        "switch is the usual way), or add a Transfer Player or Erase Event."
+        % (len(pages) - 1, event_id, name),
+        _event_at(map_id, event_id, name, len(pages) - 1),
+        "the last page of every event, since that is the page that wins when "
+        "its conditions match")]
 
 
 # Commands that end an unconditional autorun page's grip on the player: moving
 # them to another map, erasing the event for this visit, or ending the game.
-CONTROL_RELEASING_CODES = {201, 214, 353, 354}
+CONTROL_RELEASING_CODES = frozenset({CODE_TRANSFER_PLAYER, 214, 353, 354})
+
+# Commands that might release control somewhere this file cannot follow: a
+# common event that transfers, or a script calling reserve_transfer or goto. A
+# page containing one of these is left alone rather than reported.
+OPAQUE_ESCAPE_CODES = frozenset({CODE_CALL_COMMON_EVENT, CODE_SCRIPT,
+                                 CODE_SCRIPT_MORE})
 
 
-def _releases_control(page: RubyObject) -> bool:
-    return any(isinstance(command, RubyObject)
-               and command.get("code") in CONTROL_RELEASING_CODES
-               for command in page.get("list") or [])
+def _has_code(commands: list[Any], codes: AbstractSet[int]) -> bool:
+    return any(isinstance(command, RubyObject) and _int(command.get("code")) in codes
+               for command in commands)
+
+
+class _AssetChecker:
+    """Reports references to graphic and audio files that are not there.
+
+    One object rather than a closure so the two facts every such finding needs
+    -- the asset pool for a folder, and whether the pool is complete -- are
+    looked up here instead of being passed in at every call site. Passing a
+    pool and a folder name separately is how a check ends up reporting the
+    wrong folder.
+    """
+
+    def __init__(self, project: Project):
+        self.project = project
+        self.findings: list[Finding] = []
+        # A project whose RTP could not be found references files this server
+        # cannot see, so a miss is only evidence of a problem when the pool is
+        # complete. This is the guard that removed 185 false warnings.
+        self.complete = project.assets_complete
+        self.severity = WARNING if self.complete else INFO
+
+    def check(self, name: Any, kind: str, location: Location,
+              rule: str = "missing_graphic", context: str = "") -> None:
+        text = _text(self.project, name)
+        if not text:
+            return
+        pool = self.project.asset_names(kind)
+        if not pool and not self.complete:
+            # Nothing to compare against and a reason to expect that, so any
+            # answer here would be a guess.
+            return
+        if text in pool:
+            return
+        folder = ASSET_DIRS.get(kind, kind)
+        # `context` names what holds the reference when the location alone is
+        # not enough to find it -- which tileset sheet, say. Without one the
+        # message leads with the name, because the finding's own "where"
+        # already says which field it came from.
+        if context:
+            lead, verb = '%s names "%s"' % (context, text), ", which is"
+        else:
+            lead, verb = '"%s"' % text, " is"
+
+        # A name that differs only in case works on Windows and fails on a
+        # case-sensitive filesystem, so it survives every local playtest. This
+        # is certain regardless of whether the RTP was located: the file is
+        # demonstrably there under another spelling.
+        lowered = text.lower()
+        near = next((c for c in pool if c.lower() == lowered), None)
+        if near is not None:
+            self.findings.append(Finding(
+                WARNING, "asset_case_mismatch",
+                '%s%s spelled "%s" in %s. Windows ignores the difference, so '
+                "this loads while you develop and fails on a case-sensitive "
+                "filesystem. Rename one of them to match."
+                % (lead, verb, near, folder),
+                location, "exact file names in %s" % folder))
+            return
+
+        if self.complete:
+            message = ("%s%s not in %s. Add the file, or point the reference at "
+                       "one that is there." % (lead, verb, folder))
+        else:
+            message = ("%s%s not in %s; it may come from %s, which could not be "
+                       "located. Pass --rtp with that folder to check properly."
+                       % (lead, verb, folder,
+                          " or ".join(self.project.rtp_unresolved)))
+        self.findings.append(Finding(
+            self.severity, rule, message, location,
+            "%d files in %s and any located RTP" % (len(pool), folder)))
 
 
 def check_assets(project: Project, map_ids: list[int]) -> list[Finding]:
-    findings = []
-    characters = project.asset_names("characters")
-    faces = project.asset_names("faces")
-    battlers = project.asset_names("battlers")
-    parallaxes = project.asset_names("parallaxes")
-    audio = {kind: project.asset_names(kind) for kind in ("bgm", "bgs", "me", "se")}
+    """Every graphic and audio name in the project, against the files present."""
+    checker = _AssetChecker(project)
+    _check_map_assets(project, checker, map_ids)
+    _check_command_assets(project, checker, map_ids)
+    _check_database_assets(project, checker)
+    return checker.findings
 
-    # A project whose RTP we could not find will reference files we cannot see,
-    # so a miss is only evidence of a problem when the asset pool is complete.
-    complete = project.assets_complete
-    severity = WARNING if complete else INFO
 
-    def check(name: Any, pool: set[str], kind: str, location: Location,
-              rule: str) -> None:
-        text = _text(project, name)
-        if not text or text in pool:
-            return
-
-        # A name that differs only in case works on Windows and fails on a
-        # case-sensitive filesystem, so it survives every local playtest.
-        near = [candidate for candidate in pool if candidate.lower() == text.lower()]
-        if near:
-            findings.append(Finding(
-                WARNING, "asset_case_mismatch",
-                '%s "%s" is spelled "%s" on disk. Windows ignores the difference, '
-                "so this loads while you develop and fails on a case-sensitive "
-                "filesystem" % (kind, text, near[0]),
-                location, "exact file names in %s" % kind))
-            return
-
-        if complete:
-            message = ('%s "%s" is referenced but is not in the project %s folder'
-                       % (kind, text, kind))
-        else:
-            message = ('%s "%s" is not in the project %s folder; it may come from '
-                       "%s, which could not be located"
-                       % (kind, text, kind, " or ".join(project.rtp_unresolved)))
-        findings.append(Finding(
-            severity, rule, message, location,
-            "%d %s files in the project and any located RTP" % (len(pool), kind)))
-
-    for map_id in map_ids:
-        try:
-            game_map = project.load_map(map_id)
-        except Exception:
-            continue
-        check(game_map.get("parallax_name"), parallaxes, "parallax",
-              Location("map", map_id=map_id, field="parallax_name"), "missing_graphic")
+def _check_map_assets(project: Project, checker: _AssetChecker,
+                      map_ids: list[int]) -> None:
+    for map_id, game_map in iter_maps(project, map_ids):
+        checker.check(game_map.get("parallax_name"), "parallaxes",
+                      _map_at(map_id, "parallax_name"))
         if game_map.get("specify_battleback"):
             for field, kind in (("battleback1_name", "battlebacks1"),
                                 ("battleback2_name", "battlebacks2")):
-                check(game_map.get(field), project.asset_names(kind), kind,
-                      Location("map", map_id=map_id, field=field), "missing_graphic")
-        for field, kind in (("bgm", "bgm"), ("bgs", "bgs")):
+                checker.check(game_map.get(field), kind, _map_at(map_id, field))
+        for field in ("bgm", "bgs"):
             track = game_map.get(field)
             if isinstance(track, RubyObject):
-                check(track.get("name"), audio[kind], kind,
-                      Location("map", map_id=map_id, field=field), "missing_audio")
+                checker.check(track.get("name"), field, _map_at(map_id, field),
+                              "missing_audio")
         events = game_map.get("events")
-        if isinstance(events, RubyHash):
-            for event_id, event in events.sorted_items():
-                if not isinstance(event, RubyObject):
+        if not isinstance(events, RubyHash):
+            continue
+        for event_id, event in events.sorted_items():
+            if not isinstance(event, RubyObject):
+                continue
+            name = _text(project, event.get("name"))
+            for page_index, page in enumerate(_seq(event.get("pages"))):
+                if not isinstance(page, RubyObject):
                     continue
-                name = _text(project, event.get("name"))
-                for page_index, page in enumerate(event.get("pages") or []):
-                    if not isinstance(page, RubyObject):
-                        continue
-                    graphic = page.get("graphic")
-                    location = Location("map_event", map_id=map_id, event_id=event_id,
-                                        event_name=name, page=page_index)
-                    if isinstance(graphic, RubyObject):
-                        check(graphic.get("character_name"), characters, "characters",
-                              location, "missing_graphic")
+                graphic = page.get("graphic")
+                if isinstance(graphic, RubyObject):
+                    checker.check(graphic.get("character_name"), "characters",
+                                  _event_at(map_id, event_id, name, page_index))
 
+
+def _check_command_assets(project: Project, checker: _AssetChecker,
+                          map_ids: list[int]) -> None:
+    if project.engine not in MODELLED_ENGINES:
+        # An unmodelled engine's parameter layouts are different: XP's Show
+        # Text keeps the message where Ace keeps the face graphic, so these
+        # rules would invent a missing file for every line of dialogue.
+        return
     for location, commands in iter_command_lists(project, map_ids):
         for index, command in enumerate(commands):
             if not isinstance(command, RubyObject):
                 continue
-            code = command.get("code", 0)
-            params = command.get("parameters") or []
-            here = _at(location, index)
-            if code == 101 and params:
-                check(params[0], faces, "faces", here, "missing_graphic")
-            elif code in (241, 245, 249, 250) and params:
-                kind = {241: "bgm", 245: "bgs", 249: "me", 250: "se"}[code]
-                track = params[0]
+            code = command.get("code", CODE_BLANK)
+            if code == CODE_SHOW_TEXT:
+                params = _seq(command.get("parameters"))
+                if params:
+                    checker.check(params[0], "faces", location.at(index))
+            elif code in AUDIO_COMMAND_KINDS:
+                params = _seq(command.get("parameters"))
+                track = params[0] if params else None
                 if isinstance(track, RubyObject):
-                    check(track.get("name"), audio[kind], kind, here, "missing_audio")
+                    checker.check(track.get("name"), AUDIO_COMMAND_KINDS[code],
+                                  location.at(index), "missing_audio")
 
+
+def _check_database_assets(project: Project, checker: _AssetChecker) -> None:
     for entry_id, actor in _safe_entries(project, "actors"):
         if not isinstance(actor, RubyObject):
             continue
-        check(actor.get("character_name"), characters, "characters",
-              Location("database", table="actors", entry_id=entry_id,
-                       field="character_name"), "missing_graphic")
-        check(actor.get("face_name"), faces, "faces",
-              Location("database", table="actors", entry_id=entry_id,
-                       field="face_name"), "missing_graphic")
+        for field, kind in (("character_name", "characters"),
+                            ("face_name", "faces")):
+            checker.check(actor.get(field), kind,
+                          _db_at("actors", entry_id, field))
     for entry_id, foe in _safe_entries(project, "enemies"):
         if isinstance(foe, RubyObject):
-            check(foe.get("battler_name"), battlers, "battlers",
-                  Location("database", table="enemies", entry_id=entry_id,
-                           field="battler_name"),
-                  "missing_graphic")
+            checker.check(foe.get("battler_name"), "battlers",
+                          _db_at("enemies", entry_id, "battler_name"))
+
+
+class _NestedRef(NamedTuple):
+    """A database reference that lives one level down.
+
+    A row of ``owner`` holds a list under ``field``; each object in it names a
+    row of ``target`` under ``child_field``. Named rather than a bare tuple
+    because five strings in a row is exactly the sort of thing that gets
+    reordered by accident.
+    """
+
+    owner: str
+    field: str
+    child_field: str
+    target: str
+    sentence: str
+
+
+NESTED_DB_REFERENCES = (
+    _NestedRef("classes", "learnings", "skill_id", "skills",
+               "class %s learns skill %s"),
+    _NestedRef("troops", "members", "enemy_id", "enemies",
+               "troop %s includes enemy %s"),
+)
+
+
+def check_database(project: Project, tables: _Tables) -> list[Finding]:
+    """Ids one database table holds for another."""
+    findings: list[Finding] = []
+
+    class_ids = tables.ids("classes")
+    if class_ids is not None:
+        for entry_id, actor in tables.rows_of("actors"):
+            if not isinstance(actor, RubyObject) or not actor.has("class_id"):
+                continue
+            class_id = actor.get("class_id")
+            if class_id not in class_ids:
+                findings.append(_missing(
+                    "missing_class",
+                    "actor %s has class_id %s" % (entry_id, class_id),
+                    "Set class_id to a class in the Classes table, or add that "
+                    "class.", _db_at("actors", entry_id, "class_id")))
+
+    for ref in NESTED_DB_REFERENCES:
+        target_ids = tables.ids(ref.target)
+        if target_ids is None:
+            continue
+        noun = TABLE_NOUNS[ref.target]
+        for entry_id, row in tables.rows_of(ref.owner):
+            if not isinstance(row, RubyObject):
+                continue
+            for child in _seq(row.get(ref.field)):
+                if not isinstance(child, RubyObject):
+                    continue
+                value = child.get(ref.child_field)
+                if value not in target_ids:
+                    findings.append(_missing(
+                        "missing_%s" % noun,
+                        ref.sentence % (entry_id, value),
+                        "Point it at an existing %s, or add that %s."
+                        % (noun, noun),
+                        _db_at(ref.owner, entry_id, ref.field)))
+
+    findings += _check_system(project, tables.ids("actors"))
     return findings
 
 
-def check_database(project: Project) -> list[Finding]:
+def _check_system(project: Project, actor_ids: set[int] | None) -> list[Finding]:
     findings = []
-    class_ids = {i for i, _ in _safe_entries(project, "classes")}
-    skill_ids = {i for i, _ in _safe_entries(project, "skills")}
-    enemy_ids = {i for i, _ in _safe_entries(project, "enemies")}
-    actor_ids = {i for i, _ in _safe_entries(project, "actors")}
-
-    for entry_id, actor in _safe_entries(project, "actors"):
-        if isinstance(actor, RubyObject) and actor.has("class_id"):
-            if actor.get("class_id") not in class_ids:
-                findings.append(Finding(
-                    ERROR, "missing_class",
-                    "actor %s has class_id %s, which does not exist"
-                    % (entry_id, actor.get("class_id")),
-                    Location("database", table="actors", entry_id=entry_id,
-                             field="class_id")))
-
-    for entry_id, klass in _safe_entries(project, "classes"):
-        if not isinstance(klass, RubyObject):
-            continue
-        for learning in klass.get("learnings") or []:
-            if isinstance(learning, RubyObject) and learning.get("skill_id") not in skill_ids:
-                findings.append(Finding(
-                    ERROR, "missing_skill",
-                    "class %s learns skill %s, which does not exist"
-                    % (entry_id, learning.get("skill_id")),
-                    Location("database", table="classes", entry_id=entry_id,
-                             field="learnings")))
-
-    for entry_id, troop in _safe_entries(project, "troops"):
-        if not isinstance(troop, RubyObject):
-            continue
-        for member in troop.get("members") or []:
-            if isinstance(member, RubyObject) and member.get("enemy_id") not in enemy_ids:
-                findings.append(Finding(
-                    ERROR, "missing_enemy",
-                    "troop %s includes enemy %s, which does not exist"
-                    % (entry_id, member.get("enemy_id")),
-                    Location("database", table="troops", entry_id=entry_id,
-                             field="members")))
-
-    system = None
     try:
         system = project.load_data("system")
-    except Exception:
-        pass
-    if isinstance(system, RubyObject):
-        for actor_id in system.get("party_members") or []:
+    except (ProjectError, ValueError, OSError) as exc:
+        return [Finding(ERROR, "system_unreadable",
+                        "System could not be read (%s), so the starting party "
+                        "and start position were not checked." % exc,
+                        _db_at("system", 0))]
+    if not isinstance(system, RubyObject):
+        return findings
+    if actor_ids is not None:
+        for actor_id in _seq(system.get("party_members")):
             if actor_id not in actor_ids:
-                findings.append(Finding(
-                    ERROR, "missing_party_member",
-                    "the starting party includes actor %s, which does not exist"
-                    % actor_id,
-                    Location("database", table="system", entry_id=0,
-                             field="party_members")))
-        start_map = system.get("start_map_id")
-        if start_map and start_map not in set(project.map_ids_on_disk()):
-            findings.append(Finding(
-                ERROR, "missing_start_map",
-                "the party starts on map %s, which does not exist" % start_map,
-                Location("database", table="system", entry_id=0, field="start_map_id")))
+                findings.append(_missing(
+                    "missing_party_member",
+                    "the starting party includes actor %s" % actor_id,
+                    "Remove it from party_members, or add that actor.",
+                    _db_at("system", 0, "party_members")))
+    start_map = _int(system.get("start_map_id"))
+    if start_map:
+        on_disk = set(project.map_ids_on_disk())
+        if start_map not in on_disk:
+            findings.append(_missing(
+                "missing_start_map",
+                "the party starts on map %s" % start_map,
+                "Set the start position to a map that exists, or the game will "
+                "not boot.", _db_at("system", 0, "start_map_id")))
+        else:
+            findings += _check_start_position(project, system, start_map)
     return findings
 
 
-def _safe_entries(project: Project, table: str) -> list[tuple[int, Any]]:
-    try:
-        return project.entries(table)
-    except Exception:
+def _check_start_position(project: Project, system: RubyObject,
+                          start_map: int) -> list[Finding]:
+    """The start coordinates against the size of the start map.
+
+    The same check ``_check_transfer`` does, on the one transfer the engine
+    performs before the player can do anything about it.
+    """
+    x, y = _int(system.get("start_x")), _int(system.get("start_y"))
+    if x is None or y is None:
         return []
-
-
-def _at(location: Location, index: int) -> Location:
-    return Location(location.kind, location.map_id, location.event_id,
-                    location.event_name, location.page, index, location.entry_id,
-                    location.table, location.field)
+    try:
+        game_map = project.load_map(start_map)
+    except (ProjectError, ValueError, OSError):
+        return []
+    width, height = _int(game_map.get("width")), _int(game_map.get("height"))
+    if width is None or height is None:
+        return []
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return [Finding(
+            ERROR, "start_position_outside_map",
+            "the party starts at (%s, %s) on map %s, which is only %sx%s, so "
+            "the game boots with the party off the map. Move the start "
+            "position inside it." % (x, y, start_map, width, height),
+            _db_at("system", 0, "start_x"))]
+    return []

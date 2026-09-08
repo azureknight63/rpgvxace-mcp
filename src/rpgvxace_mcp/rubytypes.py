@@ -1,43 +1,99 @@
-"""Python stand-ins for the Ruby objects found inside RPG Maker VX ``.rvdata`` files.
+"""Python stand-ins for the Ruby objects found inside RPG Maker data files.
 
 Every value Marshal can carry has a representation here, chosen so that a
 load/dump round trip is *byte identical* even for constructs this server does
-not understand. That matters more than convenience: an ``.rvdata`` file is a
-user's game, and a lossy rewrite is indistinguishable from data loss.
+not understand. That matters more than convenience: a data file is a user's
+game, and a lossy rewrite is indistinguishable from data loss.
+
+Strings are the subtle case. RGSS3 (VX Ace) runs Ruby 1.9, which tags every
+string with its encoding by wrapping it in an instance-variable record; RGSS2
+(VX) runs Ruby 1.8, whose strings are bare bytes in whatever code page the
+editor ran under. Neither is decoded here: bytes are kept verbatim, any wrapper
+is preserved as-is, and decoding is deferred to the presentation layer.
 """
 
 from __future__ import annotations
 
 import struct
-from typing import Any, Iterable
+from array import array
+from typing import Any, Iterable, Literal
+
+# Guard rails for `Table`. RGSS itself imposes no limit, but a map axis above a
+# few thousand tiles is not a real map, and a corrupt or hostile header must not
+# be able to make us allocate for one. 16 million cells is ~32 MB of payload,
+# far beyond any real project, and is the point where refusing beats trying.
+MAX_TABLE_AXIS = 65535
+MAX_TABLE_CELLS = 16 * 1024 * 1024
+
+# Cells are unsigned 16-bit on disk; some tables are semantically signed.
+CELL_SIGN_BIT = 0x8000
+CELL_MODULUS = 0x10000
+CELL_MASK = 0xFFFF
+
+
+def printable_text(text: str) -> str:
+    """Text that is safe to put in a JSON response.
+
+    A name read out of a file is decoded with ``surrogateescape``, so it can
+    hold lone surrogates. ``json.dumps`` emits those happily and the UTF-8
+    transport then cannot encode them, which would end the session over one
+    corrupt byte in one class name. Replacing them costs nothing real: no RGSS
+    class or instance variable is named in anything but ASCII.
+    """
+    # Every real name takes this branch, and it is a C-level check: this runs
+    # once per class name and once per field name across a whole project.
+    if text.isascii():
+        return text
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "replace").decode("utf-8")
+    return text
+
+
+def _ivar_key(name: str) -> str:
+    """``"name"`` and ``"@name"`` both address the ivar ``@name``."""
+    return name if name.startswith("@") else "@" + name
+
+
+def _bare_name(key: str) -> str:
+    """``"@name"`` -> ``"name"``, stripping exactly one ``@``.
+
+    Exactly one: a class variable ``@@x`` must not collapse onto ``@x``.
+    """
+    return key[1:] if key.startswith("@") else key
 
 
 class RubySymbol(str):
-    """A Ruby ``Symbol``. Subclasses ``str`` so it can be used as a dict key."""
+    """A Ruby ``Symbol``. Subclasses ``str`` so it can be used as a dict key.
 
-    __slots__ = ()
+    ``ivars`` carries the encoding record Ruby >= 1.9 wraps around a symbol
+    whose name is not ASCII, so such a symbol can be written back as it came.
+    """
+
+    __slots__ = ("ivars",)
+
+    def __new__(cls, value: str, ivars: dict[str, Any] | None = None):
+        self = super().__new__(cls, value)
+        self.ivars = dict(ivars or {})
+        return self
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return ":" + str(self)
 
 
 class RubyString:
-    """A Ruby 1.8 ``String``: raw bytes, with no encoding attached.
+    """A Ruby ``String``: raw bytes, plus any instance-variable record.
 
-    RGSS2 runs Ruby 1.8, whose strings are byte strings. Text is stored in
-    whatever code page the editor ran under (Windows-1252 for Western installs,
-    Shift_JIS for Japanese ones), so bytes are kept verbatim and decoding is
-    deferred to the presentation layer.
+    ``ivars`` holds what an ``I`` wrapper carried -- ``{"E": True}`` for a
+    UTF-8 string written by Ruby >= 1.9, empty for a bare Ruby 1.8 string.
     """
 
     __slots__ = ("data", "ivars")
 
     def __init__(self, data: bytes | bytearray, ivars: dict[str, Any] | None = None):
         self.data = bytes(data)
-        # Ruby >= 1.9 wraps strings in an ivar record to carry :E / :encoding.
-        # VX files never contain one; preserving any we find keeps foreign files
-        # (e.g. VX Ace data dropped into a VX project) round-tripping.
-        self.ivars = ivars or {}
+        self.ivars = dict(ivars or {})
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, RubyString):
@@ -67,17 +123,17 @@ class RubyObject:
 
     def get(self, name: str, default: Any = None) -> Any:
         """Read an ivar by bare name (``"name"`` finds ``@name``)."""
-        return self.ivars.get(name if name.startswith("@") else "@" + name, default)
+        return self.ivars.get(_ivar_key(name), default)
 
     def set(self, name: str, value: Any) -> None:
-        self.ivars[name if name.startswith("@") else "@" + name] = value
+        self.ivars[_ivar_key(name)] = value
 
     def has(self, name: str) -> bool:
-        return (name if name.startswith("@") else "@" + name) in self.ivars
+        return _ivar_key(name) in self.ivars
 
     def fields(self) -> list[str]:
         """Bare ivar names, in file order."""
-        return [k.lstrip("@") for k in self.ivars]
+        return [_bare_name(key) for key in self.ivars]
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, RubyObject):
@@ -104,7 +160,7 @@ class RubyUserDef:
     def __init__(self, cls: str, payload: bytes, ivars: dict[str, Any] | None = None):
         self.cls = cls
         self.payload = bytes(payload)
-        self.ivars = ivars or {}
+        self.ivars = dict(ivars or {})
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return "RubyUserDef(%s, %d bytes)" % (self.cls, len(self.payload))
@@ -119,6 +175,46 @@ class RubyUserMarshal:
         self.cls = cls
         self.value = value
 
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "RubyUserMarshal(%s)" % self.cls
+
+
+class RubyData:
+    """An object serialised through Marshal's C-level ``_dump_data`` (type ``d``).
+
+    Nothing here interprets the payload; it is carried so that a file using one
+    can still be read and written back unchanged.
+    """
+
+    __slots__ = ("cls", "value")
+
+    def __init__(self, cls: str, value: Any):
+        self.cls = cls
+        self.value = value
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "RubyData(%s)" % self.cls
+
+
+class RubyIvars:
+    """Instance variables attached to a value that cannot hold them itself.
+
+    Ruby can wrap *any* value in an ``I`` record. Most targets here have an
+    ``ivars`` slot of their own; an Array, Hash or Float does not, so rather
+    than dropping the record -- which would break the byte-identical round trip
+    this codec promises -- the value is wrapped in one of these and the writer
+    re-emits the ``I`` record around it.
+    """
+
+    __slots__ = ("inner", "ivars")
+
+    def __init__(self, inner: Any, ivars: dict[str, Any] | None = None):
+        self.inner = inner
+        self.ivars = dict(ivars or {})
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "RubyIvars(%r, %s)" % (self.inner, list(self.ivars))
+
 
 class RubyStruct:
     """A Ruby ``Struct`` (type ``S``)."""
@@ -129,15 +225,24 @@ class RubyStruct:
         self.cls = cls
         self.members: dict[str, Any] = dict(members or {})
 
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "RubyStruct(%s, %s)" % (self.cls, list(self.members))
+
+
+ClassRefKind = Literal["class", "module", "old_module"]
+
 
 class RubyClassRef:
     """A reference to a Class (type ``c``) or Module (type ``m`` / ``M``)."""
 
     __slots__ = ("name", "kind")
 
-    def __init__(self, name: str, kind: str = "class"):
+    def __init__(self, name: str, kind: ClassRefKind = "class"):
         self.name = name
-        self.kind = kind  # "class" | "module" | "old_module"
+        self.kind: ClassRefKind = kind
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "RubyClassRef(%s, %s)" % (self.name, self.kind)
 
 
 class RubyExtended:
@@ -149,6 +254,9 @@ class RubyExtended:
         self.modules = modules
         self.inner = inner
 
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "RubyExtended(%s)" % self.modules
+
 
 class RubyUClass:
     """An instance of a subclass of String/Array/Hash (type ``C``)."""
@@ -159,24 +267,39 @@ class RubyUClass:
         self.cls = cls
         self.inner = inner
 
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "RubyUClass(%s)" % self.cls
+
 
 class RubyRegexp:
+    """A Ruby ``Regexp`` (type ``/``), kept as source plus option bits.
+
+    ``options`` is Ruby's flag bitmask -- 1 ``i`` (ignore case), 2 ``x``
+    (extended), 4 ``m`` (multiline). The source is never compiled here; it is
+    carried verbatim so it can be written back.
+    """
+
     __slots__ = ("source", "options")
 
     def __init__(self, source: bytes, options: int):
         self.source = bytes(source)
         self.options = options
 
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "RubyRegexp(%r, %d)" % (self.source, self.options)
+
 
 class RubyFloat(float):
     """A Ruby ``Float`` that remembers its original textual form.
 
-    Ruby 1.8 wrote floats as a decimal string optionally followed by a NUL and
-    extra mantissa bits. Re-emitting the bytes we read keeps round trips exact
-    for values nobody edited.
+    Ruby writes floats as a decimal string, and Ruby 1.8 sometimes followed it
+    with a NUL and extra mantissa bits. Re-emitting the bytes we read keeps
+    round trips exact for values nobody edited.
     """
 
     __slots__ = ("raw",)
+
+    raw: bytes | None
 
     def __new__(cls, value: float, raw: bytes | None = None):
         self = super().__new__(cls, value)
@@ -185,7 +308,14 @@ class RubyFloat(float):
 
 
 class RubyHash:
-    """A Ruby ``Hash``, stored as ordered pairs so non-hashable keys survive."""
+    """A Ruby ``Hash``, stored as ordered pairs so non-hashable keys survive.
+
+    Lookups are a linear scan, which is the right trade at the sizes RPG Maker
+    reaches (a map's events, a project's MapInfos -- hundreds of entries, not
+    millions) and is what lets duplicate or unhashable keys round trip. A caller
+    doing repeated lookups in a loop should hoist ``dict(hash.items())`` out of
+    it rather than paying the scan each time.
+    """
 
     __slots__ = ("pairs", "default")
 
@@ -194,25 +324,29 @@ class RubyHash:
         self.default = default
 
     # -- mapping-ish helpers, keyed by value equality -------------------------
+    def _find(self, key: Any) -> int | None:
+        for index, (candidate, _) in enumerate(self.pairs):
+            if candidate == key:
+                return index
+        return None
+
     def get(self, key: Any, default: Any = None) -> Any:
-        for k, v in self.pairs:
-            if k == key:
-                return v
-        return default
+        index = self._find(key)
+        return self.pairs[index][1] if index is not None else default
 
     def set(self, key: Any, value: Any) -> None:
-        for i, (k, _) in enumerate(self.pairs):
-            if k == key:
-                self.pairs[i] = (key, value)
-                return
-        self.pairs.append((key, value))
+        index = self._find(key)
+        if index is None:
+            self.pairs.append((key, value))
+        else:
+            self.pairs[index] = (key, value)
 
     def delete(self, key: Any) -> bool:
-        for i, (k, _) in enumerate(self.pairs):
-            if k == key:
-                del self.pairs[i]
-                return True
-        return False
+        index = self._find(key)
+        if index is None:
+            return False
+        del self.pairs[index]
+        return True
 
     def keys(self) -> list[Any]:
         return [k for k, _ in self.pairs]
@@ -234,7 +368,7 @@ class RubyHash:
         return len(self.pairs)
 
     def __contains__(self, key: Any) -> bool:
-        return any(k == key for k, _ in self.pairs)
+        return self._find(key) is not None
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, RubyHash):
@@ -247,6 +381,17 @@ class RubyHash:
         return "RubyHash(%d pairs)" % len(self.pairs)
 
 
+def _infer_dim(xsize: int, ysize: int, zsize: int) -> int:
+    """How many dimensions a Table with these extents declares.
+
+    RGSS stores the declared dimension separately from the extents, and
+    ``Table#[]`` takes that many subscripts, so it has to match.
+    """
+    if zsize > 1:
+        return 3
+    return 2 if ysize > 1 else 1
+
+
 class Table:
     """The RGSS ``Table`` class: a 1-, 2- or 3-dimensional grid of 16-bit cells.
 
@@ -254,60 +399,85 @@ class Table:
     followed by ``size`` unsigned 16-bit little-endian values. Map tile data is
     the big one: ``xsize * ysize * zsize`` cells addressed ``[x, y, z]``.
 
-    Cells are held as the unsigned values found on disk (0..65535). Some tables
-    are semantically signed (animation frame data uses -1 for "no cell"), so
+    Cells live in an ``array("H")`` rather than a list: a 100k-cell map costs
+    ~200 KB this way against ~3.6 MB of boxed Python ints, and loaded files are
+    held in the project cache for the life of the server. Indexing, slicing,
+    ``len`` and iteration behave as they would for a list.
+
+    Values are the unsigned ones found on disk (0..65535). Some tables are
+    semantically signed (animation cell data uses -1 for "no cell"), so
     :meth:`get` takes ``signed=True`` rather than guessing per table.
     """
 
     __slots__ = ("dim", "xsize", "ysize", "zsize", "data")
 
+    CLASS_NAME = "Table"
     HEADER = struct.Struct("<5I")
+    CELL_BYTES = 2
 
     def __init__(self, xsize: int = 0, ysize: int = 1, zsize: int = 1,
-                 dim: int | None = None, data: list[int] | None = None):
+                 dim: int | None = None, data: Iterable[int] | None = None):
+        _check_extents(xsize, ysize, zsize)
         self.xsize = xsize
         self.ysize = ysize
         self.zsize = zsize
-        self.dim = dim if dim is not None else (3 if zsize > 1 else (2 if ysize > 1 else 1))
+        self.dim = dim if dim is not None else _infer_dim(xsize, ysize, zsize)
         size = xsize * ysize * zsize
         if data is None:
-            self.data = [0] * size
+            self.data = array("H", bytes(size * self.CELL_BYTES))
         else:
-            if len(data) != size:
+            self.data = array("H", data)
+            if len(self.data) != size:
                 raise ValueError(
                     "Table data length %d != %d*%d*%d = %d"
-                    % (len(data), xsize, ysize, zsize, size)
+                    % (len(self.data), xsize, ysize, zsize, size)
                 )
-            self.data = list(data)
 
     # -- serialisation --------------------------------------------------------
     @classmethod
     def from_payload(cls, payload: bytes) -> "Table":
-        if len(payload) < 20:
+        header = cls.HEADER.size
+        if len(payload) < header:
             raise ValueError("Table payload too short: %d bytes" % len(payload))
         dim, xsize, ysize, zsize, size = cls.HEADER.unpack_from(payload, 0)
-        # A declared size that disagrees with the dimensions means a corrupt
-        # file; surface it now rather than at write time.
+        if not 1 <= dim <= 3:
+            raise ValueError("Table declares %d dimensions, expected 1, 2 or 3" % dim)
+        # Validate the extents individually, not just their product: a header
+        # of xsize=0xFFFFFFFF, ysize=0 has a product of 0 and would otherwise be
+        # accepted, leaving an absurd xsize for every later consumer to iterate.
+        _check_extents(xsize, ysize, zsize)
         if xsize * ysize * zsize != size:
             raise ValueError(
                 "Table header inconsistent: %d*%d*%d != declared size %d"
                 % (xsize, ysize, zsize, size)
             )
-        expected = 20 + size * 2
-        if len(payload) < expected:
+        expected = header + size * cls.CELL_BYTES
+        if len(payload) != expected:
+            # Not just truncation: trailing bytes would be silently dropped by
+            # to_payload, so hand the payload back to the caller untouched.
             raise ValueError(
-                "Table payload truncated: need %d bytes, have %d" % (expected, len(payload))
+                "Table payload is %d bytes, expected exactly %d"
+                % (len(payload), expected)
             )
-        data = list(struct.unpack_from("<%dH" % size, payload, 20))
-        table = cls.__new__(cls)
-        table.dim, table.xsize, table.ysize, table.zsize = dim, xsize, ysize, zsize
-        table.data = data
-        return table
+        cells = array("H")
+        cells.frombytes(payload[header:expected])
+        if _BIG_ENDIAN:
+            cells.byteswap()
+        return cls(xsize, ysize, zsize, dim=dim, data=cells)
 
     def to_payload(self) -> bytes:
         size = len(self.data)
+        if self.xsize * self.ysize * self.zsize != size:
+            raise ValueError(
+                "Table extents %dx%dx%d disagree with its %d cells"
+                % (self.xsize, self.ysize, self.zsize, size)
+            )
         header = self.HEADER.pack(self.dim, self.xsize, self.ysize, self.zsize, size)
-        return header + struct.pack("<%dH" % size, *(v & 0xFFFF for v in self.data))
+        if _BIG_ENDIAN:
+            swapped = array("H", self.data)
+            swapped.byteswap()
+            return header + swapped.tobytes()
+        return header + self.data.tobytes()
 
     # -- cell access ----------------------------------------------------------
     def _index(self, x: int, y: int = 0, z: int = 0) -> int:
@@ -320,20 +490,31 @@ class Table:
 
     def get(self, x: int, y: int = 0, z: int = 0, signed: bool = False) -> int:
         value = self.data[self._index(x, y, z)]
-        if signed and value > 0x7FFF:
-            value -= 0x10000
+        if signed and value >= CELL_SIGN_BIT:
+            value -= CELL_MODULUS
         return value
 
-    def set(self, x: int, y: int, z: int, value: int) -> None:
-        self.data[self._index(x, y, z)] = value & 0xFFFF
+    def set(self, x: int, y: int = 0, z: int = 0, value: int = 0) -> None:
+        self.data[self._index(x, y, z)] = value & CELL_MASK
 
     def resize(self, xsize: int, ysize: int, zsize: int) -> "Table":
-        """Return a resized copy, preserving cells that still fit."""
-        out = Table(xsize, ysize, zsize, dim=self.dim)
-        for z in range(min(zsize, self.zsize)):
-            for y in range(min(ysize, self.ysize)):
-                for x in range(min(xsize, self.xsize)):
-                    out.set(x, y, z, self.get(x, y, z))
+        """Return a resized copy, preserving cells that still fit.
+
+        The declared dimension is recomputed from the new extents: RGSS
+        subscripts a Table by ``dim``, so carrying a 3-D ``dim`` onto a
+        single-layer table would leave its cells unreachable in the engine.
+        """
+        out = Table(xsize, ysize, zsize)
+        width = min(xsize, self.xsize)
+        if width:
+            # Row at a time: cells are contiguous along x, and a per-cell copy
+            # through get/set costs two Python calls per cell (seconds, on a
+            # large map resize).
+            for z in range(min(zsize, self.zsize)):
+                for y in range(min(ysize, self.ysize)):
+                    source = y * self.xsize + z * self.xsize * self.ysize
+                    target = y * xsize + z * xsize * ysize
+                    out.data[target:target + width] = self.data[source:source + width]
         return out
 
     @property
@@ -344,35 +525,62 @@ class Table:
         return "Table(%dx%dx%d, dim=%d)" % (self.xsize, self.ysize, self.zsize, self.dim)
 
 
+_BIG_ENDIAN = struct.pack("=H", 1) != struct.pack("<H", 1)
+
+
+def _check_extents(xsize: int, ysize: int, zsize: int) -> None:
+    """Refuse extents no real table has, before allocating for them."""
+    for name, value in (("xsize", xsize), ("ysize", ysize), ("zsize", zsize)):
+        if not isinstance(value, int) or value < 0:
+            raise ValueError("Table %s must be a non-negative whole number, got %r"
+                             % (name, value))
+        if value > MAX_TABLE_AXIS:
+            raise ValueError("Table %s of %d exceeds the %d cell limit per axis"
+                             % (name, value, MAX_TABLE_AXIS))
+    if xsize * ysize * zsize > MAX_TABLE_CELLS:
+        raise ValueError(
+            "a %dx%dx%d table is %d cells, above the %d this server will allocate"
+            % (xsize, ysize, zsize, xsize * ysize * zsize, MAX_TABLE_CELLS)
+        )
+
+
 class RGSSFloats:
     """Shared behaviour for ``Color`` and ``Tone``: four packed doubles."""
 
     __slots__ = ("values",)
     CLASS_NAME = ""
     FIELDS: tuple[str, ...] = ()
+    PACKER = struct.Struct("<4d")
 
     def __init__(self, values: Iterable[float]):
+        if not self.CLASS_NAME:
+            raise TypeError("RGSSFloats is abstract; use Color or Tone")
         vals = [float(v) for v in values]
-        if len(vals) != 4:
-            raise ValueError("%s needs 4 values, got %d" % (self.CLASS_NAME, len(vals)))
+        if len(vals) != len(self.FIELDS):
+            raise ValueError("%s needs %d values, got %d"
+                             % (self.CLASS_NAME, len(self.FIELDS), len(vals)))
         self.values = vals
 
     @classmethod
     def from_payload(cls, payload: bytes):
-        if len(payload) != 32:
+        if len(payload) != cls.PACKER.size:
             raise ValueError(
-                "%s payload must be 32 bytes, got %d" % (cls.CLASS_NAME, len(payload))
+                "%s payload must be %d bytes, got %d"
+                % (cls.CLASS_NAME, cls.PACKER.size, len(payload))
             )
-        return cls(struct.unpack("<4d", payload))
+        return cls(cls.PACKER.unpack(payload))
 
     def to_payload(self) -> bytes:
-        return struct.pack("<4d", *self.values)
+        return self.PACKER.pack(*self.values)
 
     def as_dict(self) -> dict[str, float]:
         return dict(zip(self.FIELDS, self.values))
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, type(self)) and self.values == other.values
+
+    # Value equality, identity hashing: mutable, and the link tables key on id().
+    __hash__ = object.__hash__
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return "%s%s" % (self.CLASS_NAME, tuple(self.values))

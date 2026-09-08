@@ -16,9 +16,14 @@ from ..commands import (
 )
 from ..commands import render_script
 from ..convert import apply_patch, normalize_strings, to_json
+from ..project import MAX_MAP_ID
 from ..rubytypes import RubyHash, RubyObject, RubyString
 from ..schema import new_event, new_event_command, new_page
 from .registry import (
+    StagedWrite,
+    int_list,
+    echo,
+    opt_dict,
     ARR,
     BOOL,
     Context,
@@ -30,7 +35,6 @@ from .registry import (
     ToolError,
     one_of,
     opt_bool,
-    opt_dict,
     opt_int,
     opt_list,
     opt_str,
@@ -58,7 +62,12 @@ DSL_HELP = (
     'from_variable) and script. For any other command, use '
     '{"raw": {"code": 231, "parameters": [...]}} -- see the command_reference '
     "tool for codes, and read a working example from the project before "
-    "guessing a parameter layout."
+    "guessing a parameter layout.\n\n"
+    'Limits the compiler enforces: Show Choices takes 1 to 4 choices, and '
+    '"branches" pairs with them by position. "text" may be a string with \\n '
+    "or an array of lines, and is split into four-line message boxes "
+    "automatically. Entries nest through then/else/loop/branches to a bounded "
+    'depth. A "raw" entry inherits the surrounding indent unless it sets one.'
 )
 
 
@@ -112,10 +121,17 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
     }),
 )
 def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
+    """Events on a map, or one common event, with rendered scripts."""
     include_raw = opt_bool(args, "include_raw")
     refresh = opt_bool(args, "refresh")
-    common_id = opt_int(args, "common_event_id")
-    map_id = opt_int(args, "map_id")
+    common_id = opt_int(args, "common_event_id", minimum=1)
+    map_id = opt_int(args, "map_id", minimum=1, maximum=MAX_MAP_ID)
+    if common_id is not None and map_id is not None:
+        # event_edit refuses this pair; reading used to ignore map_id silently,
+        # so the same arguments meant two different things in sibling tools.
+        raise ToolError(
+            "pass exactly one of map_id or common_event_id; both were given, "
+            "and map events and common events are read separately")
 
     if common_id is not None:
         common = ctx.project.get_entry("common_events", common_id, refresh)
@@ -143,7 +159,8 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(events, RubyHash):
         return {"map_id": map_id, "events": []}
 
-    wanted = {int(i) for i in opt_list(args, "event_ids")}
+    wanted = set(int_list(args, "event_ids", MAX_EVENT_IDS_PER_CALL,
+                          minimum=1, maximum=MAX_EVENT_ID))
     needle = (opt_str(args, "name_contains") or "").lower()
     only_page = opt_int(args, "page")
 
@@ -182,8 +199,12 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     schema({
         "map_id": prop(INT, "The map to edit. Required for every op except when "
                             "editing a common event."),
-        "common_event_id": prop(INT, "Edit this common event's command list instead "
-                                     "of a map."),
+        "common_event_id": prop(INT, "Edit this common event's command list "
+                                     "instead of a map. Only the ops "
+                                     "set_commands, append_commands and update "
+                                     "apply to a common event -- the page ops "
+                                     "are map-only. Pass exactly one of map_id "
+                                     "or common_event_id."),
         "ops": prop(ARR, "Operations, applied in order.", items={
             "type": OBJ,
             "properties": {
@@ -213,18 +234,44 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     writes=True,
 )
 def event_edit(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
+    """Apply ops to one map's events, or to one common event.
+
+    Mutations are staged, so a dry run, a refusal or an op that fails
+    partway leaves nothing for a later write to pick up. Refuses a patch
+    that sets a page's command list directly -- use set_commands, which
+    builds a list the interpreter can run.
+    """
     ops = opt_list(args, "ops")
     if not ops:
         raise ToolError("ops must contain at least one operation")
     dry_run = opt_bool(args, "dry_run")
-    common_id = opt_int(args, "common_event_id")
-    map_id = opt_int(args, "map_id")
+    common_id = opt_int(args, "common_event_id", minimum=1)
+    map_id = opt_int(args, "map_id", minimum=1, maximum=MAX_MAP_ID)
 
+    # Checked here, once, for both targets: the common-event branch used to
+    # skip it and turn a non-object op into an internal error.
+    for raw_op in ops:
+        if not isinstance(raw_op, dict):
+            raise ToolError("each op must be an object, got %s" % echo(raw_op))
+
+    if common_id is not None and map_id is not None:
+        raise ToolError(
+            "pass exactly one of map_id or common_event_id; both were given, "
+            "and map events and common events are edited separately")
     if common_id is not None:
         return _edit_common_event(ctx, common_id, ops, dry_run)
     if map_id is None:
         raise ToolError("pass map_id (for map events) or common_event_id")
 
+    filename = ctx.project.map_file(map_id)
+    with ctx.staged(filename) as write_landed:
+        return _apply_event_ops(ctx, map_id, filename, ops, dry_run,
+                                write_landed)
+
+
+def _apply_event_ops(ctx: Context, map_id: int, filename: str,
+                     ops: list[Any], dry_run: bool,
+                     write_landed: StagedWrite) -> dict[str, Any]:
     game_map = ctx.project.load_map(map_id)
     events = game_map.get("events")
     if not isinstance(events, RubyHash):
@@ -234,19 +281,68 @@ def event_edit(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 
     applied = []
     for raw_op in ops:
-        if not isinstance(raw_op, dict):
-            raise ToolError("each op must be an object, got %r" % (raw_op,))
         applied.append(_apply_event_op(ctx, events, raw_op, width, height))
 
     write = ctx.project.save_file(
-        ctx.project.map_file(map_id), dry_run=dry_run, tool="event_edit",
+        filename, dry_run=dry_run, tool="event_edit",
         summary="; ".join(str(a.get("summary", a.get("op"))) for a in applied),
     )
+    if not dry_run:
+        write_landed.done()
     return {"map_id": map_id, "applied": applied, "write": write}
 
 
+# The highest event id a map will hold. The editor numbers events from 1 and no
+# real map comes near this.
+MAX_EVENT_ID = 9999
+
+# How many events one read will render. Each carries its whole command list as
+# a readable script, so this is a response budget rather than a map limit.
+MAX_EVENT_IDS_PER_CALL = 200
+
+# Page fields a patch must not set, because the tool cannot then guarantee what
+# it wrote is a page the interpreter can run.
+UNPATCHABLE_PAGE_FIELDS = ("list", "id")
+
+
+def _range_text(ids: list[int]) -> str:
+    """The ids that exist, said briefly enough to put in a message."""
+    if not ids:
+        return "none at all"
+    if len(ids) <= 12:
+        return ", ".join(str(i) for i in sorted(ids))
+    return "%d to %d" % (min(ids), max(ids))
+
+
+def _check_page_patch(patch: dict[str, Any]) -> None:
+    """Refuse a patch that would write a command list the tool did not build.
+
+    A page's @list has invariants the DSL exists to hold -- a Show Text needs
+    its 401 lines, a list needs its blank terminator -- and a patch goes
+    straight through to the file, so it could leave a page the interpreter
+    misreads. `set_commands` is the way to change a command list.
+    """
+    for field in UNPATCHABLE_PAGE_FIELDS:
+        if field in patch:
+            raise ToolError(
+                "%s cannot be set with a patch. Use op \"set_commands\" or "
+                "\"append_commands\" to change what a page runs, so the "
+                "command list is built correctly." % field)
+
+
 def _check_bounds(x: Any, y: Any, width: int, height: int) -> None:
-    """Keep events on the map: the editor cannot select one placed outside it."""
+    """Keep events on the map: the editor cannot select one placed outside it.
+
+    A map whose width or height does not read as a positive number is refused
+    rather than treated as unbounded -- "we could not tell" is not a reason to
+    allow a placement nothing can check.
+    """
+    if not isinstance(width, int) or not isinstance(height, int) \
+            or width < 1 or height < 1:
+        raise ToolError(
+            "this map does not report a usable size (%r x %r), so an event "
+            "position cannot be checked against it. Run validate to see what "
+            "is wrong with the map." % (width, height))
     if not isinstance(x, int) or not isinstance(y, int):
         raise ToolError("event coordinates must be whole numbers, got (%r, %r)" % (x, y))
     if x < 0 or y < 0 or (width and x >= width) or (height and y >= height):
@@ -264,11 +360,20 @@ def _apply_event_op(ctx: Context, events: RubyHash, raw_op: dict[str, Any],
 
     if op == "create":
         used = {k for k in events.keys() if isinstance(k, int)}
-        event_id = opt_int(raw_op, "event_id") or next(
-            i for i in range(1, 10000) if i not in used)
-        if event_id in used:
+        # `or next(...)` treated an explicit 0 as "choose one for me", so a
+        # caller naming an id it should have been told was invalid silently got
+        # a different event.
+        event_id = opt_int(raw_op, "event_id", minimum=1, maximum=MAX_EVENT_ID)
+        if event_id is None:
+            event_id = next((i for i in range(1, MAX_EVENT_ID + 1)
+                             if i not in used), None)
+            if event_id is None:
+                raise ToolError("this map already has %d events, which is as "
+                                "many as it can hold" % MAX_EVENT_ID)
+        elif event_id in used:
             raise ToolError("event %d already exists on this map" % event_id)
-        x, y = opt_int(raw_op, "x", 0) or 0, opt_int(raw_op, "y", 0) or 0
+        x = opt_int(raw_op, "x", 0, minimum=0) or 0
+        y = opt_int(raw_op, "y", 0, minimum=0) or 0
         _check_bounds(x, y, width, height)
         event = normalize_strings(
             new_event(event_id, opt_str(raw_op, "name") or "", x, y), ctx.codec)
@@ -276,8 +381,10 @@ def _apply_event_op(ctx: Context, events: RubyHash, raw_op: dict[str, Any],
             apply_patch(event, {"name": raw_op["name"]}, ctx.codec)
         page = event.get("pages")[0]
         changes = []
-        if raw_op.get("patch"):
-            changes = apply_patch(page, raw_op["patch"], ctx.codec)
+        patch = opt_dict(raw_op, "patch")
+        if patch:
+            _check_page_patch(patch)
+            changes = apply_patch(page, patch, ctx.codec)
         if raw_op.get("commands") is not None:
             page.set("list", _build_list(ctx, raw_op["commands"]))
         events.set(event_id, event)
@@ -306,13 +413,21 @@ def _apply_event_op(ctx: Context, events: RubyHash, raw_op: dict[str, Any],
                 "summary": "moved event %d to (%d, %d)" % (event_id, x, y)}
 
     if op == "update":
+        # Resolved and checked first: patching x and then finding y out of
+        # bounds left the event half-moved in the cached map.
+        wanted = {}
+        for field in ("x", "y"):
+            if raw_op.get(field) is not None:
+                wanted[field] = opt_int(raw_op, field, minimum=0)
+        if not wanted and opt_str(raw_op, "name") is None:
+            raise ToolError("update needs a name, x or y")
+        _check_bounds(wanted.get("x", event.get("x")),
+                      wanted.get("y", event.get("y")), width, height)
         changes = []
         if opt_str(raw_op, "name") is not None:
             changes += apply_patch(event, {"name": raw_op["name"]}, ctx.codec)
-        for field in ("x", "y"):
-            if raw_op.get(field) is not None:
-                changes += apply_patch(event, {field: int(raw_op[field])}, ctx.codec)
-        _check_bounds(event.get("x"), event.get("y"), width, height)
+        for field, value in wanted.items():
+            changes += apply_patch(event, {field: value}, ctx.codec)
         if not changes:
             raise ToolError("update needs a name, x or y")
         return {"op": op, "event_id": event_id, "changes": changes,
@@ -322,7 +437,9 @@ def _apply_event_op(ctx: Context, events: RubyHash, raw_op: dict[str, Any],
 
     if op == "add_page":
         page = normalize_strings(new_page(), ctx.codec)
-        changes = apply_patch(page, raw_op["patch"], ctx.codec) if raw_op.get("patch") else []
+        patch = opt_dict(raw_op, "patch")
+        _check_page_patch(patch)
+        changes = apply_patch(page, patch, ctx.codec) if patch else []
         if raw_op.get("commands") is not None:
             page.set("list", _build_list(ctx, raw_op["commands"]))
         pages.append(page)
@@ -384,7 +501,24 @@ def _edit_common_event(ctx: Context, common_id: int, ops: list[Any],
                        dry_run: bool) -> dict[str, Any]:
     common = ctx.project.get_entry("common_events", common_id)
     if common is None:
-        raise ToolError("there is no common event %d" % common_id)
+        known = [i for i, _ in ctx.project.entries("common_events")]
+        raise ToolError(
+            "there is no common event %d; this project has %s"
+            % (common_id, _range_text(known)))
+    if not isinstance(common, RubyObject):
+        raise ToolError(
+            "common event %d does not hold an RPG::CommonEvent object, so it "
+            "cannot be edited. Run validate to see what is wrong with the file."
+            % common_id)
+    filename = ctx.project.filename_for("common_events")
+    with ctx.staged(filename) as write_landed:
+        return _apply_common_ops(ctx, common_id, common, filename, ops,
+                                 dry_run, write_landed)
+
+
+def _apply_common_ops(ctx: Context, common_id: int, common: RubyObject,
+                      filename: str, ops: list[Any], dry_run: bool,
+                      write_landed: StagedWrite) -> dict[str, Any]:
     applied = []
     for raw_op in ops:
         op = one_of(raw_op, "op", ["set_commands", "append_commands", "update"])
@@ -394,9 +528,17 @@ def _edit_common_event(ctx: Context, common_id: int, ops: list[Any],
                 patch = dict(patch, name=raw_op["name"])
             if not patch:
                 raise ToolError("update needs a patch or name")
-            applied.append({"op": op, "changes": apply_patch(common, patch, ctx.codec)})
+            _check_page_patch(patch)
+            applied.append({"op": op,
+                            "changes": apply_patch(common, patch, ctx.codec)})
             continue
         entries = opt_list(raw_op, "commands")
+        if not entries:
+            # An empty list would replace the whole body with a single blank
+            # command, which is a deletion dressed up as an edit.
+            raise ToolError(
+                "%s needs at least one command. To empty a common event, set "
+                "its trigger to none in the editor instead." % op)
         if op == "set_commands":
             common.set("list", _build_list(ctx, entries))
         else:
@@ -408,9 +550,11 @@ def _edit_common_event(ctx: Context, common_id: int, ops: list[Any],
         applied.append({"op": op, "commands": len(common.get("list"))})
 
     write = ctx.project.save_file(
-        ctx.project.filename_for("common_events"), dry_run=dry_run, tool="event_edit",
+        filename, dry_run=dry_run, tool="event_edit",
         summary="edited common event %d" % common_id,
     )
+    if not dry_run:
+        write_landed.done()
     return {"common_event_id": common_id, "applied": applied, "write": write}
 
 
@@ -450,7 +594,8 @@ def _insert_move_route_steps(commands: list[RubyObject]) -> list[RubyObject]:
 @tool(
     "command_reference",
     "Look up event command codes",
-    "The event command codes RPG Maker VX uses, and how to write them with "
+    "The event command codes this project's engine dispatches, and how to "
+    "write them with "
     "event_edit. Search by name or look up a single code to see its parameter "
     "layout where that layout is confirmed.",
     schema({
@@ -460,6 +605,7 @@ def _insert_move_route_steps(commands: list[RubyObject]) -> list[RubyObject]:
     }),
 )
 def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
+    """The command codes this project's engine dispatches. Reads only."""
     if opt_bool(args, "move_commands"):
         return {
             "move_commands": [{"code": code, "name": name}
@@ -476,17 +622,24 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     code = opt_int(args, "code")
     if code is not None:
         entry: dict[str, Any] = {"code": code, "name": command_name(code)}
+        # A list, because both notes can apply at once: a code this engine
+        # does not dispatch AND whose layout is unrecorded used to lose the
+        # first message to the second, leaving the model hunting for an example
+        # of a command its engine cannot run.
+        notes: list[str] = []
         if code not in table:
-            entry["note"] = (
-                "%s does not dispatch this code, so it should not appear in this "
-                "project's events." % ctx.project.profile.label)
+            notes.append(
+                "%s does not dispatch this code, so it should not appear in "
+                "this project's events." % ctx.project.profile.label)
         if code in specs:
             entry["parameters"] = specs[code]
         else:
             entry["parameters"] = None
-            entry["note"] = ("This command's parameter layout is not recorded here. "
-                             "Read an event that already uses it (event_get with "
-                             "include_raw) and copy the shape.")
+            notes.append("This command's parameter layout is not recorded here. "
+                         "Read an event that already uses it (event_get with "
+                         "include_raw) and copy the shape.")
+        if notes:
+            entry["notes"] = notes
         return entry
 
     needle = (opt_str(args, "search") or "").lower()
