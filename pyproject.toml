@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rpgvxace-mcp"
+version = "0.1.0"
+description = "MCP server for RPG Maker VX Ace and VX projects: reads and writes Data/*.rvdata2 directly, with no Ruby needed"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["mcp", "model-context-protocol", "rpg-maker", "rpg-maker-vx-ace",
+            "rpg-maker-vx", "rgss3", "rgss2", "ruby-marshal"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Games/Entertainment",
+    "Topic :: Software Development :: Libraries",
+]
+# No runtime dependencies on purpose: the point of this server is that a VX Ace
+# project needs nothing beyond Python to work on.
+dependencies = []
+
+[project.scripts]
+rpgvxace-mcp = "rpgvxace_mcp.__main__:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests/fixtures"]

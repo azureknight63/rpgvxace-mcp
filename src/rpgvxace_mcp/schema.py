@@ -1,0 +1,638 @@
+"""What lives in an RPG Maker VX Ace (or VX) project, and how to build new pieces.
+
+Three kinds of knowledge live here, deliberately kept apart:
+
+* **Documented** structure, from the RGSS reference that ships with the editor.
+  Used for field descriptions and templates.
+* **Engine profile.** VX Ace and VX share a serialisation format and most of
+  their class model, but not all of it, so each engine gets its own file
+  registry, map layer meanings and templates.
+* **Observed** structure, read back from the project on disk by
+  :func:`observe_class_fields`. When documentation and project disagree, the
+  project wins -- a file's real instance variables are the only authority for
+  what the editor will accept.
+
+The differences that matter between the two engines:
+
+===================  =============================  ========================
+                     VX Ace (RGSS3, ``.rvdata2``)   VX (RGSS2, ``.rvdata``)
+===================  =============================  ========================
+Tilesets             ``Tilesets.rvdata2`` database  one global tileset, no
+                     and ``RPG::Map#tileset_id``    database, no tileset_id
+Encounter areas      none (regions on map layer 3)  ``Areas.rvdata``
+Map tile layers      4 (2 tiles, shadow, region)    3 (2 tiles, shadow)
+Audio references     ``RPG::BGM``/``BGS``/``ME``/   ``RPG::AudioFile``
+                     ``SE``
+Item/actor stats     ``features``, ``params``,      flat fields, parameter
+                     damage ``formula``             curves as Tables
+Event commands       adds 104, 105, 137, 138, 216,  --
+                     217, 243, 244, 261, 281-285,
+                     324
+Strings              Ruby 1.9: carry an encoding    Ruby 1.8: bare bytes
+===================  =============================  ========================
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from .rubytypes import RubyHash, RubyObject, RubyString, Table
+
+DATA_DIR = "Data"
+
+# Marker for how a data file's top-level container is shaped.
+ARRAY, HASH, SINGLE, SCRIPTS = "array", "hash", "single", "scripts"
+
+
+class DataFile:
+    """One file under ``Data/``."""
+
+    __slots__ = ("key", "stem", "container", "cls", "description")
+
+    def __init__(self, key: str, stem: str, container: str, cls: str, description: str):
+        self.key = key
+        self.stem = stem
+        self.container = container
+        self.cls = cls
+        self.description = description
+
+    def filename(self, extension: str) -> str:
+        return self.stem + extension
+
+
+def _data_file_list(*entries: DataFile) -> dict[str, DataFile]:
+    return {entry.key: entry for entry in entries}
+
+
+# Tables both engines have. Class names that differ are patched per profile.
+_SHARED_FILES = [
+    DataFile("actors", "Actors", ARRAY, "RPG::Actor", "Playable characters"),
+    DataFile("classes", "Classes", ARRAY, "RPG::Class",
+             "Character classes, their skills and parameter curves"),
+    DataFile("skills", "Skills", ARRAY, "RPG::Skill",
+             "Skills usable by actors and enemies"),
+    DataFile("items", "Items", ARRAY, "RPG::Item", "Consumable and key items"),
+    DataFile("weapons", "Weapons", ARRAY, "RPG::Weapon", "Weapons"),
+    DataFile("armors", "Armors", ARRAY, "RPG::Armor", "Armour and accessories"),
+    DataFile("enemies", "Enemies", ARRAY, "RPG::Enemy", "Enemy definitions"),
+    DataFile("troops", "Troops", ARRAY, "RPG::Troop",
+             "Enemy groups used by encounters, plus their battle event pages"),
+    DataFile("states", "States", ARRAY, "RPG::State",
+             "Status effects (poison, sleep, ...)"),
+    DataFile("animations", "Animations", ARRAY, "RPG::Animation",
+             "Battle and map animations"),
+    DataFile("common_events", "CommonEvents", ARRAY, "RPG::CommonEvent",
+             "Shared event pages callable from anywhere"),
+    DataFile("system", "System", SINGLE, "RPG::System",
+             "Party start position, switch and variable names, terms, vehicles"),
+    DataFile("map_infos", "MapInfos", HASH, "RPG::MapInfo",
+             "The map tree: names, parents and ordering"),
+    DataFile("scripts", "Scripts", SCRIPTS, "-",
+             "The script editor contents, zlib-compressed"),
+]
+
+ACE_DATA_FILES = _data_file_list(
+    *_SHARED_FILES,
+    DataFile("tilesets", "Tilesets", ARRAY, "RPG::Tileset",
+             "Tilesets: their nine graphic files and per-tile passage flags"),
+)
+
+VX_DATA_FILES = _data_file_list(
+    *_SHARED_FILES,
+    DataFile("areas", "Areas", HASH, "RPG::Area",
+             "Encounter areas (VX only; VX Ace replaced these with map regions)"),
+)
+
+# Every table name any supported engine knows, for tool schemas that must be
+# built before a project is open.
+ALL_TABLE_KEYS = sorted(set(ACE_DATA_FILES) | set(VX_DATA_FILES))
+ALL_DATABASE_TABLES = sorted(
+    key for key in ALL_TABLE_KEYS
+    if (ACE_DATA_FILES.get(key) or VX_DATA_FILES[key]).container in (ARRAY, HASH)
+)
+
+
+def map_filename(map_id: int, extension: str) -> str:
+    """``5`` -> ``Map005.rvdata2``. Ids above 999 keep growing, as the editor does."""
+    if map_id < 1:
+        raise ValueError("map ids start at 1, got %d" % map_id)
+    return "Map%03d%s" % (map_id, extension)
+
+
+# ---------------------------------------------------------------------------
+# Documented class fields
+# ---------------------------------------------------------------------------
+
+# Classes whose structure is identical in both engines.
+SHARED_CLASS_FIELDS: dict[str, dict[str, str]] = {
+    "RPG::MapInfo": {
+        "name": "Map name as shown in the map tree",
+        "parent_id": "Parent map id, 0 at the tree root",
+        "order": "Position in the map tree (editor bookkeeping)",
+        "expanded": "Whether the tree node is expanded (editor bookkeeping)",
+        "scroll_x": "Editor scroll position",
+        "scroll_y": "Editor scroll position",
+    },
+    "RPG::Event": {
+        "id": "Event id, unique within the map",
+        "name": "Event name (editor only, not shown in game)",
+        "x": "Tile X coordinate",
+        "y": "Tile Y coordinate",
+        "pages": "Array of RPG::Event::Page, evaluated last to first",
+    },
+    "RPG::Event::Page": {
+        "condition": "RPG::Event::Page::Condition gating this page",
+        "graphic": "RPG::Event::Page::Graphic shown for the event",
+        "move_type": "0: fixed, 1: random, 2: approach, 3: custom",
+        "move_speed": "1: x8 slower ... 4: normal ... 6: x4 faster",
+        "move_frequency": "1: lowest ... 3: normal ... 5: highest",
+        "move_route": "RPG::MoveRoute, used when move_type is 3 (custom)",
+        "walk_anime": "[Walking Anim.] option",
+        "step_anime": "[Stepping Anim.] option",
+        "direction_fix": "[Direction Fix] option",
+        "through": "[Through] option",
+        "priority_type": "0: below characters, 1: same as characters, 2: above",
+        "trigger": "0: action button, 1: player touch, 2: event touch, "
+                   "3: autorun, 4: parallel process",
+        "list": "Array of RPG::EventCommand",
+    },
+    "RPG::Event::Page::Condition": {
+        "switch1_valid": "Whether the first switch condition applies",
+        "switch2_valid": "Whether the second switch condition applies",
+        "variable_valid": "Whether the variable condition applies",
+        "self_switch_valid": "Whether the self switch condition applies",
+        "item_valid": "Whether the item condition applies",
+        "actor_valid": "Whether the actor condition applies",
+        "switch1_id": "First switch id",
+        "switch2_id": "Second switch id",
+        "variable_id": "Variable id",
+        "variable_value": "Page runs when the variable is this value or greater",
+        "self_switch_ch": "Self switch letter, A to D",
+        "item_id": "Required item id",
+        "actor_id": "Required party member id",
+    },
+    "RPG::Event::Page::Graphic": {
+        "tile_id": "Tile id when the event is drawn as a tile, else 0",
+        "character_name": "Character sprite file name in Graphics/Characters",
+        "character_index": "Which of the 8 sprites in the file (0..7)",
+        "direction": "2: down, 4: left, 6: right, 8: up",
+        "pattern": "Animation frame (0..2)",
+    },
+    "RPG::MoveRoute": {
+        "repeat": "[Repeat Action] option",
+        "skippable": "[Skip If Cannot Move] option",
+        "wait": "[Wait for Completion] option",
+        "list": "Array of RPG::MoveCommand",
+    },
+    "RPG::EventCommand": {
+        "code": "Command code; 0 marks a blank line",
+        "indent": "Nesting depth, driven by branch and loop commands",
+        "parameters": "Array whose shape depends on code",
+    },
+    "RPG::MoveCommand": {
+        "code": "Move command code",
+        "parameters": "Array whose shape depends on code",
+    },
+    "RPG::CommonEvent": {
+        "id": "Common event id",
+        "name": "Common event name",
+        "trigger": "0: none, 1: autorun, 2: parallel",
+        "switch_id": "Switch that enables an autorun or parallel common event",
+        "list": "Array of RPG::EventCommand",
+    },
+}
+
+_MAP_FIELDS_SHARED = {
+    "width": "Map width in tiles",
+    "height": "Map height in tiles",
+    "scroll_type": "0: no loop, 1: vertical loop, 2: horizontal loop, 3: both",
+    "autoplay_bgm": "Whether BGM switches automatically on entry",
+    "bgm": "Music played when autoplay_bgm is true",
+    "autoplay_bgs": "Whether BGS switches automatically on entry",
+    "bgs": "Ambient sound played when autoplay_bgs is true",
+    "disable_dashing": "Whether the [Disable Dashing] option is set",
+    "encounter_list": "Encounter entries for this map",
+    "encounter_step": "Average number of steps between encounters",
+    "parallax_name": "Parallax background graphic file name",
+    "parallax_loop_x": "Parallax [Loop Horizontal] option",
+    "parallax_loop_y": "Parallax [Loop Vertical] option",
+    "parallax_sx": "Parallax automatic X scroll speed",
+    "parallax_sy": "Parallax automatic Y scroll speed",
+    "parallax_show": "Parallax [Show in the Editor] option",
+    "data": "Table of tile ids",
+    "events": "Hash of event id => RPG::Event",
+}
+
+ACE_CLASS_FIELDS: dict[str, dict[str, str]] = {
+    "RPG::Map": dict(_MAP_FIELDS_SHARED, **{
+        "tileset_id": "Which RPG::Tileset this map draws with",
+        "display_name": "Name shown to the player on entry (blank for none)",
+        "note": "The map's Note field, free text for the developer or scripts",
+        "specify_battleback": "Whether this map overrides the battle background",
+        "battleback1_name": "Battle background floor graphic",
+        "battleback2_name": "Battle background wall graphic",
+        "data": "Table of tile ids, width x height x 4 layers",
+        "encounter_list": "Array of RPG::Map::Encounter (troop, weight, region set)",
+    }),
+    "RPG::Tileset": {
+        "id": "Tileset id",
+        "name": "Tileset name in the database",
+        "mode": "0: field type (uses the A1 water/A2 ground autotile layout), "
+                "1: area type",
+        "note": "Free text Note field",
+        "tileset_names": "Nine graphic file names, in order: "
+                         "A1, A2, A3, A4, A5, B, C, D, E",
+        "flags": "Table of 8192 per-tile flag words: passage, bush, counter, "
+                 "ladder, damage floor, vehicle passage and terrain tag",
+    },
+    "RPG::BGM": {"name": "File name in Audio/BGM", "volume": "0..100",
+                 "pitch": "50..150"},
+    "RPG::BGS": {"name": "File name in Audio/BGS", "volume": "0..100",
+                 "pitch": "50..150"},
+    "RPG::ME": {"name": "File name in Audio/ME", "volume": "0..100",
+                "pitch": "50..150"},
+    "RPG::SE": {"name": "File name in Audio/SE", "volume": "0..100",
+                "pitch": "50..150"},
+    "RPG::BaseItem::Feature": {
+        "code": "What the feature affects (parameter, element rate, skill, ...)",
+        "data_id": "Which thing of that kind",
+        "value": "The feature's magnitude",
+    },
+    "RPG::UsableItem::Damage": {
+        "type": "0: none, 1: HP damage, 2: MP damage, 3: HP recover, "
+                "4: MP recover, 5: HP drain, 6: MP drain",
+        "element_id": "Damage element",
+        "formula": "Ruby expression evaluated for the damage value",
+        "variance": "Random spread, as a percentage",
+        "critical": "Whether critical hits apply",
+    },
+    "RPG::UsableItem::Effect": {
+        "code": "Which effect (recover HP, add state, learn skill, ...)",
+        "data_id": "Which thing of that kind",
+        "value1": "First magnitude",
+        "value2": "Second magnitude",
+    },
+    "RPG::Troop::Page": {
+        "condition": "RPG::Troop::Page::Condition gating this battle event page",
+        "span": "0: battle, 1: turn, 2: moment",
+        "list": "Array of RPG::EventCommand",
+    },
+}
+
+VX_CLASS_FIELDS: dict[str, dict[str, str]] = {
+    "RPG::Map": dict(_MAP_FIELDS_SHARED, **{
+        "data": "Table of tile ids, width x height x 3 layers",
+        "encounter_list": "Array of troop ids that can be encountered",
+    }),
+    "RPG::AudioFile": {
+        "name": "File name without extension",
+        "volume": "Volume, 0..100",
+        "pitch": "Pitch, 50..150",
+    },
+    "RPG::Area": {
+        "id": "Area id",
+        "name": "Area name",
+        "map_id": "The map the area belongs to",
+        "rect": "Rect covering the area",
+        "encounter_list": "Array of troop ids encountered inside the area",
+        "order": "Position in the map tree (editor bookkeeping)",
+    },
+}
+
+# Tile id ranges, shared by both engines (VX introduced the layout, Ace kept
+# it). Advisory: derived from the RGSS tilemap rather than the reference manual,
+# so read a working map with map_tiles before relying on a specific number.
+TILE_ID_RANGES = {
+    "B": (0, 255),
+    "C": (256, 511),
+    "D": (512, 767),
+    "E": (768, 1023),
+    "A5": (1536, 1663),
+    "A1": (2048, 2815),
+    "A2": (2816, 4351),
+    "A3": (4352, 5887),
+    "A4": (5888, 8191),
+}
+
+ACE_MAP_LAYERS = {
+    0: "lower layer (ground, A tiles)",
+    1: "upper layer (B-E tiles placed over the ground)",
+    2: "shadow layer (4-bit mask per tile, 0 for none)",
+    3: "region layer (region id 0-63, 0 for none)",
+}
+
+VX_MAP_LAYERS = {
+    0: "lower layer (ground, A tiles)",
+    1: "upper layer (B-E tiles placed over the ground)",
+    2: "shadow layer (4-bit mask per tile, 0 for none)",
+}
+
+# Bits in an RPG::Tileset flags word. Advisory: taken from how RGSS3 reads them
+# at runtime, not from the reference manual.
+TILESET_FLAG_BITS = {
+    "0x000f": "passage: 1 blocks down, 2 left, 4 right, 8 up (15 blocks all)",
+    "0x0010": "star -- drawn above the character",
+    "0x0020": "ladder",
+    "0x0040": "bush",
+    "0x0080": "counter",
+    "0x0100": "damage floor",
+    "0x0200": "boat cannot pass",
+    "0x0400": "ship cannot pass",
+    "0x0800": "airship cannot land",
+    "0xf000": "terrain tag (0-7), in the high nibble",
+}
+
+
+# ---------------------------------------------------------------------------
+# Templates for new objects
+# ---------------------------------------------------------------------------
+
+
+def rstr(text: str = "", encoding: str = "utf-8") -> RubyString:
+    return RubyString(text.encode(encoding, "surrogateescape"))
+
+
+def new_event_command(code: int = 0, indent: int = 0,
+                      parameters: list[Any] | None = None) -> RubyObject:
+    return RubyObject("RPG::EventCommand", {
+        "@code": code, "@indent": indent, "@parameters": parameters or [],
+    })
+
+
+def new_move_command(code: int = 0, parameters: list[Any] | None = None) -> RubyObject:
+    return RubyObject("RPG::MoveCommand", {
+        "@code": code, "@parameters": parameters or [],
+    })
+
+
+def new_move_route() -> RubyObject:
+    return RubyObject("RPG::MoveRoute", {
+        "@repeat": True,
+        "@skippable": False,
+        "@wait": False,
+        "@list": [new_move_command(0)],
+    })
+
+
+def new_condition() -> RubyObject:
+    return RubyObject("RPG::Event::Page::Condition", {
+        "@switch1_valid": False,
+        "@switch2_valid": False,
+        "@variable_valid": False,
+        "@self_switch_valid": False,
+        "@item_valid": False,
+        "@actor_valid": False,
+        "@switch1_id": 1,
+        "@switch2_id": 1,
+        "@variable_id": 1,
+        "@variable_value": 0,
+        "@self_switch_ch": rstr("A"),
+        "@item_id": 1,
+        "@actor_id": 1,
+    })
+
+
+def new_graphic() -> RubyObject:
+    return RubyObject("RPG::Event::Page::Graphic", {
+        "@tile_id": 0,
+        "@character_name": rstr(""),
+        "@character_index": 0,
+        "@direction": 2,
+        "@pattern": 0,
+    })
+
+
+def new_page() -> RubyObject:
+    return RubyObject("RPG::Event::Page", {
+        "@condition": new_condition(),
+        "@graphic": new_graphic(),
+        "@move_type": 0,
+        "@move_speed": 3,
+        "@move_frequency": 3,
+        "@move_route": new_move_route(),
+        "@walk_anime": True,
+        "@step_anime": False,
+        "@direction_fix": False,
+        "@through": False,
+        "@priority_type": 0,
+        "@trigger": 0,
+        # A page always ends with a blank command; the interpreter relies on it.
+        "@list": [new_event_command(0, 0, [])],
+    })
+
+
+def new_event(event_id: int, name: str = "", x: int = 0, y: int = 0) -> RubyObject:
+    return RubyObject("RPG::Event", {
+        "@id": event_id,
+        "@name": rstr(name or "EV%03d" % event_id),
+        "@x": x,
+        "@y": y,
+        "@pages": [new_page()],
+    })
+
+
+def new_map_info(name: str, parent_id: int = 0, order: int = 0) -> RubyObject:
+    return RubyObject("RPG::MapInfo", {
+        "@name": rstr(name),
+        "@parent_id": parent_id,
+        "@order": order,
+        "@expanded": False,
+        "@scroll_x": 0,
+        "@scroll_y": 0,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Engine profiles
+# ---------------------------------------------------------------------------
+
+
+class EngineProfile:
+    """Everything about a project that depends on which engine made it."""
+
+    __slots__ = ("key", "label", "project_file", "extension", "data_files",
+                 "class_fields", "map_layers", "tile_layer_count", "audio_classes",
+                 "string_ivars", "notes")
+
+    def __init__(self, key: str, label: str, project_file: str, extension: str,
+                 data_files: dict[str, DataFile], class_fields: dict[str, dict[str, str]],
+                 map_layers: dict[int, str], audio_classes: dict[str, str],
+                 string_ivars: dict[str, Any], notes: list[str]):
+        self.key = key
+        self.label = label
+        self.project_file = project_file
+        self.extension = extension
+        self.data_files = data_files
+        self.class_fields = class_fields
+        self.map_layers = map_layers
+        self.tile_layer_count = len(map_layers)
+        self.audio_classes = audio_classes
+        # The ivar record this engine's Ruby puts on every string.
+        self.string_ivars = dict(string_ivars)
+        self.notes = notes
+
+    # -- files ----------------------------------------------------------------
+    def data_file(self, key: str) -> DataFile:
+        entry = self.data_files.get(key)
+        if entry is None:
+            other = ALL_TABLE_KEYS
+            if key in other:
+                raise KeyError(
+                    "%s has no %s table. %s"
+                    % (self.label, key, _table_absence_hint(self.key, key))
+                )
+            raise KeyError(
+                "unknown data table %r; this project has: %s"
+                % (key, ", ".join(sorted(self.data_files)))
+            )
+        return entry
+
+    def filename_for(self, key: str) -> str:
+        return self.data_file(key).filename(self.extension)
+
+    def map_filename(self, map_id: int) -> str:
+        return map_filename(map_id, self.extension)
+
+    def database_tables(self) -> list[str]:
+        return sorted(k for k, f in self.data_files.items()
+                      if f.container in (ARRAY, HASH))
+
+    # -- objects --------------------------------------------------------------
+    def new_audio_file(self, kind: str = "bgm", name: str = "",
+                       volume: int = 100, pitch: int = 100) -> RubyObject:
+        """Build the audio object this engine uses for ``kind``."""
+        cls = self.audio_classes.get(kind, self.audio_classes["bgm"])
+        return RubyObject(cls, {
+            "@name": rstr(name), "@volume": volume, "@pitch": pitch,
+        })
+
+    def new_map(self, width: int = 20, height: int = 15,
+                tileset_id: int = 1) -> RubyObject:
+        ivars: dict[str, Any] = {
+            "@display_name": rstr(""),
+            "@tileset_id": tileset_id,
+            "@width": width,
+            "@height": height,
+            "@scroll_type": 0,
+            "@specify_battleback": False,
+            "@battleback1_name": rstr(""),
+            "@battleback2_name": rstr(""),
+            "@autoplay_bgm": False,
+            "@bgm": self.new_audio_file("bgm"),
+            "@autoplay_bgs": False,
+            "@bgs": self.new_audio_file("bgs", "", 80),
+            "@disable_dashing": False,
+            "@encounter_list": [],
+            "@encounter_step": 30,
+            "@parallax_name": rstr(""),
+            "@parallax_loop_x": False,
+            "@parallax_loop_y": False,
+            "@parallax_sx": 0,
+            "@parallax_sy": 0,
+            "@parallax_show": False,
+            "@note": rstr(""),
+            "@data": Table(width, height, self.tile_layer_count),
+            "@events": RubyHash(),
+        }
+        if self.key == "vx":
+            # VX has one global tileset and none of Ace's map-level extras.
+            for field in ("@tileset_id", "@display_name", "@specify_battleback",
+                          "@battleback1_name", "@battleback2_name", "@note"):
+                ivars.pop(field)
+        return RubyObject("RPG::Map", ivars)
+
+
+def _table_absence_hint(engine: str, key: str) -> str:
+    if key == "tilesets":
+        return ("VX has a single global tileset in Graphics/System instead of a "
+                "tileset database, so maps have no tileset_id.")
+    if key == "areas":
+        return ("VX Ace replaced encounter areas with map regions: paint region "
+                "ids on tile layer 3 with map_tiles, and reference them from a "
+                "map's encounter_list.")
+    return "It belongs to a different engine in the VX family."
+
+
+ACE_PROFILE = EngineProfile(
+    key="vx_ace",
+    label="RPG Maker VX Ace",
+    project_file="Game.rvproj2",
+    extension=".rvdata2",
+    data_files=ACE_DATA_FILES,
+    class_fields=dict(SHARED_CLASS_FIELDS, **ACE_CLASS_FIELDS),
+    map_layers=ACE_MAP_LAYERS,
+    audio_classes={"bgm": "RPG::BGM", "bgs": "RPG::BGS",
+                   "me": "RPG::ME", "se": "RPG::SE"},
+    # RGSS3 runs Ruby 1.9, which tags every string with its encoding.
+    string_ivars={"E": True},
+    notes=[
+        "Tile data has four layers: 0 ground, 1 above ground, 2 shadow, "
+        "3 region ids.",
+        "Each map picks a tileset with tileset_id; see the tilesets table.",
+        "An event runs the LAST page whose conditions are satisfied.",
+        "Items, skills, actors and classes carry a features array and a params "
+        "array rather than VX's flat stat fields; damage uses a Ruby formula "
+        "string.",
+        "Close the RPG Maker VX Ace editor while editing: it holds the project "
+        "in memory and rewrites every data file when it saves.",
+    ],
+)
+
+VX_PROFILE = EngineProfile(
+    key="vx",
+    label="RPG Maker VX",
+    project_file="Game.rvproj",
+    extension=".rvdata",
+    data_files=VX_DATA_FILES,
+    class_fields=dict(SHARED_CLASS_FIELDS, **VX_CLASS_FIELDS),
+    map_layers=VX_MAP_LAYERS,
+    audio_classes={"bgm": "RPG::AudioFile", "bgs": "RPG::AudioFile",
+                   "me": "RPG::AudioFile", "se": "RPG::AudioFile"},
+    # RGSS2 runs Ruby 1.8: strings are bare bytes.
+    string_ivars={},
+    notes=[
+        "VX has no Tilesets database: one global tileset lives in "
+        "Graphics/System (TileA1..A5, TileB..E), so maps have no tileset_id.",
+        "Tile data has three layers: 0 ground, 1 above ground, 2 shadow.",
+        "An event runs the LAST page whose conditions are satisfied.",
+        "Areas.rvdata holds encounter areas; VX Ace replaced them with regions.",
+        "Close the RPG Maker VX editor while editing: it holds the project in "
+        "memory and rewrites every data file when it saves.",
+    ],
+)
+
+PROFILES = {profile.key: profile for profile in (ACE_PROFILE, VX_PROFILE)}
+
+
+# ---------------------------------------------------------------------------
+# Observed structure
+# ---------------------------------------------------------------------------
+
+
+def observe_class_fields(value: Any, into: dict[str, dict[str, int]] | None = None,
+                         depth: int = 0) -> dict[str, dict[str, int]]:
+    """Walk loaded data and tally which ivars each Ruby class actually carries.
+
+    The result maps class name -> field name -> occurrence count, which is what
+    lets the tools describe a project honestly instead of asserting a schema the
+    project may not share (a script-heavy project can add ivars of its own).
+    """
+    fields = into if into is not None else {}
+    if depth > 24:  # RPG data is shallow; this only guards pathological input
+        return fields
+
+    if isinstance(value, RubyObject):
+        bucket = fields.setdefault(value.cls, {})
+        for name in value.ivars:
+            bare = name.lstrip("@")
+            bucket[bare] = bucket.get(bare, 0) + 1
+        for item in value.ivars.values():
+            observe_class_fields(item, fields, depth + 1)
+    elif isinstance(value, list):
+        for item in value:
+            observe_class_fields(item, fields, depth + 1)
+    elif isinstance(value, RubyHash):
+        for key, item in value.pairs:
+            observe_class_fields(key, fields, depth + 1)
+            observe_class_fields(item, fields, depth + 1)
+    return fields
