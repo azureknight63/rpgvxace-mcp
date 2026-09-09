@@ -907,15 +907,6 @@ class TestTheCeilingStopsTheWalkingToo(ToolTest):
         self.assertLessEqual(len(found), self.CEILING)
 
 
-# Last in the file, deliberately. It used to sit mid-module,
-# and module statements run in order -- so running this file directly
-# called `unittest.main()` (which exits) before the classes below it
-# existed, and reported success having skipped them. pytest collects
-# either way, which is why nobody noticed.
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestAFindingNamesTheRightCommand(ValidateTest):
     """The index a finding reports is the index of the command that is wrong.
 
@@ -1008,21 +999,17 @@ class TestEveryCollectorIsShared(unittest.TestCase):
 
     # Functions that build their own list of findings and legitimately do
     # not take the run's collector. A reason each.
+    #
+    # Two entries, not nine. The first version listed nine, and seven of
+    # them could never have been flagged -- `_check_indent`, `_check_jump`
+    # and the rest neither loop nor build a list, so they are not in scope
+    # and an excuse for them says nothing. That is the same dilution that
+    # made the older by-name lists unreadable, in the test written to
+    # replace them.
     OWN_LIST_IS_FINE = {
-        "_check_start_position": "does not loop -- it reports at most two "
-                                 "findings about one map's start position, "
-                                 "so its list is bounded by the code",
-        "_check_indent": "one command, at most one finding",
-        "_check_jump": "one command, at most one finding",
-        "_check_transfer": "one command, at most two findings",
         "_check_references": "loops over the rules one command code has, "
                              "which is this server's own table, so the "
                              "length is bounded by the source",
-        "_check_shadowing": "loops over one event's pages and reports at "
-                            "most one finding for the whole event",
-        "_check_autorun": "one page, at most one finding",
-        "_report": "the reply builder -- it reads the collected list and "
-                   "does not add to it",
         "validate": "the caller that makes the collector",
     }
 
@@ -1069,14 +1056,20 @@ class TestEveryCollectorIsShared(unittest.TestCase):
             "ceiling of its own on top of the run's: " + ", ".join(unshared))
 
     def test_no_excuse_outlives_its_function(self):
-        """A reason for a function that no longer collects is a stale reason."""
-        import ast
-        names = {node.name for _, node, _ in self.functions()}
-        self.assertTrue(names, "read no functions, so this checked nothing")
-        stale = sorted(set(self.OWN_LIST_IS_FINE) - names)
+        """A reason for a function that no longer collects is a stale reason.
+
+        Against the collectors, not against every function in the package:
+        this compared the table to *all* the names, so an excuse survived
+        its function stopping collecting, and seven entries that were never
+        in scope at all read as nine checked exemptions.
+        """
+        collecting = set(self.collectors())
+        self.assertTrue(collecting, "found no collectors, so this checked "
+                                    "nothing")
+        stale = sorted(set(self.OWN_LIST_IS_FINE) - collecting)
         self.assertEqual(stale, [],
-                         "excused and no longer here: " + ", ".join(stale))
-        _ = ast
+                         "excused and no longer collecting: "
+                         + ", ".join(stale))
 
     def test_the_shared_collector_is_what_bounds_a_whole_run(self):
         """`_Findings.given` is the mechanism, so it has to be reachable."""
@@ -1085,3 +1078,176 @@ class TestEveryCollectorIsShared(unittest.TestCase):
         self.assertIs(_Findings.given(shared), shared,
                       "given() made a second collector out of one")
         self.assertIsInstance(_Findings.given(None), _Findings)
+
+
+class TestTheSystemFileIsChecked(ValidateTest):
+    """A start map that is not there, and a party member who is not.
+
+    Neither branch had a test. The fixture sets `start_map_id=1` with
+    Map001 present and `party_members=[1, 2]` with both actors present, and
+    the one suite that crafts forty dangling party members lowers the
+    finding ceiling to 6 first -- so the maps scope fills it and
+    `check_database` is never reached.
+
+    That is how round 10 shipped `findings.append` on a `_Findings`, which
+    has `add`: converting `_check_system` to the shared collector, running
+    934 tests, and seeing them all pass. `validate` returned
+    `"'_Findings' object has no attribute 'append'"` for any project whose
+    System named an absent start map -- and "the game will not boot" is
+    that finding's own remedy text, so it is the breakage most worth
+    reporting and the one that reported an internal error instead.
+    """
+
+    def system(self):
+        return self.project.load_data("system")
+
+    def saved(self):
+        self.project.save_file(self.project.filename_for("system"),
+                               tool="test", summary="crafted system")
+        self.ctx = self.reopen()
+
+    def test_a_start_map_that_does_not_exist_is_reported(self):
+        absent = max(self.project.map_ids_present()) + 10
+        self.system().set("start_map_id", absent)
+        self.saved()
+        rules = {f["rule"] for f in self.findings()}
+        self.assertIn("missing_start_map", rules,
+                      "the start map rule reported nothing; rules were %s"
+                      % sorted(rules))
+
+    def test_a_party_member_who_is_not_an_actor_is_reported(self):
+        actors = {entry_id for entry_id, _ in self.project.entries("actors")}
+        self.system().set("party_members", [max(actors) + 5])
+        self.saved()
+        rules = {f["rule"] for f in self.findings()}
+        self.assertIn("missing_party_member", rules,
+                      "the party rule reported nothing; rules were %s"
+                      % sorted(rules))
+
+    def test_neither_rule_answers_with_an_error(self):
+        """The shape of the round-10 regression: a reply, not a traceback.
+
+        `validate` catches nothing, so the failure arrived as an error
+        reply carrying an AttributeError -- and `_tool_error` appends
+        "Check the arguments, then run validate", pointing the model at the
+        tool that had just died.
+        """
+        absent = max(self.project.map_ids_present()) + 10
+        self.system().set("start_map_id", absent)
+        actors = {entry_id for entry_id, _ in self.project.entries("actors")}
+        self.system().set("party_members", [max(actors) + 5])
+        self.saved()
+        out = self.call("validate")
+        self.assertIn("findings", out)
+        rules = {f["rule"] for f in out["findings"]}
+        self.assertIn("missing_start_map", rules)
+        self.assertIn("missing_party_member", rules)
+
+    def test_both_findings_name_where_they_came_from(self):
+        absent = max(self.project.map_ids_present()) + 10
+        self.system().set("start_map_id", absent)
+        self.saved()
+        found = [f for f in self.findings(rule="missing_start_map")]
+        self.assertTrue(found)
+        self.assertIn("system", found[0]["where"])
+
+
+class TestAnUnreadableMapInfosIsReported(ValidateTest):
+    """A corrupt MapInfos is a finding, not a silence.
+
+    `check_map_tree`'s unreadable branch returned a bare `[Finding(...)]`
+    while every other path in it appends to the collector -- and `validate`
+    calls it for effect only, reading the collector afterwards. So the one
+    file whose loss stops the whole map scope produced nothing at all: no
+    finding, no note, and `checks_run` still claiming the map tree was
+    checked.
+
+    The standalone return value was right, which is why the direct-call
+    tests passed. This is the second time this function's reporting was
+    written against a list `validate` does not read, so
+    `TestEveryCollectorReturnsWhatItCollected` below is the rule rather
+    than a third one-off fix.
+    """
+
+    def test_a_corrupt_map_infos_is_a_finding(self):
+        self.corrupt("MapInfos")
+        rules = {f["rule"] for f in self.findings(scopes=["maps"])}
+        self.assertIn("map_infos_unreadable", rules,
+                      "a corrupt MapInfos reported nothing; rules were %s"
+                      % sorted(rules))
+
+    def test_it_says_what_to_do_about_it(self):
+        self.corrupt("MapInfos")
+        found = [f for f in self.findings(rule="map_infos_unreadable")]
+        self.assertTrue(found)
+        self.assertIn("Restore", found[0]["message"])
+
+    def test_a_default_run_reports_it_too(self):
+        """Not only the maps scope -- the default run is what a caller makes."""
+        self.corrupt("MapInfos")
+        rules = {f["rule"] for f in self.call("validate")["findings"]}
+        self.assertIn("map_infos_unreadable", rules)
+
+
+class TestEveryCollectorReturnsWhatItCollected(unittest.TestCase):
+    """A rule takes the collector and returns from it, not from a local.
+
+    `check_map_tree` took `collected` and one of its branches returned a
+    list literal it had built on the spot -- so the finding existed, the
+    direct-call test saw it, and `validate`, which reads the collector,
+    did not. `TestEveryCollectorIsShared` next door cannot see this shape:
+    it looks for a function that *keeps* its own list, and this one built
+    a list only inside a `return`.
+
+    So: a function that takes `collected` returns `findings.items`, or
+    nothing at all. Anything else is a finding a caller may or may not be
+    shown depending on which of two call styles it used.
+    """
+
+    def rules(self):
+        """Every function in the linter that takes a `collected` argument."""
+        import ast
+        package = (Path(__file__).resolve().parent.parent / "src"
+                   / "rpgvxace_mcp" / "analysis" / "lint")
+        found = []
+        for path in sorted(package.glob("*.py")):
+            if path.name == "__init__.py":
+                continue
+            for node in ast.parse(path.read_text(encoding="utf-8")).body:
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                names = [a.arg for a in node.args.args]
+                if "collected" in names or "findings" in names:
+                    found.append((path.stem, node))
+        return found
+
+    def test_the_scan_finds_the_collector_taking_rules(self):
+        """So the assertion below cannot pass by reading nothing."""
+        names = {node.name for _, node in self.rules()}
+        self.assertGreater(len(names), 3, sorted(names))
+        self.assertIn("check_map_tree", names)
+
+    def test_no_rule_returns_a_list_it_built_in_the_return(self):
+        import ast
+        wrong = []
+        for stem, node in self.rules():
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Return)
+                        and isinstance(inner.value, ast.List)
+                        and inner.value.elts):
+                    wrong.append("%s.%s:%d"
+                                 % (stem, node.name, inner.lineno))
+        self.assertEqual(
+            wrong, [],
+            "these take a collector and return a list built in the return, "
+            "so a caller reading the collector is not shown the finding: "
+            + ", ".join(wrong))
+
+
+# Last in the file, deliberately. It used to sit mid-module,
+# and module statements run in order -- so running this file directly
+# called `unittest.main()` (which exits) before the classes below it
+# existed, and reported success having skipped them. pytest collects
+# either way, which is why nobody noticed.
+if __name__ == "__main__":
+    unittest.main()

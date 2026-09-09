@@ -318,8 +318,13 @@ class _Hits:
             "may_have_more": self.full,
             "scopes_searched": self.searched,
         }
-        if not self.rows and (self.empty or self.unsearchable
-                              or self.unreadable):
+        # Whether or not anything was found: the description says
+        # `may_have_more` is true "when the page filled *or* when any part
+        # of the project was not read or not reached", and this asked for
+        # both. Three hits and a corrupt Scripts file answered
+        # `files_not_read` beside `may_have_more: false`, so a caller
+        # branching on the flag read a partial search as complete.
+        if (self.empty or self.unsearchable or self.unreadable):
             # Nothing found, and something was not read: a scope that opened
             # nothing, a file that would not load, or a script slot that would
             # not inflate. Any of the three makes an empty result
@@ -362,7 +367,7 @@ class _Hits:
             for index in self.unreadable}))
         stopped = self.walk.note("search")
         if stopped:
-            out["command_walk_stopped"] = stopped
+            out.update(partial("command_walk", stopped=stopped))
             # So an empty result cannot read as "there are none".
             out["may_have_more"] = True
         spent = matcher.note() if matcher is not None else None

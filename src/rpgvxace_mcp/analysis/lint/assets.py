@@ -309,14 +309,15 @@ def _check_command_assets(project: Project, checker: _AssetChecker,
 
 def _check_database_assets(project: Project, checker: _AssetChecker,
                            budget: "WalkBudget | None" = None) -> None:
-    # This *was* the walk with neither the budget its siblings take nor
-    # a `checker.full` test; it has both now, on all three of its
-    # blocks. The last asset walk in this file -- `check_tilesets` in
-    # `database.py` is the fourth -- and the one with neither the
-    # budget its siblings take nor a `checker.full` test. `_AssetChecker`
-    # returns before it counts anything for a name that is empty or
-    # present, so the collector ceiling cannot stop this either -- an
-    # array of a million links to one row was a million free visits.
+    """Graphics named by the database rows: animations, actors, enemies.
+
+    The last asset walk in this file; `check_tilesets` in `database.py` is
+    the fourth. Each of the three blocks below takes the budget and tests
+    `checker.full`, which this walk once had neither of: `_AssetChecker`
+    returns before it counts anything for a name that is empty or already
+    present, so the collector's ceiling cannot stop a walk on its own --
+    an array of a million links to one row was a million free visits.
+    """
     for entry_id, animation in _safe_entries(project, "animations"):
         if checker.full or (budget is not None and not budget.spend(1)):
             return

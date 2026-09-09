@@ -1161,8 +1161,11 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
     # `test_every_declared_suffix_has_a_type_here` below, which is what
     # makes that constant load-bearing: it was referenced nowhere in src or
     # tests, and this suite kept a second independent copy -- so adding a
-    # fourth suffix to the source of truth changed nothing anywhere.
-    TYPES = {"_truncated": bool, "_note": str, "_not_read": dict}
+    # fourth suffix to the source of truth changed nothing anywhere -- and
+    # a fourth is exactly what arrived: `_stopped` was in use in four
+    # places while the tuple said there were three.
+    TYPES = {"_truncated": bool, "_note": str, "_not_read": dict,
+             "_stopped": str}
 
     def replies(self):
         """A broad sample of real replies, read-only where possible."""
@@ -1232,10 +1235,10 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
                          "one of them is not the vocabulary")
 
     def test_partial_can_build_every_suffix_it_declares(self):
-        """A function that owns three suffixes has to be able to build them."""
+        """A function that owns the suffixes has to be able to build them."""
         from rpgvxace_mcp.tools.registry import partial
         built = partial("x", truncated=True, notes=("why",),
-                        not_read={"scope": "reason"})
+                        not_read={"scope": "reason"}, stopped="where")
         self.assertEqual(sorted(built),
                          sorted("x" + suffix for suffix in PARTIAL_SUFFIXES))
 

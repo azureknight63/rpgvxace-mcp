@@ -325,17 +325,38 @@ PREVIEW_NAMES = {
 # A dynamic key is the fourth thing this replaces: `"%s_note" % scope` is a
 # key a caller cannot find in any schema, so `search` now answers one
 # `scopes_not_read` mapping instead of one key per scope.
-PARTIAL_SUFFIXES = ("_truncated", "_note", "_not_read")
+# The suffixes that say an answer about a subject is not complete, and
+# the one type each carries. `_stopped` is here because it was already in
+# use in four places -- `command_walk_stopped`, `references_scan_stopped`,
+# `text_scan_stopped` and `stopped_early` -- while this tuple said there
+# were three, so the one family a caller most needs to branch on was the
+# one outside the vocabulary and invisible to the type test.
+#
+# `_stopped` carries a sentence rather than a flag: the reason a walk gave
+# up is what tells a caller whether to narrow the request or raise a limit,
+# and a boolean would leave them guessing between the two.
+#
+# `analysis` spells its two `_stopped` keys itself rather than calling
+# `partial`, because `partial` is in this layer and `analysis` sits below
+# it -- importing upward is what `TestToolModulesAreLeaves` and the
+# layering tables exist to refuse. What holds those keys to the vocabulary
+# is not the builder but
+# `TestOneVocabularyForAPartialAnswer.test_every_partial_key_has_the_type_its_suffix_promises`,
+# which reads real replies: the suffix is enforced where it is served.
+PARTIAL_SUFFIXES = ("_truncated", "_note", "_not_read", "_stopped")
 
 
 def partial(subject: str, truncated: bool = False,
             notes: "tuple[str, ...] | list[str]" = (),
-            not_read: "dict[str, str] | None" = None) -> dict[str, Any]:
+            not_read: "dict[str, str] | None" = None,
+            stopped: "str | None" = None) -> dict[str, Any]:
     """The keys that say an answer about ``subject`` is not complete.
 
-    All three suffixes, so this really is the one function the vocabulary
+    All four suffixes, so this really is the one function the vocabulary
     rests on: it used to build two and had one caller, while every
-    `_not_read` mapping and most `_note` strings were spelled out by hand.
+    `_not_read` mapping and most `_note` strings were spelled out by hand
+    -- and `_stopped` was produced in four places while `PARTIAL_SUFFIXES`
+    said there were three of them.
 
     The boolean and the prose are separate keys deliberately: a model reads
     the sentence and a caller's code reads the flag, and folding them into
@@ -348,6 +369,8 @@ def partial(subject: str, truncated: bool = False,
     out: dict[str, Any] = {}
     if truncated:
         out["%s_truncated" % subject] = True
+    if stopped:
+        out["%s_stopped" % subject] = stopped
     said = [note for note in notes if note]
     if said:
         out["%s_note" % subject] = " ".join(said)
@@ -609,9 +632,12 @@ def check_op_args(op: str, args: dict[str, Any],
 # What each declared type accepts, and how a refusal names it. One
 # table rather than four `elif` branches: a fifth declared type in
 # `schema` was enforced only if someone remembered to add a fifth
-# branch, and `TestADeclaredTypeIsChecked` reads this to know what
-# to try. INT is not here -- it delegates to `as_int`, which
-# refuses a bool and a non-integral float in words of its own.
+# branch. `TestEveryDeclaredTypeIsInTheTable` holds it complete
+# against every type the registry's schemas actually declare, which
+# is the direction that matters: a type declared and not here is a
+# type nothing checks. INT is deliberately absent -- it delegates to
+# `as_int`, which refuses a bool and a non-integral float in words
+# of its own.
 _DECLARED_TYPES = {
     STR: (str, "a string"),
     BOOL: (bool, "true or false"),

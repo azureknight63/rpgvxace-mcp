@@ -190,9 +190,16 @@ class CraftedMap:
     # the same reason `BackupStore.NEEDS_FROM_PROJECT` is: a mixin that
     # reads a name nobody defines fails when the method runs, and this one
     # runs inside a timing assertion where the failure reads as a bound
-    # that did not hold. `WHAT` is the subclass's own, and names the map in
-    # a failure message.
-    NEEDS_FROM_HOST = ("WHAT", "call", "project", "reopen", "assertLess")
+    # that did not hold.
+    #
+    # The first version of this list was wrong in both directions -- it
+    # declared `WHAT`, which is defined right below and so is not needed
+    # from anywhere, and omitted `ctx`, which `craft_page_map` assigns.
+    # That is what the reason `BackupStore`'s list works is the three tests
+    # and not the tuple; this one now has them too.
+    NEEDS_FROM_HOST = ("assertLess", "call", "ctx", "project", "reopen")
+
+    # The subclass's own, naming the map in a failure message.
     WHAT = "an uncrafted map"
 
     def craft_page_map(self, commands, pages, events, max_bytes, what,

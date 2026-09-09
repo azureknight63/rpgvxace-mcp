@@ -459,9 +459,12 @@ def _subjects(pattern: str) -> "list[str]":
     makes competing atoms backtrack, and the mixtures catch the shapes that
     need two kinds of character to alternate.
 
-    The count and the cap are interpolated rather than written out, because
-    this sentence said "plus two mixtures" against three of them and "each
-    character" against a capped eight.
+    The cap is interpolated rather than written out, because this sentence
+    said "each character" against a capped eight. The count is not a fixed
+    number: a run of each of the first few characters, then a pair mixture
+    *if the alphabet has two*, then a run of every character it names, then
+    the digits-and-spaces subject. So three subjects for a one-character
+    alphabet and five for two.
     """ % MAX_SINGLE_CHARACTER_SUBJECTS
     # `re.error` only, where this caught `Exception`. A pattern the parser
     # rejects is left to `re.compile` to report in its own words, which

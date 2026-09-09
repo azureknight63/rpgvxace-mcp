@@ -31,6 +31,7 @@ from rpgvxace_mcp.schema import (  # noqa: E402
     new_page,
 )
 
+
 ENCODING = "utf-8"
 
 

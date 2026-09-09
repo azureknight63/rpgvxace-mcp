@@ -335,7 +335,8 @@ def _common_event_view(ctx: Context, args: dict[str, Any], common_id: int,
     stopped = command_budget.note("event_get")
     if stopped:
         result["commands_rendered"] = len(shown)
-        result["command_walk_stopped"] = stopped
+        result.update(partial("command_walk",
+                              stopped=stopped))
     return result
 
 
@@ -425,7 +426,8 @@ def _map_events_view(ctx: Context, args: dict[str, Any], map_id: int,
         # Three separate early returns is how a note ended up unreachable
         # behind another, and how `stopped` came to be read on a path that
         # never assigned it.
-        result["command_walk_stopped"] = stopped
+        result.update(partial("command_walk",
+                              stopped=stopped))
     return result
 
 

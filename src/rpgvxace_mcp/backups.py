@@ -199,13 +199,21 @@ class BackupStore:
         wanted = []
         for name in (files or available_files):
             safe_component(name, "file name")
-            # The same boundary the copy loop uses -- the snapshot, not the
-            # backup root. With the root here, a symlink resolving into a
-            # *sibling* snapshot passed this pass and was caught only in the
-            # copy loop, partway through, with Data/ half old and half new:
-            # which is precisely what validating everything up front is for.
+            # Both ends of the copy, and both with the boundary the copy
+            # loop uses -- the snapshot, not the backup root.
+            #
+            # With the root here, a symlink resolving into a *sibling*
+            # snapshot passed this pass and was caught only in the copy
+            # loop. And the destination was not checked here at all, so a
+            # `Data/Map002.rvdata2` that is itself a symlink out of the
+            # project -- the case `snapshot`'s own reparse-point filter
+            # exists for -- passed the pass, was skipped by the safety
+            # snapshot for the same reason, and then raised from the copy
+            # loop with Map001 already restored. Half old, half new, and
+            # the one file that aborted was the one not backed up.
             _contained(source_dir / name, source_dir,
                        "backup file %r" % name)
+            self.path_for(name)
             wanted.append(name)
         missing = [f for f in wanted if f not in available_files]
         if missing:

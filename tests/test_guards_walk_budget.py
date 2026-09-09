@@ -1291,15 +1291,6 @@ class TestOneCommandCannotOutrunTheDeadline(ToolTest):
         self.assertNotIn(chr(27), out["hits"][0]["text"])
 
 
-# Last in the file, deliberately. It used to sit mid-module,
-# and module statements run in order -- so running this file directly
-# called `unittest.main()` (which exits) before the classes below it
-# existed, and reported success having skipped them. pytest collects
-# either way, which is why nobody noticed.
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestOneCommandWalkForAWholeValidate(ToolTest):
     """`validate` reads each command list once, not once per rule that wants it.
 
@@ -1651,3 +1642,12 @@ class TestTheMapListingHasOneTruth(ToolTest):
         self.assertNotIn(free, self.project.map_ids_present(),
                          "the cache saw a file written behind its back")
         self.assertIn(free, self.project.map_ids_present(refresh=True))
+
+
+# Last in the file, deliberately. It used to sit mid-module,
+# and module statements run in order -- so running this file directly
+# called `unittest.main()` (which exits) before the classes below it
+# existed, and reported success having skipped them. pytest collects
+# either way, which is why nobody noticed.
+if __name__ == "__main__":
+    unittest.main()

@@ -132,6 +132,15 @@ OPAQUE_ESCAPE_CODES = frozenset({CODE_CALL_COMMON_EVENT, CODE_SCRIPT,
 def _check_autorun(map_id: int, event_id: int, name: str,
                    pages: list[Any],
                    budget: "WalkBudget | None" = None) -> list[Finding]:
+    """Report a last page that is Autorun and never gives control back.
+
+    Only the last page, because that is the one whose conditions win. A
+    page that transfers the player, erases the event or ends the game is
+    left alone, and so is one holding a Call Common Event or a Script,
+    which this file cannot see through -- suppressing a real finding now
+    and then costs less than sending an agent to edit a cutscene that
+    works.
+    """
     if not pages:
         return []
     last = pages[-1]

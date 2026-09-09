@@ -46,10 +46,16 @@ def check_map_tree(project: Project, budget: "WalkBudget | None" = None,
     try:
         infos = dict(project.entries("map_infos"))
     except (ProjectError, ValueError, OSError, TypeError) as exc:
-        return [Finding(ERROR, "map_infos_unreadable",
-                        "MapInfos could not be read (%s), so the map tree could "
-                        "not be checked. Restore that file, then validate again."
-                        % exc)]
+        # Into the collector, like every other path here. This returned a
+        # list literal, and `validate` calls this function for effect and
+        # reads the collector afterwards -- so the one file whose loss
+        # stops the whole map scope produced no finding at all, while
+        # `checks_run` still said the map tree had been checked.
+        findings.add(Finding(
+            ERROR, "map_infos_unreadable",
+            "MapInfos could not be read (%s), so the map tree could not be "
+            "checked. Restore that file, then validate again." % exc))
+        return findings.items
     on_disk = project.map_ids_present()
 
     for map_id, info in infos.items():

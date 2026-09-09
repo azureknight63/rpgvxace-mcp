@@ -445,25 +445,88 @@ class TestOneBlankLineConvention(unittest.TestCase):
         # so the rule was blind to the directory whose files this round
         # rewrote most.
         root = Path(__file__).resolve().parent.parent
+        # `rglob` for all three: `tests/fixtures/build_project.py` sits
+        # one directory down and was unread while this said "everywhere".
         return (sorted((root / "src" / "rpgvxace_mcp").rglob("*.py"))
-                + sorted((root / "tests").glob("*.py"))
-                + sorted((root / "scripts").glob("*.py")))
+                + sorted((root / "tests").rglob("*.py"))
+                + sorted((root / "scripts").rglob("*.py")))
+
+    def blanks_above(self, path):
+        """How many blank lines sit above each top-level definition.
+
+        Read with `ast` rather than a regular expression. The expression
+        this replaced matched `[^\n]\n\n(?=def |class |@|CONSTANT)`, which
+        can only ever see *exactly one* blank line before a bare
+        definition -- so zero blank lines were invisible, and so was any
+        definition introduced by a comment block, which is most of the
+        constants in this project. It found 37 violations in `tests/` when
+        the directory was added and still could not see eight in
+        `pattern_safety.py`.
+
+        A comment block immediately above a definition belongs to it, so
+        the count is taken above the comment.
+        """
+        import ast
+        lines = path.read_text(encoding="utf-8").split("\n")
+        tree = ast.parse("\n".join(lines))
+        out = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                top = min([d.lineno for d in node.decorator_list]
+                          + [node.lineno])
+            else:
+                # Definitions only. A *group* of related constants runs
+                # together on purpose -- the command codes, the tag bytes --
+                # and it is the group that is separated by two blank lines,
+                # not each member of it. Requiring two above every constant
+                # flagged 363 sites, almost all of them correct style, which
+                # is a rule nobody would keep. The constants are covered by
+                # the second test below, which asks the narrower question
+                # they actually got wrong.
+                continue
+            while top > 1 and lines[top - 2].lstrip().startswith("#"):
+                top -= 1
+            if top <= 1:
+                continue
+            blank = 0
+            while top - 2 - blank >= 0 and not lines[top - 2 - blank].strip():
+                blank += 1
+            out.append((top, blank))
+        return out
 
     def test_every_top_level_definition_has_two_blank_lines_above_it(self):
-        # The look-ahead covers a top-level CONSTANT as well as a
-        # definition: four constants placed after a function had one blank
-        # line where the rest of the project uses two, and the narrower
-        # pattern could not see them.
+        # Constants as well as definitions: four constants placed after a
+        # function had one blank line where the rest of the project uses
+        # two, and the first version of this could not see them.
+        wrong = []
+        for path in self.modules():
+            for line, blank in self.blanks_above(path):
+                if blank != 2:
+                    wrong.append("%s:%d (%d)" % (path.name, line, blank))
+        self.assertEqual(
+            wrong, [],
+            "these top-level definitions do not have two blank lines above "
+            "them, with what they do have in brackets: " + ", ".join(wrong))
+
+    def test_a_constant_after_code_has_two_blank_lines_above_it(self):
+        """The narrower question, for the shape constants got wrong.
+
+        A *group* of related constants runs together on purpose, so the
+        definition rule above covers functions and classes only. What went
+        wrong with constants was four of them placed after a function with
+        one blank line where the project uses two -- and one blank line is
+        a shape a regular expression can ask about exactly.
+        """
         thin = []
         for path in self.modules():
             text = path.read_text(encoding="utf-8")
-            for match in re.finditer(r"[^\n]\n\n(?=(?:def |class |@)\S|[A-Z_]{2,}\s*[:=])",
-                                     text):
+            for match in re.finditer(
+                    r"[^\n]\n\n(?=[A-Z_]{2,}\s*[:=])", text):
                 line = text.count("\n", 0, match.end()) + 1
                 thin.append("%s:%d" % (path.name, line))
         self.assertEqual(thin, [],
-                         "these top-level definitions have one blank line "
-                         "above them and the rest of the project uses two: "
+                         "these constants have one blank line above them "
+                         "and the rest of the project uses two: "
                          + ", ".join(thin))
 
     def test_no_module_has_three_blank_lines_in_a_row(self):
@@ -791,85 +854,130 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
                 self.assertTrue(hasattr(analysis, name), name)
 
 
-class TestTheBackupMixinContractHolds(unittest.TestCase):
-    """`BackupStore` is half of `Project`, and this is the seam.
+class TestEveryMixinContractHolds(unittest.TestCase):
+    """A mixin declares what it needs from its host, and both are checked.
 
-    The backup store was a quarter of a thousand-line class, read for its
-    own reasons and scrolled past to reach the loading and saving it sat
-    between. It is its own file now, and a mixin rather than a collaborator
-    because `restore_backup` reads the file cache, the per-run backup
-    flags, the map-id cache and the staleness check -- an object holding a
-    reference to `Project` to reach six of its private attributes is the
-    same coupling with a longer name.
+    `BackupStore` is half of `Project`: the backup store was a quarter of a
+    thousand-line class, read for its own reasons and scrolled past to
+    reach the loading and saving it sat between. It is a mixin rather than
+    a collaborator because `restore_backup` performs a sequence -- snapshot,
+    staleness-check, copy, cache-evict, flag-clear, map-id-invalidate --
+    over state whose invariants belong to `Project`, and an object handed
+    all of that could still be called with a `Project` mid-mutation.
 
-    What makes that safe rather than merely shorter is this test. A mixin
-    reading an attribute nobody defines fails at the moment the method
-    runs, which for `restore_backup` is after a safety snapshot has been
-    taken; and a mixin whose stated contract has gone stale is worse than
-    one with no contract written down, because the list reads as checked.
-    So both directions: everything the mixin says it needs exists, and
-    everything the mixin actually reaches is in the list.
+    `CraftedMap` in `tool_case` is the same shape one layer down, and it is
+    why this is a table: three tests written once per mixin is how the
+    second one came to declare a name it defines itself and omit one it
+    assigns.
+
+    What makes the trade safe is that the contract is checked in three
+    directions, and the third is the one almost nobody writes: everything
+    declared exists, everything reached is declared, and nothing declared
+    is unreached. A mixin reading a name nobody defines fails when the
+    method runs -- for `restore_backup` that is *after* a safety snapshot
+    has been taken, and for `assert_bounded` it is inside a timing
+    assertion, where the failure reads as a bound that did not hold.
     """
 
-    def project(self):
-        """A real one. The attributes are set in `__init__`, not on the class."""
+    # Each mixin: its source file, its class, the tuple it declares, and a
+    # host object to check the names against.
+    MIXINS = (
+        ("src/rpgvxace_mcp/backups.py", "BackupStore", "NEEDS_FROM_PROJECT"),
+        ("tests/tool_case.py", "CraftedMap", "NEEDS_FROM_HOST"),
+    )
+
+    def source(self, where):
+        return (Path(__file__).resolve().parent.parent
+                / where).read_text(encoding="utf-8")
+
+    def declared(self, where, name, tuple_name):
+        import ast
+        for node in ast.parse(self.source(where)).body:
+            if isinstance(node, ast.ClassDef) and node.name == name:
+                for inner in node.body:
+                    if (isinstance(inner, ast.Assign)
+                            and getattr(inner.targets[0], "id", "")
+                            == tuple_name):
+                        return [e.value for e in inner.value.elts]
+        raise AssertionError("%s has no %s" % (name, tuple_name))
+
+    def reached(self, where, name):
+        """Every `self.<name>` the mixin reads that it does not define."""
+        import ast
+        cls = next(node for node in ast.parse(self.source(where)).body
+                   if isinstance(node, ast.ClassDef) and node.name == name)
+        out = {node.attr for node in ast.walk(cls)
+               if isinstance(node, ast.Attribute)
+               and isinstance(node.value, ast.Name)
+               and node.value.id == "self"}
+        own = {node.name for node in cls.body
+               if isinstance(node, ast.FunctionDef)}
+        own |= {target.id for node in cls.body
+                if isinstance(node, ast.Assign)
+                for target in node.targets if isinstance(target, ast.Name)}
+        own |= {node.target.id for node in cls.body
+                if isinstance(node, ast.AnnAssign)}
+        return out - own
+
+    def test_each_mixin_reaches_something(self):
+        """So the two tests below cannot pass by reading nothing."""
+        for where, name, _ in self.MIXINS:
+            with self.subTest(mixin=name):
+                self.assertTrue(self.reached(where, name),
+                                "%s reaches no host name at all" % name)
+
+    def test_everything_reached_is_declared(self):
+        """The direction that keeps a stated contract from going stale."""
+        for where, name, tuple_name in self.MIXINS:
+            with self.subTest(mixin=name):
+                undeclared = sorted(self.reached(where, name)
+                                    - set(self.declared(where, name,
+                                                        tuple_name)))
+                self.assertEqual(
+                    undeclared, [],
+                    "%s reaches these and does not declare them, so its "
+                    "contract reads as checked and is not: %s"
+                    % (name, ", ".join(undeclared)))
+
+    def test_nothing_declared_is_unreached(self):
+        """A name in the list the mixin does not read is the same staleness.
+
+        This is what rejected `root` and `read_only` from `BackupStore` --
+        reached only through `work_dir()` and `_assert_writable()`, so
+        listing them described those methods' business as the class's -- and
+        `WHAT` from `CraftedMap`, which the mixin defines itself.
+        """
+        for where, name, tuple_name in self.MIXINS:
+            with self.subTest(mixin=name):
+                idle = sorted(set(self.declared(where, name, tuple_name))
+                              - self.reached(where, name))
+                self.assertEqual(idle, [],
+                                 "%s declares these and never reaches them: "
+                                 "%s" % (name, ", ".join(idle)))
+
+    def test_everything_the_backup_mixin_needs_is_on_a_real_project(self):
+        """The one that needs an instance: `__init__` sets most of them.
+
+        Only `BackupStore`, because `CraftedMap`'s host is a `TestCase` and
+        building one to ask is what this test would be doing anyway.
+        """
         import shutil
         import sys
         import tempfile
         from pathlib import Path as P
         sys.path.insert(0, str(P(__file__).resolve().parent / "fixtures"))
         from build_project import build
+        from rpgvxace_mcp.backups import BackupStore
         from rpgvxace_mcp.project import Project
         tmp = P(tempfile.mkdtemp(prefix="rpgvxace-mixin-"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         build(tmp / "project")
-        return Project(tmp / "project")
-
-    def reached(self):
-        """Every `self.<name>` the mixin's own source reads."""
-        import ast
-        source = (Path(__file__).resolve().parent.parent / "src"
-                  / "rpgvxace_mcp" / "backups.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        store = next(n for n in tree.body
-                     if isinstance(n, ast.ClassDef) and n.name == "BackupStore")
-        out = set()
-        for node in ast.walk(store):
-            if (isinstance(node, ast.Attribute)
-                    and isinstance(node.value, ast.Name)
-                    and node.value.id == "self"):
-                out.add(node.attr)
-        own = {n.name for n in store.body if isinstance(n, ast.FunctionDef)}
-        own |= {t.id for n in store.body if isinstance(n, ast.Assign)
-                for t in n.targets if isinstance(t, ast.Name)}
-        return out - own
-
-    def test_everything_the_mixin_needs_is_there(self):
-        from rpgvxace_mcp.backups import BackupStore
-        project = self.project()
+        project = Project(tmp / "project")
         missing = sorted(name for name in BackupStore.NEEDS_FROM_PROJECT
                          if not hasattr(project, name))
         self.assertEqual(missing, [],
                          "the mixin says it needs these and `Project` does "
                          "not have them: " + ", ".join(missing))
-
-    def test_everything_the_mixin_reaches_is_in_the_list(self):
-        """The direction that keeps the list from going stale."""
-        from rpgvxace_mcp.backups import BackupStore
-        reached = self.reached()
-        self.assertTrue(reached, "read nothing, so this checked nothing")
-        undeclared = sorted(reached - set(BackupStore.NEEDS_FROM_PROJECT))
-        self.assertEqual(
-            undeclared, [],
-            "the mixin reaches these and does not declare them, so its "
-            "contract reads as checked and is not: " + ", ".join(undeclared))
-
-    def test_nothing_declared_is_unused(self):
-        """A name in the list the mixin no longer reads is the same staleness."""
-        from rpgvxace_mcp.backups import BackupStore
-        idle = sorted(set(BackupStore.NEEDS_FROM_PROJECT) - self.reached())
-        self.assertEqual(idle, [],
-                         "declared and never reached: " + ", ".join(idle))
 
 
 class TestImportBlocksAreInOrder(unittest.TestCase):
@@ -1017,6 +1125,47 @@ class TestTheTablesKeyedOffOneListAgree(unittest.TestCase):
                                 % (name, sample))
 
 
+class TestTheMainBlockIsLast(unittest.TestCase):
+    """`if __name__ == "__main__"` is the last statement in every suite.
+
+    Module statements run in order, so a `unittest.main()` call above a
+    class definition exits before that class exists -- and running the file
+    directly then reports success having skipped everything below it. pytest
+    collects either way, which is why it goes unnoticed.
+
+    Two files carry a comment saying the block is last "deliberately", and
+    in one of them it was not: `test_guards_findings.py` had two classes
+    after it, including one added the same round. A comment asserting the
+    property it does not have is the shape this project treats as a bug, so
+    this is the test rather than a third copy of the comment.
+    """
+
+    def suites(self):
+        root = Path(__file__).resolve().parent
+        found = sorted(path for path in root.glob("test_*.py"))
+        self.assertGreater(len(found), 5, "found almost no suites")
+        return found
+
+    def test_the_main_block_is_the_last_statement(self):
+        import ast
+        wrong = []
+        for path in self.suites():
+            body = ast.parse(path.read_text(encoding="utf-8")).body
+            where = [index for index, node in enumerate(body)
+                     if isinstance(node, ast.If)
+                     and "__main__" in ast.unparse(node.test)]
+            if not where:
+                continue
+            after = [node for node in body[where[0] + 1:]
+                     if isinstance(node, (ast.ClassDef, ast.FunctionDef))]
+            if after:
+                wrong.append("%s (%d definitions after it: %s)"
+                             % (path.name, len(after),
+                                ", ".join(n.name for n in after)))
+        self.assertEqual(
+            wrong, [],
+            "running these files directly skips what is below the "
+            "`unittest.main()` call: " + "; ".join(wrong))
 # Last in the file, deliberately. It used to sit mid-module,
 # and module statements run in order -- so `python tests/test_schema.py`
 # called `unittest.main()` (which exits) before the classes below

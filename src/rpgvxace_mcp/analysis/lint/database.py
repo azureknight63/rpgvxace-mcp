@@ -143,8 +143,9 @@ def check_database(project: Project, tables: _Tables,
                 continue
             class_id = _int(actor.get("class_id"))
             if class_id is not None and class_id not in class_ids:
-                    # The noun from `TABLE_NOUNS`, like the loop below it, the
-        # one above it, and `_check_references` in `command_rules`.
+                # The noun from `TABLE_NOUNS`, like the loop below
+                # it, the one above it, and `_check_references`
+                # in `command_rules`.
                 # Spelled by hand here while the table carried an entry for
                 # it, which is how a table with two live readers came to have
                 # entries nothing read.
@@ -229,7 +230,7 @@ def _check_system(project: Project, actor_ids: "set[int] | None",
                 break
             actor_id = _int(raw_id)
             if actor_id is not None and actor_id not in actor_ids:
-                findings.append(_missing(
+                findings.add(_missing(
                     "missing_party_member",
                     "the starting party includes actor %s" % actor_id,
                     "Remove it from party_members, or add that actor.",
@@ -238,7 +239,7 @@ def _check_system(project: Project, actor_ids: "set[int] | None",
     if start_map:
         on_disk = project.map_ids_present()
         if start_map not in on_disk:
-            findings.append(_missing(
+            findings.add(_missing(
                 "missing_start_map",
                 "the party starts on map %s" % start_map,
                 "Set the start position to a map that exists, or the game will "
