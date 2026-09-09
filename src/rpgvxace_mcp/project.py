@@ -213,6 +213,7 @@ class Project(BackupStore):
         self._assets: dict[str, frozenset[str]] = {}
         self._backed_up: set[str] = set()
         self._map_ids: list[int] | None = None
+        self._map_ids_set: frozenset[int] = frozenset()
         self.rtp_override = False
         self._session = datetime.now().strftime(BACKUP_STAMP_FORMAT)
 
@@ -542,7 +543,23 @@ class Project(BackupStore):
                     and digits == "%03d" % int(digits):
                 ids.append(int(digits))
         self._map_ids = sorted(set(ids))
+        # The set form goes with the list form, so an invalidation of one
+        # cannot leave the other standing. `_map_ids = None` is written in
+        # four places, which is four chances to forget a second field.
+        self._map_ids_set = frozenset(self._map_ids)
         return list(self._map_ids)
+
+    def map_ids_present(self, refresh: bool = False) -> "frozenset[int]":
+        """The same ids, for the callers that ask "is this one of them?".
+
+        Held rather than rebuilt. Three of the linter's rules wrote
+        `set(project.map_ids_on_disk())` -- a list copy and a set build each,
+        three times in one validate -- and `map_ids_on_disk` returns a copy
+        precisely so a caller cannot mutate the cache, which is the right
+        answer for a list and the wrong shape for a membership test.
+        """
+        self.map_ids_on_disk(refresh)
+        return self._map_ids_set
 
     # -- containers -----------------------------------------------------------
     def container_kind(self, key: str, value: Any) -> str:
@@ -792,11 +809,13 @@ class Project(BackupStore):
         self._cache[filename] = CachedFile(value, 0, 0, [])
         self._backed_up.add(filename)  # nothing to back up
         self._map_ids = None
+        self._map_ids_set = frozenset()
 
     def forget_file(self, filename: str) -> None:
         """Drop a cached file, undoing a :meth:`create_file` that came to nothing."""
         self._cache.pop(filename, None)
         self._map_ids = None
+        self._map_ids_set = frozenset()
 
     def delete_file(self, filename: str, dry_run: bool = False,
                     tool: str = "") -> dict[str, Any]:
@@ -817,6 +836,7 @@ class Project(BackupStore):
         path.unlink()
         self._cache.pop(filename, None)
         self._map_ids = None
+        self._map_ids_set = frozenset()
         # Deleting is the most destructive thing here, so it is logged like
         # every other write.
         self._log_change(tool, filename, "deleted")

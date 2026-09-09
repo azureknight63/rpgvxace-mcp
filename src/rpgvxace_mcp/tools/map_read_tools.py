@@ -126,7 +126,7 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                     maximum=MAX_MAP_ROWS) or MAX_MAP_ROWS
 
     infos = ctx.project.entries("map_infos", refresh)
-    on_disk = set(ctx.project.map_ids_on_disk())
+    on_disk = ctx.project.map_ids_present()
     rows = []
     matching = 0
     for map_id, info in infos:

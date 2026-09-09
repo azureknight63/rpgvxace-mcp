@@ -649,6 +649,75 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
             + "; ".join("%s takes %s" % (name, ", ".join(sorted(took)))
                         for name, took in sorted(importers.items())))
 
+    def defined_below(self):
+        """Every name defined anywhere under `analysis/`, from the source.
+
+        Read rather than introspected: `__module__` tells you where a
+        function or a class came from and says nothing at all about a
+        constant or an alias, so an introspecting version of this called
+        `MAX_FINDINGS` and `_seq` dangling re-exports.
+        """
+        import ast
+        root = (Path(__file__).resolve().parent.parent / "src"
+                / "rpgvxace_mcp" / "analysis")
+        found = set()
+        paths = sorted(root.rglob("*.py"))
+        self.assertGreater(len(paths), 5, "read almost nothing")
+        for path in paths:
+            if path.name == "__init__.py":
+                continue
+            for node in ast.parse(path.read_text(encoding="utf-8")).body:
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                    found.add(node.name)
+                elif isinstance(node, ast.AnnAssign):
+                    found.add(node.target.id)
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            found.add(target.id)
+                        elif isinstance(target, ast.Tuple):
+                            found.update(e.id for e in target.elts
+                                         if isinstance(e, ast.Name))
+        return found
+
+    def test_every_public_name_is_re_exported(self):
+        """The direction that was missing, and it found one.
+
+        The list in `analysis/__init__` is hand-written, and only the
+        tools-layer direction above was checked -- so a name no tool module
+        happened to import yet could be public, documented and unreachable
+        by the name the package advertises. `check_list_terminator` was.
+        """
+        from rpgvxace_mcp import analysis
+        missing = sorted(name for name in self.defined_below()
+                         if not name.startswith("_")
+                         and not hasattr(analysis, name))
+        self.assertEqual(
+            missing, [],
+            "these are public in a submodule and not reachable as "
+            "`analysis.X`: " + ", ".join(missing))
+
+    def test_every_re_exported_name_is_really_there(self):
+        """No dangling re-export, including the private ones.
+
+        The list carries private names deliberately -- the guard suites
+        reach the linter's internals, which is the point of a guard test --
+        so it cannot be derived from what is public. What it can be is
+        checked: each name resolves to something one of the three
+        submodules actually defines.
+        """
+        from rpgvxace_mcp import analysis
+        # The submodule names themselves are re-exported on purpose, and
+        # `annotations` is the future import.
+        modules = {"walk", "references", "lint"}
+        exported = {name for name in vars(analysis)
+                    if not name.startswith("__")}
+        dangling = sorted(exported - self.defined_below() - modules
+                          - {"annotations"})
+        self.assertEqual(dangling, [],
+                         "re-exported and defined nowhere below: "
+                         + ", ".join(dangling))
+
     def test_the_linter_is_reachable_by_the_name_it_had(self):
         """`from ..analysis import validate` survived becoming a package.
 

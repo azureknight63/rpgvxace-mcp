@@ -228,7 +228,7 @@ def _check_system(project: Project, actor_ids: "set[int] | None",
                     _db_at("system", 0, "party_members")))
     start_map = _int(system.get("start_map_id"))
     if start_map:
-        on_disk = set(project.map_ids_on_disk())
+        on_disk = project.map_ids_present()
         if start_map not in on_disk:
             findings.append(_missing(
                 "missing_start_map",

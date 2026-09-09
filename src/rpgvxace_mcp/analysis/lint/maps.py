@@ -50,7 +50,7 @@ def check_map_tree(project: Project, budget: "WalkBudget | None" = None,
                         "MapInfos could not be read (%s), so the map tree could "
                         "not be checked. Restore that file, then validate again."
                         % exc)]
-    on_disk = set(project.map_ids_on_disk())
+    on_disk = project.map_ids_present()
 
     for map_id, info in infos.items():
         if not findings.room:

@@ -1332,7 +1332,6 @@ class TestTheMergedWalkStillFindsBothKinds(ValidateTest):
     """
 
     def craft_a_missing_face_and_a_bad_jump(self):
-        game_map = self.project.load_map(1)
         _, _, event = self.first_event(1)
         page = event.get("pages")[0]
         text = RubyObject("RPG::EventCommand")
@@ -1392,7 +1391,6 @@ class TestALocationIsBuiltWhenItIsReported(ValidateTest):
 
     def craft_a_long_clean_page(self):
         """One page of commands that break no rule at all."""
-        game_map = self.project.load_map(1)
         _, _, event = self.first_event(1)
         page = event.get("pages")[0]
         comment = RubyObject("RPG::EventCommand")
@@ -1429,7 +1427,6 @@ class TestALocationIsBuiltWhenItIsReported(ValidateTest):
 
     def test_a_finding_still_says_where_it_is(self):
         """The point of the location, on the page that has one."""
-        game_map = self.project.load_map(1)
         _, _, event = self.first_event(1)
         page = event.get("pages")[0]
         jump = RubyObject("RPG::EventCommand")

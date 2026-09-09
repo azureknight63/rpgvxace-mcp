@@ -98,6 +98,32 @@ class Context:
                     self.project.forget_file(filename)
 
 
+def led_by_op(reply: Any, op: Any) -> Any:
+    """A reply that says which op answered it, before it says anything else.
+
+    Its own function rather than four lines inside `Tool.run`, so it can be
+    checked against every op every tool declares. The sampled replies in
+    `TestOneVocabularyForAPartialAnswer` call the real handlers, which means
+    only the ops that can be sampled read-only or as a dry run are covered
+    -- and an op that writes is exactly the one whose reply a caller most
+    needs to read.
+
+    Rebuilt rather than assigned into, and *whether or not* the handler
+    already set `op`: five of `map_edit`'s reply sites set it themselves and
+    put it second or third, so the guarantee did not hold for the tool with
+    the most branches.
+
+    `dry_run` keeps its own value rather than being assumed True: stripping
+    the key unconditionally would drop an explicit False, which is a silent
+    drop in the one function whose job is to normalise a reply's shape.
+    """
+    if not isinstance(reply, dict) or not isinstance(op, str):
+        return reply
+    lead = {"dry_run": reply["dry_run"]} if "dry_run" in reply else {}
+    return {**lead, "op": op,
+            **{k: v for k, v in reply.items() if k not in ("dry_run", "op")}}
+
+
 class Tool:
     __slots__ = ("name", "title", "description", "schema", "handler", "writes")
 
@@ -119,32 +145,14 @@ class Tool:
         and a schema that is not enforced everywhere is not a contract.
 
         The reply says which op answered it, for the same reason and in the
-        same place. Three of the tools that take an `op` echoed it and four
-        did not, so a caller holding a reply could not always tell which
-        branch produced it -- and `op` is what selects the branch, so it is
-        the one argument a reply cannot be read without. Added here rather
-        than in each handler: that is what "three of seven" comes from.
+        same place -- see `led_by_op`. Three of the tools that take an `op`
+        echoed it and four did not, so a caller holding a reply could not
+        always tell which branch produced it, and `op` is what selects the
+        branch. Added here rather than in each handler: that is what "three
+        of seven" comes from.
         """
         check_args(self.schema, args)
-        reply = self.handler(ctx, args)
-        op = args.get("op")
-        if isinstance(reply, dict) and isinstance(op, str):
-            # Rebuilt rather than assigned into, and *whether or not* the
-            # handler already set `op`: five of `map_edit`'s reply sites set
-            # it themselves and put it second or third, so the guarantee
-            # this docstring makes did not hold for the tool with the most
-            # branches. Placing it here means no handler can get it wrong.
-            #
-            # `dry_run` keeps its own value rather than being assumed True:
-            # stripping the key unconditionally would drop an explicit
-            # False, which is a silent drop in the one function whose job is
-            # to normalise a reply's shape.
-            lead = ({"dry_run": reply["dry_run"]} if "dry_run" in reply
-                    else {})
-            return {**lead, "op": op,
-                    **{k: v for k, v in reply.items()
-                       if k not in ("dry_run", "op")}}
-        return reply
+        return led_by_op(self.handler(ctx, args), args.get("op"))
 
     def definition(self) -> dict[str, Any]:
         return {

@@ -53,12 +53,14 @@ from .references import (  # noqa: F401
     reference_previews,
 )
 from .lint import (  # noqa: F401
+    CONTROL_RELEASING_CODES,
     DEFAULT_FINDING_LIMIT,
     ERROR,
     Finding,
     INFO,
     MAX_FINDINGS,
     NESTED_DB_REFERENCES,
+    OPAQUE_ESCAPE_CODES,
     SEVERITIES,
     VALIDATE_SCOPES,
     WARNING,
@@ -78,6 +80,7 @@ from .lint import (  # noqa: F401
     check_commands,
     check_database,
     check_event_pages,
+    check_list_terminator,
     check_map_tree,
     check_maps,
     check_tilesets,

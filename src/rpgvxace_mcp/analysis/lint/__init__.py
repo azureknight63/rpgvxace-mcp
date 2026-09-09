@@ -61,6 +61,8 @@ from .maps import (  # noqa: F401
     check_maps,
 )
 from .pages import (  # noqa: F401
+    CONTROL_RELEASING_CODES,
+    OPAQUE_ESCAPE_CODES,
     _check_autorun,
     _check_shadowing,
     _is_unconditional,

@@ -81,7 +81,7 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
     # first time a Transfer Player actually names it, so the check sees the
     # same answers and a narrow run stays narrow.
     map_sizes = _MapSizes(project)
-    on_disk = set(project.map_ids_on_disk())
+    on_disk = project.map_ids_present()
     check_parameters = project.command_layouts_modelled
 
     for location, commands in iter_command_lists(project, map_ids, budget):

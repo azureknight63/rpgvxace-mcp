@@ -46,7 +46,7 @@ class BackupStore:
         backup_keep             how many snapshots a prune leaves
         _session                this run's snapshot name
         _cache, _backed_up      what has been read and backed up
-        _map_ids                invalidated by a restore
+        _map_ids, _map_ids_set  invalidated by a restore
         work_dir(), path_for()  where a file goes
         _assert_writable()      the read-only gate
         _assert_not_stale()     the editor-changed-it gate
@@ -63,6 +63,7 @@ class BackupStore:
     NEEDS_FROM_PROJECT = (
         "data_dir", "extension", "backup_keep",
         "_session", "_cache", "_backed_up", "_map_ids",
+        "_map_ids_set",
         "work_dir", "path_for", "_assert_writable", "_assert_not_stale",
     )
 
@@ -253,6 +254,7 @@ class BackupStore:
             # or the next save of a restored file skips its own backup.
             self._backed_up.discard(name)
         self._map_ids = None
+        self._map_ids_set = frozenset()
         self._log_change("backups", ",".join(wanted), "restored from %s" % stamp)
         return {"backup": stamp, "restored": wanted, "safety_backup": pre["backup"]}
 

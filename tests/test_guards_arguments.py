@@ -33,6 +33,7 @@ from rpgvxace_mcp.tools.registry import (  # noqa: E402
     REGISTRY,
     ToolError,
     check_op_args,
+    led_by_op,
 )
 
 # The tool modules this file names directly. Registration -- the
@@ -1686,3 +1687,107 @@ class TestAnArrayFieldThatIsNotAnArrayIsReadSafely(ToolTest):
                          "these read a file's field with `or []`, which is "
                          "not the same rule as `as_list`: "
                          + "; ".join(spelled))
+
+
+class TestEveryDeclaredOpLeadsItsReply(unittest.TestCase):
+    """`led_by_op` over every op in every schema, and both directions.
+
+    The reply shaping was four lines inside `Tool.run`, so the only evidence
+    it worked was `TestOneVocabularyForAPartialAnswer`, which calls the real
+    handlers -- and that reaches an op only if it can be sampled read-only
+    or as a dry run. Of the ops the tools declare, the sample covers eight;
+    the ones it cannot reach are the ones that write, whose replies are
+    exactly what a caller most needs to read.
+
+    So the shaping is its own function and it is fed every declared op.
+    Nothing here calls a handler, so nothing here writes.
+    """
+
+    def declared_ops(self):
+        """Each (tool, op) the schemas advertise, top level and per batch.
+
+        `db_edit` and `event_edit` declare theirs inside `ops[].op` rather
+        than at the top level -- twelve of the twenty-eight, and the twelve
+        that write. A version of this that read only the top level found
+        sixteen and would have called that complete.
+        """
+        out = []
+        for name, tool in sorted(REGISTRY.items()):
+            properties = tool.schema.get("properties") or {}
+            item = (properties.get("ops") or {}).get("items") or {}
+            for spec in (properties.get("op") or {},
+                         (item.get("properties") or {}).get("op") or {}):
+                for op in spec.get("enum") or ():
+                    out.append((name, op))
+        return out
+
+    def test_the_schemas_declare_ops_at_all(self):
+        """So the tests below cannot pass by finding nothing."""
+        found = self.declared_ops()
+        self.assertGreater(len(found), 25,
+                           "only %d declared ops found" % len(found))
+        self.assertIn(("event_edit", "set_page"), found,
+                      "the batch tools' ops were not read")
+
+    def test_every_declared_op_leads_its_reply(self):
+        for name, op in self.declared_ops():
+            with self.subTest(tool=name, op=op):
+                shaped = led_by_op({"result": 1}, op)
+                self.assertEqual(list(shaped)[0], "op")
+                self.assertEqual(shaped["op"], op)
+                self.assertEqual(shaped["result"], 1)
+
+    def test_a_dry_run_comes_before_the_op_and_keeps_its_value(self):
+        for name, op in self.declared_ops():
+            for given in (True, False):
+                with self.subTest(tool=name, op=op, dry_run=given):
+                    shaped = led_by_op({"dry_run": given, "result": 1}, op)
+                    self.assertEqual(list(shaped)[:2], ["dry_run", "op"])
+                    self.assertIs(shaped["dry_run"], given)
+
+    def test_a_handler_that_set_the_op_itself_is_overridden(self):
+        """Five of `map_edit`'s reply sites did, and put it second or third."""
+        shaped = led_by_op({"result": 1, "op": "whatever"}, "create")
+        self.assertEqual(list(shaped)[0], "op")
+        self.assertEqual(shaped["op"], "create")
+
+    def test_a_reply_that_is_not_a_dict_is_left_alone(self):
+        self.assertEqual(led_by_op([1, 2], "create"), [1, 2])
+        self.assertEqual(led_by_op("text", "create"), "text")
+
+    def test_no_op_means_no_key(self):
+        """A tool that does not select with an op says nothing about one."""
+        self.assertEqual(led_by_op({"result": 1}, None), {"result": 1})
+
+    def test_the_sampled_replies_name_only_declared_ops(self):
+        """The other direction: the sample cannot drift off the schemas.
+
+        A `("map_edit", {"op": "resze"})` in that list would exercise the
+        refusal path and read as covering the op it misspells -- which is
+        the mistake that made six coercion cases pass on a typo in an
+        earlier round.
+        """
+        import ast
+        source = (Path(__file__).resolve().parent
+                  / "test_guards_replies.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        sampler = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "replies")
+        declared = set(self.declared_ops())
+        sampled = []
+        for node in ast.walk(sampler):
+            if not isinstance(node, ast.Tuple) or len(node.elts) != 2:
+                continue
+            tool, call = node.elts
+            if not (isinstance(tool, ast.Constant)
+                    and isinstance(tool.value, str)
+                    and isinstance(call, ast.Call)):
+                continue
+            for keyword in call.keywords:
+                if (keyword.arg == "op"
+                        and isinstance(keyword.value, ast.Constant)):
+                    sampled.append((tool.value, keyword.value.value))
+        self.assertTrue(sampled, "read no sampled ops, so this checked none")
+        self.assertEqual(sorted(set(sampled) - declared), [],
+                         "these are sampled and no schema declares them")
