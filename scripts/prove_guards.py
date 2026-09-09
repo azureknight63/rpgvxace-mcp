@@ -104,127 +104,127 @@ OBS = "tests/test_schema.py::TestSchemaObservation::"
 SAFE = "tests/test_schema.py::TestResponseTextSafety::"
 UNMOD = "tests/test_schema.py::TestUnmodelledEngine::"
 PROV = "tests/test_schema.py::TestSchemaReportProvenance::"
-PATH = "tests/test_tools.py::TestPathContainment::"
-PATHRO = "tests/test_tools.py::TestPathContainmentReadOnly::"
-PRUNE = "tests/test_tools.py::TestBackupPruning::"
-BOMB = "tests/test_tools.py::TestScriptInflateLimit::"
-STALE = "tests/test_tools.py::TestStalenessDetection::"
-LOG = "tests/test_tools.py::TestDeletionIsLogged::"
-FORM = "tests/test_tools.py::TestScriptNameStringForm::"
-HOSTILE = "tests/test_tools.py::TestHostileDataFolder::"
-RESTORE = "tests/test_tools.py::TestRestoreValidatesBeforeActing::"
-RTP = "tests/test_tools.py::TestRtpOverrideIsHonest::"
+PATH = "tests/test_guards_writes.py::TestPathContainment::"
+PATHRO = "tests/test_guards_writes.py::TestPathContainmentReadOnly::"
+PRUNE = "tests/test_guards_writes.py::TestBackupPruning::"
+BOMB = "tests/test_guards_bounds.py::TestScriptInflateLimit::"
+STALE = "tests/test_guards_writes.py::TestStalenessDetection::"
+LOG = "tests/test_guards_writes.py::TestDeletionIsLogged::"
+FORM = "tests/test_guards_writes.py::TestScriptNameStringForm::"
+HOSTILE = "tests/test_guards_writes.py::TestHostileDataFolder::"
+RESTORE = "tests/test_guards_writes.py::TestRestoreValidatesBeforeActing::"
+RTP = "tests/test_guards_replies.py::TestRtpOverrideIsHonest::"
 HARD = "tests/test_protocol.py::TestTransportHardening::"
-VRTP = "tests/test_tools.py::TestValidateRespectsTheRtp::"
-VTBL = "tests/test_tools.py::TestValidateTellsUnreadableFromEmpty::"
-VPAGE = "tests/test_tools.py::TestValidatePageNumbersMatchTheTools::"
-VMISS = "tests/test_tools.py::TestValidateDistinguishesMissingFromBroken::"
-VHOST = "tests/test_tools.py::TestValidateSurvivesHostileData::"
-VSCOPE = "tests/test_tools.py::TestValidateScoping::"
-VSTART = "tests/test_tools.py::TestValidateChecksTheStartPosition::"
-STAGE = "tests/test_tools.py::TestNothingIsStaged::"
-DBID = "tests/test_tools.py::TestDatabaseIdsAreChecked::"
-COERCE = "tests/test_tools.py::TestArgumentsAreNotCoerced::"
-MAPW = "tests/test_tools.py::TestMapWritesStayConsistent::"
-RAWD = "tests/test_tools.py::TestRawDataRefusesBreakage::"
-SEARCHED = "tests/test_tools.py::TestSearchReportsWhatItSearched::"
-READ = "tests/test_tools.py::TestSearchDoesNotClaimToHaveRead::"
-CREATE = "tests/test_tools.py::TestMapCreateIsStaged::"
-SCRIPTAT = "tests/test_tools.py::TestScriptHitsSayWhere::"
-SHAPE = "tests/test_tools.py::TestArgumentShapeIsEnforced::"
-ATFIELD = "tests/test_tools.py::TestAtPrefixedFieldsAreRefused::"
-EVERY = "tests/test_tools.py::TestGuardsRunOnEveryPath::"
-TALLY = "tests/test_tools.py::TestFindingCountsAreTrustworthy::"
-REDOS = "tests/test_tools.py::TestSearchRefusesTheHangingPattern::"
-DELSTALE = "tests/test_tools.py::TestDeletingRespectsStaleness::"
-CANON = "tests/test_tools.py::TestMapIdsAreCanonical::"
-FIELD = "tests/test_tools.py::TestAPatchCannotInventAField::"
-PERFILE = "tests/test_tools.py::TestStagingIsPerFile::"
-BOUND = "tests/test_tools.py::TestCollectionIsBounded::"
-OPARG = "tests/test_tools.py::TestInapplicableArgumentsAreRefused::"
-NESTED = "tests/test_tools.py::TestANestedPatchCannotInventAField::"
-ADDPAGE = "tests/test_tools.py::TestAddPageRefusesInsteadOfCrashing::"
-FAST = "tests/test_tools.py::TestSearchPatternsStayFast::"
-CLIP = "tests/test_tools.py::TestSearchSaysWhatItDidNotRead::"
-MAPEV = "tests/test_tools.py::TestAMapPatchCannotMoveAnEvent::"
-LAYOUT = "tests/test_tools.py::TestCommandReferenceSaysWhoseLayoutsTheseAre::"
-RAWSCR = "tests/test_tools.py::TestRawDataWillNotHandBackCompressedScripts::"
-EMPTYC = "tests/test_tools.py::TestAnEmptyCommandListIsRefusedEverywhere::"
-PAGES = "tests/test_tools.py::TestDamagedPagesAreRefusedNotCrashedOn::"
-REFCNT = "tests/test_tools.py::TestReferenceCountsDoNotUnderstate::"
-DBARG = "tests/test_tools.py::TestDbGetArgumentsAreHonoured::"
-EMPTYT = "tests/test_tools.py::TestMapTilesNamesAnEmptyTable::"
-GROW = "tests/test_tools.py::TestGrowingAMapIsBoundedToo::"
-DROPPED = "tests/test_tools.py::TestDiscardedTileCountIsRight::"
-LISTCAP = "tests/test_tools.py::TestOneCommandListHasACeiling::"
-SNAPDRY = "tests/test_tools.py::TestSnapshotPreviewMatchesTheSnapshot::"
-BUDGET = "tests/test_tools.py::TestReadingManyEntriesSharesOneBudget::"
-AREAID = "tests/test_tools.py::TestHashTablesThatCarryTheirOwnId::"
-GATES = "tests/test_tools.py::TestEveryOpSelectingToolHasATable::"
-GATED = "tests/test_tools.py::TestOpArgumentsAreGatedEverywhere::"
-COMMON = "tests/test_tools.py::TestCommonEventOpsAreGatedToo::"
-BUDGETONE = "tests/test_tools.py::TestOneBudgetForAWholeResponse::"
-TILETALLY = "tests/test_tools.py::TestTileTallySaysWhatItLeftOut::"
-MAPREFS = "tests/test_tools.py::TestMapReferenceCountsDoNotUnderstate::"
-LOOKAROUND = "tests/test_tools.py::TestLookaroundIsRefusedByName::"
-CLOSED = "tests/test_tools.py::TestTheShapeGateFailsClosed::"
-WHOLE = "tests/test_tools.py::TestAWholesaleObjectCannotInventFields::"
-NOOP = "tests/test_tools.py::TestNoOpSlipsPastTheGate::"
-READDROP = "tests/test_tools.py::TestReadToolsDropNoArgumentsEither::"
-FILTERED = "tests/test_tools.py::TestAFilteredListSaysItWasFiltered::"
-UNREAD = "tests/test_tools.py::TestUnreadableStructuresAreNotReportedAsEmpty::"
-TILESNONE = "tests/test_tools.py::TestMapGetHonoursTilesWithoutATable::"
-PAGEARG = "tests/test_tools.py::TestEventGetChecksThePageItWasGiven::"
-DELPREV = "tests/test_tools.py::TestADeletePreviewMatchesTheDelete::"
-NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
-BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
-INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
-AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
-TYPED = ("tests/test_tools.py::TestADeclaredTypeIsChecked::")
-BEFOREWORK = ("tests/test_tools.py::TestARefusalComesBeforeTheWork::")
-SLOTID = ("tests/test_tools.py::TestAScriptSlotIdIsCalledAnId::")
-CACHEBOUND = ("tests/test_tools.py::TestTheFileCacheIsBounded::")
-FOREIGN = ("tests/test_tools.py::TestAForeignBackupDirectoryIsSkipped::")
-ONCE = ("tests/test_tools.py::TestAMapEditResolvesEachArgumentOnce::")
-CRAFTED = ("tests/test_tools.py::TestACraftedNameIsBoundedInAReplyToo::")
-ASSETSTALE = ("tests/test_tools.py::TestAnAssetAddedMidSessionIsSeen::")
-SPELLINGS = ("tests/test_tools.py::TestTwoSpellingsOfOneArgumentAgree::")
-MAPSCOPE = ("tests/test_tools.py::TestTheMapScopeStopsCollecting::")
+VRTP = "tests/test_guards_replies.py::TestValidateRespectsTheRtp::"
+VTBL = "tests/test_guards_replies.py::TestValidateTellsUnreadableFromEmpty::"
+VPAGE = "tests/test_guards_replies.py::TestValidatePageNumbersMatchTheTools::"
+VMISS = "tests/test_guards_replies.py::TestValidateDistinguishesMissingFromBroken::"
+VHOST = "tests/test_guards_bounds.py::TestValidateSurvivesHostileData::"
+VSCOPE = "tests/test_guards_replies.py::TestValidateScoping::"
+VSTART = "tests/test_guards_replies.py::TestValidateChecksTheStartPosition::"
+STAGE = "tests/test_guards_writes.py::TestNothingIsStaged::"
+DBID = "tests/test_guards_arguments.py::TestDatabaseIdsAreChecked::"
+COERCE = "tests/test_guards_arguments.py::TestArgumentsAreNotCoerced::"
+MAPW = "tests/test_guards_writes.py::TestMapWritesStayConsistent::"
+RAWD = "tests/test_guards_arguments.py::TestRawDataRefusesBreakage::"
+SEARCHED = "tests/test_guards_replies.py::TestSearchReportsWhatItSearched::"
+READ = "tests/test_guards_replies.py::TestSearchDoesNotClaimToHaveRead::"
+CREATE = "tests/test_guards_writes.py::TestMapCreateIsStaged::"
+SCRIPTAT = "tests/test_guards_replies.py::TestScriptHitsSayWhere::"
+SHAPE = "tests/test_guards_arguments.py::TestArgumentShapeIsEnforced::"
+ATFIELD = "tests/test_guards_fields.py::TestAtPrefixedFieldsAreRefused::"
+EVERY = "tests/test_guards_arguments.py::TestGuardsRunOnEveryPath::"
+TALLY = "tests/test_guards_replies.py::TestFindingCountsAreTrustworthy::"
+REDOS = "tests/test_guards_patterns.py::TestSearchRefusesTheHangingPattern::"
+DELSTALE = "tests/test_guards_writes.py::TestDeletingRespectsStaleness::"
+CANON = "tests/test_guards_arguments.py::TestMapIdsAreCanonical::"
+FIELD = "tests/test_guards_fields.py::TestAPatchCannotInventAField::"
+PERFILE = "tests/test_guards_writes.py::TestStagingIsPerFile::"
+BOUND = "tests/test_guards_bounds.py::TestCollectionIsBounded::"
+OPARG = "tests/test_guards_arguments.py::TestInapplicableArgumentsAreRefused::"
+NESTED = "tests/test_guards_fields.py::TestANestedPatchCannotInventAField::"
+ADDPAGE = "tests/test_guards_arguments.py::TestAddPageRefusesInsteadOfCrashing::"
+FAST = "tests/test_guards_patterns.py::TestSearchPatternsStayFast::"
+CLIP = "tests/test_guards_replies.py::TestSearchSaysWhatItDidNotRead::"
+MAPEV = "tests/test_guards_writes.py::TestAMapPatchCannotMoveAnEvent::"
+LAYOUT = "tests/test_guards_replies.py::TestCommandReferenceSaysWhoseLayoutsTheseAre::"
+RAWSCR = "tests/test_guards_arguments.py::TestRawDataWillNotHandBackCompressedScripts::"
+EMPTYC = "tests/test_guards_arguments.py::TestAnEmptyCommandListIsRefusedEverywhere::"
+PAGES = "tests/test_guards_bounds.py::TestDamagedPagesAreRefusedNotCrashedOn::"
+REFCNT = "tests/test_guards_replies.py::TestReferenceCountsDoNotUnderstate::"
+DBARG = "tests/test_guards_arguments.py::TestDbGetArgumentsAreHonoured::"
+EMPTYT = "tests/test_guards_arguments.py::TestMapTilesNamesAnEmptyTable::"
+GROW = "tests/test_guards_bounds.py::TestGrowingAMapIsBoundedToo::"
+DROPPED = "tests/test_guards_writes.py::TestDiscardedTileCountIsRight::"
+LISTCAP = "tests/test_guards_bounds.py::TestOneCommandListHasACeiling::"
+SNAPDRY = "tests/test_guards_writes.py::TestSnapshotPreviewMatchesTheSnapshot::"
+BUDGET = "tests/test_guards_bounds.py::TestReadingManyEntriesSharesOneBudget::"
+AREAID = "tests/test_guards_arguments.py::TestHashTablesThatCarryTheirOwnId::"
+GATES = "tests/test_guards_arguments.py::TestEveryOpSelectingToolHasATable::"
+GATED = "tests/test_guards_arguments.py::TestOpArgumentsAreGatedEverywhere::"
+COMMON = "tests/test_guards_arguments.py::TestCommonEventOpsAreGatedToo::"
+BUDGETONE = "tests/test_guards_bounds.py::TestOneBudgetForAWholeResponse::"
+TILETALLY = "tests/test_guards_replies.py::TestTileTallySaysWhatItLeftOut::"
+MAPREFS = "tests/test_guards_replies.py::TestMapReferenceCountsDoNotUnderstate::"
+LOOKAROUND = "tests/test_guards_patterns.py::TestLookaroundIsRefusedByName::"
+CLOSED = "tests/test_guards_patterns.py::TestTheShapeGateFailsClosed::"
+WHOLE = "tests/test_guards_fields.py::TestAWholesaleObjectCannotInventFields::"
+NOOP = "tests/test_guards_arguments.py::TestNoOpSlipsPastTheGate::"
+READDROP = "tests/test_guards_arguments.py::TestReadToolsDropNoArgumentsEither::"
+FILTERED = "tests/test_guards_replies.py::TestAFilteredListSaysItWasFiltered::"
+UNREAD = "tests/test_guards_replies.py::TestUnreadableStructuresAreNotReportedAsEmpty::"
+TILESNONE = "tests/test_guards_arguments.py::TestMapGetHonoursTilesWithoutATable::"
+PAGEARG = "tests/test_guards_arguments.py::TestEventGetChecksThePageItWasGiven::"
+DELPREV = "tests/test_guards_writes.py::TestADeletePreviewMatchesTheDelete::"
+NILFILL = "tests/test_guards_arguments.py::TestRawDataCanFillANilField::"
+BOUNDED = "tests/test_guards_bounds.py::TestRefusalsAreBounded::"
+INERT = "tests/test_guards_arguments.py::TestSearchRefusesAnInertRegexFlag::"
+AMPLIFY = "tests/test_guards_bounds.py::TestSharedChildrenCannotAmplifyAWalk::"
+TYPED = "tests/test_guards_arguments.py::TestADeclaredTypeIsChecked::"
+BEFOREWORK = "tests/test_guards_arguments.py::TestARefusalComesBeforeTheWork::"
+SLOTID = "tests/test_guards_replies.py::TestAScriptSlotIdIsCalledAnId::"
+CACHEBOUND = "tests/test_guards_bounds.py::TestTheFileCacheIsBounded::"
+FOREIGN = "tests/test_guards_writes.py::TestAForeignBackupDirectoryIsSkipped::"
+ONCE = "tests/test_guards_arguments.py::TestAMapEditResolvesEachArgumentOnce::"
+CRAFTED = "tests/test_guards_replies.py::TestACraftedNameIsBoundedInAReplyToo::"
+ASSETSTALE = "tests/test_guards_writes.py::TestAnAssetAddedMidSessionIsSeen::"
+SPELLINGS = "tests/test_guards_arguments.py::TestTwoSpellingsOfOneArgumentAgree::"
+MAPSCOPE = "tests/test_guards_bounds.py::TestTheMapScopeStopsCollecting::"
 DOCSAGREE = ("tests/test_schema.py::TestTheReferenceAgreesWithTheTables::")
-PREVIEW = ("tests/test_tools.py::TestEveryPreviewReadsAsAPreview::")
-NARROW = ("tests/test_tools.py::TestNarrowingValidateActuallyNarrowsIt::")
-TILEBUF = ("tests/test_tools.py::TestATileTallyUsesTheBuffer::")
-SPENDS = ("tests/test_tools.py::TestEveryWalkSpendsItsAllowance::")
-NOPAGES = ("tests/test_tools.py::TestAnEventWithNoPagesStillCostsARow::")
-EMPTYPAGE = ("tests/test_tools.py::TestAnEmptyPageStillCostsSomething::")
-BATCH = ("tests/test_tools.py::TestOneBatchGetsOneWalkAllowance::")
-FAILCLOSED2 = ("tests/test_tools.py::TestTheMeasurementFailsClosedOnEveryAbnormalExit::")
-LENGTHS = ("tests/test_tools.py::TestEveryDeclaredLengthLimitIsEnforced::")
-DSLINT = ("tests/test_tools.py::TestTheDslRefusesACoercibleId::")
-DSLCHOICE = ("tests/test_tools.py::TestAChoiceBranchIsNeverDropped::")
-CALLABLE = ("tests/test_tools.py::TestEveryConversionBranchIsCallable::")
-COUNTS = ("tests/test_tools.py::TestACountIsNamedForWhatItCounted::")
-DRYRUN = ("tests/test_tools.py::TestADryRunDoesNotReadAsDone::")
-SCOPECLAIM = ("tests/test_tools.py::TestAScopeIsClaimedOnlyOnceRead::")
-SUMMARY = ("tests/test_tools.py::TestMapGetBoundsItsEventSummary::")
-BYTES = ("tests/test_tools.py::TestARenderedCommandLineIsBoundedInBytes::")
-SLOTS = ("tests/test_tools.py::TestASkippedPageSlotIsStillCountedForReading::")
-EVERYPATH = ("tests/test_tools.py::TestATruncatedSummarySaysSoOnEveryPath::")
-LISTEDNAME = ("tests/test_tools.py::TestAListedNameIsCappedLikeEveryOtherName::")
-RAWPATH = ("tests/test_tools.py::TestARawPathCannotBeUnboundedlyLong::")
-SCOPEALLOW = ("tests/test_tools.py::TestEveryScopeSpendsTheSameAllowance::")
-DSLIDS = ("tests/test_tools.py::TestEveryIdInTheDslRefusesACoercibleValue::")
-CRAFTEDCOMMON = ("tests/test_tools.py::TestACraftedCommonEventIsReportedNotCrashed::")
-CHILD = ("tests/test_tools.py::TestTheMeasurementReachesItsChild::")
-REMEMBERS = ("tests/test_tools.py::TestWhatTheMeasurementRemembers::")
-SHAPECLOSED = ("tests/test_tools.py::TestTheShapeGateFailsClosedThroughout::")
-NAMES = ("tests/test_tools.py::TestEveryNameFromJsonIsChecked::")
-HIDDEN = ("tests/test_tools.py::TestAnInventedFieldCannotHideInAContainer::")
-WRITEPATH = ("tests/test_tools.py::TestEveryWalkOnAWritePathIsBounded::")
-CEILING = ("tests/test_tools.py::TestNoWalkCollectsPastTheCeiling::")
-SUBJECTS = ("tests/test_tools.py::TestEveryNamedCharacterIsMeasured::")
-SEARCHWORK = ("tests/test_tools.py::TestSearchBoundsItsTotalWork::")
-FAILCLOSED = "tests/test_tools.py::TestTheMeasurementFailsClosed::"
+PREVIEW = "tests/test_guards_writes.py::TestEveryPreviewReadsAsAPreview::"
+NARROW = "tests/test_guards_bounds.py::TestNarrowingValidateActuallyNarrowsIt::"
+TILEBUF = "tests/test_guards_bounds.py::TestATileTallyUsesTheBuffer::"
+SPENDS = "tests/test_guards_bounds.py::TestEveryWalkSpendsItsAllowance::"
+NOPAGES = "tests/test_guards_bounds.py::TestAnEventWithNoPagesStillCostsARow::"
+EMPTYPAGE = "tests/test_guards_bounds.py::TestAnEmptyPageStillCostsSomething::"
+BATCH = "tests/test_guards_bounds.py::TestOneBatchGetsOneWalkAllowance::"
+FAILCLOSED2 = ("tests/test_guards_patterns.py::TestTheMeasurementFailsClosedOnEveryAbnormalExit::")
+LENGTHS = "tests/test_guards_arguments.py::TestEveryDeclaredLengthLimitIsEnforced::"
+DSLINT = "tests/test_guards_arguments.py::TestTheDslRefusesACoercibleId::"
+DSLCHOICE = "tests/test_guards_arguments.py::TestAChoiceBranchIsNeverDropped::"
+CALLABLE = "tests/test_guards_fields.py::TestEveryConversionBranchIsCallable::"
+COUNTS = "tests/test_guards_replies.py::TestACountIsNamedForWhatItCounted::"
+DRYRUN = "tests/test_guards_writes.py::TestADryRunDoesNotReadAsDone::"
+SCOPECLAIM = "tests/test_guards_replies.py::TestAScopeIsClaimedOnlyOnceRead::"
+SUMMARY = "tests/test_guards_bounds.py::TestMapGetBoundsItsEventSummary::"
+BYTES = "tests/test_guards_bounds.py::TestARenderedCommandLineIsBoundedInBytes::"
+SLOTS = "tests/test_guards_bounds.py::TestASkippedPageSlotIsStillCountedForReading::"
+EVERYPATH = "tests/test_guards_replies.py::TestATruncatedSummarySaysSoOnEveryPath::"
+LISTEDNAME = "tests/test_guards_replies.py::TestAListedNameIsCappedLikeEveryOtherName::"
+RAWPATH = "tests/test_guards_bounds.py::TestARawPathCannotBeUnboundedlyLong::"
+SCOPEALLOW = "tests/test_guards_bounds.py::TestEveryScopeSpendsTheSameAllowance::"
+DSLIDS = "tests/test_guards_arguments.py::TestEveryIdInTheDslRefusesACoercibleValue::"
+CRAFTEDCOMMON = "tests/test_guards_arguments.py::TestACraftedCommonEventIsReportedNotCrashed::"
+CHILD = "tests/test_guards_patterns.py::TestTheMeasurementReachesItsChild::"
+REMEMBERS = "tests/test_guards_patterns.py::TestWhatTheMeasurementRemembers::"
+SHAPECLOSED = "tests/test_guards_patterns.py::TestTheShapeGateFailsClosedThroughout::"
+NAMES = "tests/test_guards_fields.py::TestEveryNameFromJsonIsChecked::"
+HIDDEN = "tests/test_guards_fields.py::TestAnInventedFieldCannotHideInAContainer::"
+WRITEPATH = "tests/test_guards_bounds.py::TestEveryWalkOnAWritePathIsBounded::"
+CEILING = "tests/test_guards_bounds.py::TestNoWalkCollectsPastTheCeiling::"
+SUBJECTS = "tests/test_guards_patterns.py::TestEveryNamedCharacterIsMeasured::"
+SEARCHWORK = "tests/test_guards_bounds.py::TestSearchBoundsItsTotalWork::"
+FAILCLOSED = "tests/test_guards_patterns.py::TestTheMeasurementFailsClosed::"
 
 GUARDS = [
     Guard(
@@ -1836,11 +1836,22 @@ GUARDS = [
         'the counter sat inside the pages loop while the event row was appended outside it, so a hash of a million links to an event with no pages built a million dicts -- and MAX_TOOL_RESULT_CHARS is measured after the reply is serialised, so it bounds the response and not the work',
     ),
     Guard(
-        'one batch gets one walk allowance', DB_TOOLS,
-        '        self.walk = WalkBudget()',
-        '        self.walk = None',
+        'one batch gets one reference walk', DB_TOOLS,
+        # The anchor moved from the shared allowance to the shared *walk*.
+        # Sharing one allowance capped the damage of asking per op; asking
+        # once removes it, so a reverted `self.walk` now proves nothing --
+        # `reference_previews` builds its own budget for the one pass it
+        # makes. The bulk call is what the property rests on now.
+        '''    request.references = reference_previews(
+        ctx.project, table,
+        {entry_id for entry_id in (opt_int(raw_op, "id")
+                                   for raw_op in ops
+                                   if raw_op.get("op") == "delete")
+         if entry_id is not None},
+        "a delete's reference scan", request.walk)''',
+        '''    request.references = {}''',
         [BATCH + "test_a_batch_shares_one_allowance"],
-        'a db_edit carrying two hundred deletes of unreferenced entries got two hundred separate 200,000-step allowances, because the walk returns early only when it finds hits',
+        'a db_edit carrying two hundred deletes of unreferenced entries made two hundred whole-project traversals of the same unchanged command lists, because the walk returns early only when it finds hits -- so the ordinary case, deleting an entry nothing points at, is the expensive one',
     ),
     Guard(
         'the measurement fails closed on every abnormal exit', SAFETY,
@@ -1859,12 +1870,20 @@ GUARDS = [
     ),
     Guard(
         'a declared length limit applies to every mode', SEARCH_TOOLS,
-        '''    if len(query) > MAX_PATTERN_CHARS:
+        # Two anchors: the round that taught `_check_declared` to enforce a
+        # declared `maxLength` made this property doubly held, so reverting
+        # the hand check alone leaves the gate and reads VACUOUS. Removing
+        # both is the only way to ask whether it is held at all -- and the
+        # hand check still earns its place, because it is what makes the
+        # refusal say the same thing in both modes.
+        ['''    if len(query) > MAX_PATTERN_CHARS:
         raise ToolError(
             "the query is %d characters, above the %d this server accepts. "''',
-        '''    if False:
+         '''                      maxLength=MAX_PATTERN_CHARS),'''],
+        ['''    if False:
         raise ToolError(
             "the query is %d characters, above the %d this server accepts. "''',
+         '''                      ),'''],
         [LENGTHS + "test_a_long_substring_query_is_refused",
          LENGTHS + "test_both_modes_refuse_at_the_same_length"],
         'the substring branch returned before the check, so a megabyte-long query was accepted while the same string as a regex was refused -- and the ceiling test passed it because it checks that a limit is declared, not that it is applied',

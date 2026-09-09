@@ -1,0 +1,253 @@
+"""The project fixture every tool test runs against, and two crafted maps.
+
+Its own module so both halves of the suite import *down* to it rather than
+one importing the other -- the sibling-import problem the tools layer had
+just finished fixing, and worse here: a guard names its test by file, so a
+# Imported for their side effect: each of these modules registers its tools
+# with `REGISTRY` at import time, so a suite that never mentions them still
+# needs them loaded -- and `REGISTRY` is empty without them, which reads as
+# "the tool does not exist" rather than as a missing import.
+#
+# Here rather than in each suite, because that is exactly what went wrong
+# when this file was split out: pyflakes reports the block as unused, the
+# automatic prune believed it, and three real-project tests then failed with
+# KeyError on a tool name.
+from rpgvxace_mcp.tools import (  # noqa: E402,F401
+    db_tools,
+    event_tools,
+    map_common,
+    map_edit_tools,
+    map_read_tools,
+    map_tile_tools,
+    misc_tools,
+    raw_tools,
+    search_tools,
+)
+
+class that moves because another file imported it takes its guard with it.
+
+`ToolTest` builds a fresh demo project per test method. The mixins build
+the crafted files only the bound tests need: a map whose objects share
+children, and a map of events with empty pages.
+"""
+
+import shutil
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "src"))
+sys.path.insert(0, str(HERE / "fixtures"))
+
+from build_project import build  # noqa: E402
+
+from rpgvxace_mcp import marshal_rb  # noqa: E402
+from rpgvxace_mcp.project import (  # noqa: E402
+    Project,
+)
+from rpgvxace_mcp.rubytypes import (  # noqa: E402
+    RubyHash,
+    RubyObject,
+)
+from rpgvxace_mcp.tools.registry import (  # noqa: E402
+    Context,
+    REGISTRY,
+)
+
+
+class ToolTest(unittest.TestCase):
+    """Base class giving each test its own copy of the demo project.
+
+    Subclasses set ``engine`` to run the same checks against the other engine
+    in the family.
+    """
+
+    read_only = False
+    engine = "vx_ace"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        build(self.tmp / "project", self.engine)
+        self.project = Project(self.tmp / "project", read_only=self.read_only)
+        self.ctx = Context(self.project)
+
+    @property
+    def ace(self) -> bool:
+        return self.engine == "vx_ace"
+
+    @property
+    def extension(self) -> str:
+        return ".rvdata2" if self.ace else ".rvdata"
+
+    def call(self, tool_name, /, **arguments):
+        # run(), not handler(): a real call goes through the argument check,
+        # so the tests should too.
+        return REGISTRY[tool_name].run(self.ctx, arguments)
+
+    def reopen(self):
+        """A fresh Project, to prove a change actually reached the disk."""
+        return Context(Project(self.tmp / "project"))
+
+    def data_bytes(self, stem):
+        """Bytes of one data file, named without its extension."""
+        name = stem if stem.endswith(self.extension) else stem + self.extension
+        return (self.tmp / "project" / "Data" / name).read_bytes()
+
+
+class ValidateTest(ToolTest):
+    """Helpers for the rules that must not cry wolf."""
+
+    def findings(self, rule=None, **arguments):
+        rows = self.call("validate", **arguments)["findings"]
+        return [f for f in rows if rule is None or f["rule"] == rule]
+
+    def corrupt(self, stem):
+        """Leave a data file that exists but cannot be parsed."""
+        name = stem if stem.endswith(self.extension) else stem + self.extension
+        (self.tmp / "project" / "Data" / name).write_bytes(b"\x04\x08 not marshal")
+
+    def declare_missing_rtp(self):
+        """Point Game.ini at an RTP that is not installed anywhere."""
+        (self.tmp / "project" / "Game.ini").write_text(
+            "[Game]\nRTP1=NoSuchRtpAnywhere\nLibrary=System\\RGSS300.dll\n"
+            "Scripts=Data\\Scripts%s\nTitle=Demo\n" % self.extension,
+            encoding="utf-8")
+        self.project = Project(self.tmp / "project")
+        self.ctx = Context(self.project)
+        self.assertFalse(self.project.assets_complete)
+
+    def first_event(self, map_id=1):
+        game_map = self.project.load_map(map_id)
+        event_id, event = game_map.get("events").sorted_items()[0]
+        return game_map, event_id, event
+
+
+class SharedObjectMap:
+    """Builds a map whose objects share children, for the walk-bound tests.
+
+    A mixin rather than a base class: two suites need this map and only this
+    map, and a second copy of the builder would be a second thing to keep in
+    step with the RPG::Event::Page field list.
+    """
+
+    # Small enough to build quickly, large enough that an unbounded walk is
+    # unmistakable: 2000 x 50 x 50 is five million command visits.
+    LIST_LEN, PAGES, EVENTS = 2000, 50, 50
+
+    # Far below the 13-36 seconds measured without a bound, and far above what
+    # any of the bounded walks costs.
+    BUDGET_SECONDS = 10.0
+
+    def craft_shared_map(self):
+        """Rewrite map 1 so every command, page and event is one shared object."""
+        game_map = self.project.load_map(1)
+        command = RubyObject("RPG::EventCommand")
+        command.set("code", 108)
+        command.set("indent", 0)
+        command.set("parameters", [self.project.codec.make_string("x")])
+
+        page = RubyObject("RPG::Event::Page")
+        page.set("condition", RubyObject("RPG::Event::Page::Condition"))
+        page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
+        for name, value in (("trigger", 0), ("priority_type", 0),
+                            ("move_type", 0), ("move_speed", 3),
+                            ("move_frequency", 3), ("walk_anime", True),
+                            ("step_anime", False), ("direction_fix", False),
+                            ("through", False)):
+            page.set(name, value)
+        page.set("list", [command] * self.LIST_LEN)
+
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", [page] * self.PAGES)
+
+        events = RubyHash()
+        for event_id in range(1, self.EVENTS + 1):
+            events.set(event_id, event)
+        game_map.set("events", events)
+
+        path = self.project.path_for(self.project.map_file(1))
+        path.write_bytes(marshal_rb.dump(game_map))
+        # Small on disk is the whole point of the finding.
+        self.assertLess(path.stat().st_size, 64 * 1024)
+        self.ctx = self.reopen()
+
+    def assert_bounded(self, tool_name, **arguments):
+        import time
+        start = time.perf_counter()
+        out = self.call(tool_name, **arguments)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, self.BUDGET_SECONDS,
+                        "%s took %.1fs on a 7 KB crafted map"
+                        % (tool_name, elapsed))
+        return out
+
+
+class EmptyPageMap:
+    """A map whose amplification is entirely in (events x pages).
+
+    Every page holds an empty @list, so every charge of the form
+    `spend(len(commands))` is free. One page condition flag is set so the page
+    is not "unconditional", which is what keeps `_check_shadowing` walking and
+    producing nothing -- a finding ceiling cannot bound a walk that finds
+    nothing. The graphic is left empty for the same reason in the asset walk:
+    `_AssetChecker.check` returns before it counts anything.
+    """
+
+    # 4,000,000 pairs from ~18 KB. Large enough that an unbounded walk is
+    # unmistakable, small enough to build in a test.
+    PAGES, EVENTS = 2000, 2000
+
+    BUDGET_SECONDS = 10.0
+
+    def craft_empty_page_map(self):
+        page = RubyObject("RPG::Event::Page")
+        condition = RubyObject("RPG::Event::Page::Condition")
+        # Truthy, so the page is not unconditional and the shadowing rule
+        # keeps looking without ever collecting.
+        condition.set("switch1_valid", True)
+        condition.set("switch1_id", 1)
+        page.set("condition", condition)
+        # Empty, so the asset checker returns before it collects.
+        page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
+        for name, value in (("trigger", 0), ("priority_type", 0),
+                            ("move_type", 0), ("move_speed", 3),
+                            ("move_frequency", 3), ("walk_anime", True),
+                            ("step_anime", False), ("direction_fix", False),
+                            ("through", False)):
+            page.set(name, value)
+        page.set("list", [])          # the bypass
+
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", [page] * self.PAGES)
+
+        events = RubyHash()
+        for event_id in range(1, self.EVENTS + 1):
+            events.set(event_id, event)
+        game_map = self.project.load_map(1)
+        game_map.set("events", events)
+        path = self.project.path_for(self.project.map_file(1))
+        path.write_bytes(marshal_rb.dump(game_map))
+        self.assertLess(path.stat().st_size, 128 * 1024,
+                        "the point of the finding is that it is small")
+        self.ctx = self.reopen()
+
+    def assert_bounded(self, tool_name, **arguments):
+        import time
+        start = time.perf_counter()
+        out = self.call(tool_name, **arguments)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, self.BUDGET_SECONDS,
+                        "%s took %.1fs on a map of empty pages"
+                        % (tool_name, elapsed))
+        return out

@@ -1,0 +1,1074 @@
+"""Guards on the honesty of an answer.
+
+An empty result means nothing without knowing where the search went, a
+count named `total` reads as the size of a table it was not, and a name out
+of a file this server did not write goes into a reply a terminal renders.
+Every rule here is about the difference between "we found nothing" and "we
+did not look".
+"""
+
+import shutil
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "src"))
+sys.path.insert(0, str(HERE / "fixtures"))
+
+from build_project import build  # noqa: E402
+
+from rpgvxace_mcp import marshal_rb  # noqa: E402
+from rpgvxace_mcp.analysis import (  # noqa: E402
+    REFERENCE_PREVIEW,
+    validate as run_validate,
+)
+from rpgvxace_mcp.project import (  # noqa: E402
+    Project,
+)
+from rpgvxace_mcp.rubytypes import (  # noqa: E402
+    RubyHash,
+    RubyObject,
+)
+from rpgvxace_mcp.tools.search_tools import MAX_SUBJECT_CHARS  # noqa: E402
+from rpgvxace_mcp.tools.registry import (  # noqa: E402
+    Context,
+    REGISTRY,
+    ToolError,
+)
+
+# The tool modules this file names directly. Registration -- the
+# side effect of importing them -- is `tool_case`'s job; these are
+# here because the tests below read their op tables.
+from rpgvxace_mcp.tools import (  # noqa: E402
+    event_tools,
+    map_read_tools,
+)
+
+from tool_case import (  # noqa: E402
+    ToolTest,
+    ValidateTest,
+)
+
+
+class TestRtpOverrideIsHonest(unittest.TestCase):
+    def test_an_explicit_rtp_does_not_claim_every_rtp_was_located(self):
+        """--rtp answers for every declared RTP, so the report must not also
+        claim each one was found where the engine installed it."""
+        tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-rtp-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        build(tmp / "project", "vx_ace")
+        (tmp / "project" / "Game.ini").write_text(
+            "[Game]\nRTP1=RPGVXAce\nRTP2=SomethingElse\n"
+            "Library=System\\RGSS300.dll\nScripts=Data\\Scripts.rvdata2\n"
+            "Title=Demo\n", encoding="utf-8")
+        pool = tmp / "pool"
+        (pool / "Graphics" / "Characters").mkdir(parents=True)
+        project = Project(tmp / "project", rtp_paths=[str(pool)])
+        note = project.describe()["rtp"]["note"]
+        self.assertIn("--rtp", note)
+        self.assertNotIn("All declared RTPs were located", note)
+
+
+class TestValidateRespectsTheRtp(ValidateTest):
+    """An unlocatable RTP means a missing file is a guess, not a finding.
+
+    This is the guard that removed 185 false warnings, and one rule was
+    bypassing it: check_tilesets had its own inline comparison, so a project
+    whose RTP could not be found got up to nine spurious warnings per tileset
+    for the default sheets that live in the RTP -- and they outranked the
+    downgraded ones, crowding real findings out of the limit.
+    """
+
+    def setUp(self):
+        super().setUp()
+        if not self.ace:
+            self.skipTest("tilesets are a VX Ace database")
+
+    def test_a_tileset_sheet_miss_is_downgraded_with_an_unresolved_rtp(self):
+        self.call("db_edit", table="tilesets", ops=[{
+            "op": "update", "id": 1,
+            "patch": {"tileset_names": ["RtpOnlySheet", "", "", "", "", "", "", "", ""]}}])
+        self.declare_missing_rtp()
+        found = self.findings("missing_graphic", scopes=["maps"])
+        self.assertTrue(found, "the sheet is genuinely absent locally")
+        for finding in found:
+            self.assertEqual(finding["severity"], "info")
+            self.assertIn("NoSuchRtpAnywhere", finding["message"])
+
+    def test_a_tileset_sheet_miss_is_a_warning_when_the_pool_is_complete(self):
+        self.call("db_edit", table="tilesets", ops=[{
+            "op": "update", "id": 1,
+            "patch": {"tileset_names": ["NotThere", "", "", "", "", "", "", "", ""]}}])
+        found = self.findings("missing_graphic", scopes=["maps"])
+        self.assertTrue(found)
+        self.assertEqual(found[0]["severity"], "warning")
+        self.assertIn("sheet A1", found[0]["message"])
+
+    def test_a_tileset_sheet_case_mismatch_is_reported_as_one(self):
+        """Certain regardless of the RTP: the file is there, spelled otherwise."""
+        pool = sorted(self.project.asset_names("tilesets"))
+        self.assertTrue(pool, "the fixture ships tileset graphics")
+        self.call("db_edit", table="tilesets", ops=[{
+            "op": "update", "id": 1,
+            "patch": {"tileset_names": [pool[0].upper() if pool[0].islower()
+                                        else pool[0].lower(),
+                                        "", "", "", "", "", "", "", ""]}}])
+        found = self.findings("asset_case_mismatch", scopes=["maps"])
+        self.assertTrue(found)
+        self.assertIn("sheet A1", found[0]["message"])
+
+
+class TestValidateTellsUnreadableFromEmpty(ValidateTest):
+    def test_an_unreadable_table_is_one_finding_not_a_dangling_reference_each(self):
+        """A table that will not load is not an empty table.
+
+        The editor rewrites every data file when it saves, so catching one
+        half-written is ordinary -- and treating it as empty made every
+        reference into it an error, which is the loudest possible way to be
+        wrong.
+        """
+        self.corrupt("Troops")
+        rows = self.call("validate", scopes=["maps", "events", "database"])
+        rules = [f["rule"] for f in rows["findings"]]
+        self.assertEqual(rules.count("table_unreadable"), 1, rules)
+        self.assertNotIn("missing_troop", rules)
+        unreadable = [f for f in rows["findings"]
+                      if f["rule"] == "table_unreadable"][0]
+        self.assertIn("troops", unreadable["message"])
+        self.assertIn("validate again", unreadable["message"])
+
+
+class TestValidatePageNumbersMatchTheTools(ValidateTest):
+    def test_a_page_finding_names_the_page_the_tools_take(self):
+        """The message and the location have to agree, and both have to be the
+        0-based index event_edit accepts -- otherwise a model reading "page 2"
+        edits the third page."""
+        game_map, event_id, event = self.first_event()
+        pages = event.get("pages")
+        pages.append(marshal_rb.load(marshal_rb.dump(pages[0])))
+        added = len(pages) - 1
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="second page")
+        self.ctx = Context(Project(self.tmp / "project"))
+        found = self.findings("shadowed_pages", scopes=["events"])
+        self.assertTrue(found)
+        page = found[0]["location"]["page"]
+        self.assertEqual(page, added, "the page reported is the one that wins")
+        self.assertIn("page %d of event" % page, found[0]["message"])
+        self.assertIn("page %d" % page, found[0]["where"])
+
+
+class TestValidateDistinguishesMissingFromBroken(ValidateTest):
+    def test_a_transfer_to_an_unparseable_map_is_not_called_missing(self):
+        """"Does not exist" would send an agent recreating a file that is
+        already there. Existence is the file being present."""
+        target = [m for m in self.project.map_ids_on_disk() if m != 1]
+        self.assertTrue(target, "the fixture ships more than one map")
+        target = target[0]
+        game_map, event_id, event = self.first_event()
+        commands = event.get("pages")[0].get("list")
+        commands.insert(0, RubyObject("RPG::EventCommand", {
+            "@code": 201, "@indent": 0,
+            "@parameters": [0, target, 0, 0, 0, 0]}))
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="transfer")
+        self.corrupt("Map%03d" % target)
+        self.ctx = Context(Project(self.tmp / "project"))
+        rows = self.call("validate", scopes=["maps", "events"])
+        rules = [f["rule"] for f in rows["findings"]]
+        self.assertNotIn("transfer_to_missing_map", rules)
+        self.assertIn("map_unreadable", rules)
+
+
+class TestValidateScoping(ValidateTest):
+    def test_repeated_map_ids_are_counted_once(self):
+        rows = self.call("validate", scopes=["maps"], map_ids=[1, 1, 1, 1])
+        self.assertEqual(rows["maps_examined"], 1)
+
+    def test_a_map_id_that_is_not_there_is_reported_not_examined(self):
+        rows = self.call("validate", scopes=["maps"], map_ids=[1, 4321])
+        self.assertEqual(rows["maps_examined"], 1)
+        self.assertIn("no_such_map", [f["rule"] for f in rows["findings"]])
+
+    def test_a_negative_limit_is_refused_at_the_boundary(self):
+        """The schema declares minimum 1, and that is now enforced."""
+        with self.assertRaises(ToolError) as caught:
+            self.call("validate", scopes=["database"], limit=-5)
+        self.assertIn("at least 1", str(caught.exception))
+
+    def test_a_negative_limit_does_not_drop_findings(self):
+        """The clamp inside validate is the backstop for any other caller:
+        a negative slice would take findings from the wrong end."""
+        self.corrupt("Troops")
+        rows = run_validate(self.project, ["database"], limit=-5)
+        self.assertTrue(rows["findings"], "a negative limit sliced the list")
+
+
+class TestValidateChecksTheStartPosition(ValidateTest):
+    def test_a_start_position_off_the_start_map_is_reported(self):
+        """The one transfer the engine performs before the player can do
+        anything about it, checked the same way every other transfer is."""
+        game_map = self.project.load_map(1)
+        width, height = game_map.get("width"), game_map.get("height")
+        self.call("raw_data", op="set", table="system", path="start_map_id",
+                  value={"value": 1})
+        self.call("raw_data", op="set", table="system", path="start_x",
+                  value={"value": width + 5})
+        found = self.findings("start_position_outside_map", scopes=["database"])
+        self.assertTrue(found)
+        self.assertIn("%sx%s" % (width, height), found[0]["message"])
+        self.assertIn("boots with the party off the map", found[0]["message"])
+
+    def test_a_start_position_on_the_map_is_not_reported(self):
+        self.assertFalse(self.findings("start_position_outside_map",
+                                       scopes=["database"]))
+
+
+class TestSearchReportsWhatItSearched(ToolTest):
+    def test_a_command_code_search_does_not_claim_to_have_searched_text(self):
+        """The other scopes hold no commands, so they are skipped -- and
+        reporting them as searched told the model they had come back empty."""
+        result = self.call("search", command_code=101, scopes=["events", "database"])
+        self.assertEqual(result["scopes_searched"], ["events"])
+
+    def test_an_unknown_scope_is_refused_not_ignored(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("search", query="x", scopes=["scrpits"])
+        self.assertIn("choose from", str(caught.exception))
+
+    def test_a_huge_pattern_is_refused(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("search", query="a" * 1000, regex=True)
+        self.assertIn("characters", str(caught.exception))
+
+
+class TestSearchDoesNotClaimToHaveRead(ValidateTest):
+    def test_a_table_that_would_not_load_is_reported_not_counted(self):
+        """Recording a scope before reading it meant an unreadable file came
+        back as "searched, nothing found" -- the same lie as reporting a scope
+        that was skipped."""
+        self.corrupt("Troops")
+        self.ctx = self.reopen()
+        result = self.call("search", query="zzz", scopes=["database"])
+        self.assertIn("troops", result["could_not_read"])
+        # The scope still counts as searched, because the other tables read.
+        self.assertIn("database", result["scopes_searched"])
+
+    def test_a_scope_whose_only_file_fails_is_not_called_searched(self):
+        self.corrupt("MapInfos")
+        # Reopened, because setUp already read MapInfos into the cache and a
+        # cached copy is still perfectly readable.
+        self.ctx = self.reopen()
+        result = self.call("search", query="zzz", scopes=["maps"])
+        self.assertNotIn("maps", result["scopes_searched"])
+        self.assertIn("map_infos", result["could_not_read"])
+
+
+class TestScriptHitsSayWhere(ToolTest):
+    def test_a_script_hit_names_its_slot_and_line(self):
+        """Location had no "script" branch, so every script hit's `where` was
+        the bare word "script"."""
+        result = self.call("search", query="def ", scopes=["scripts"])
+        self.assertTrue(result["hits"])
+        where = result["hits"][0]["where"]
+        self.assertIn("script ", where)
+        self.assertIn("line ", where)
+
+
+class TestFindingCountsAreTrustworthy(ValidateTest):
+    def test_counts_survive_truncation(self):
+        """Truncating by arrival order before counting meant a flood of
+        warnings from one check could push out a later check's errors, and
+        counts then reported zero errors while errors existed."""
+        self.corrupt("Troops")
+        self.ctx = self.reopen()
+        # An unreadable table (error) and a map id that is not there
+        # (warning), so there is more than one finding and they differ in
+        # severity.
+        rows = self.call("validate", scopes=["maps", "events", "database"],
+                         map_ids=[1, 4321], limit=1)
+        self.assertEqual(len(rows["findings"]), 1)
+        # The one returned is the most severe of the two.
+        self.assertEqual(rows["findings"][0]["severity"], "error")
+        # And the tally counts both, not just the row that came back.
+        self.assertGreaterEqual(rows["counts"]["error"], 1)
+        self.assertGreaterEqual(rows["counts"]["warning"], 1)
+        self.assertGreater(sum(rows["counts"].values()), len(rows["findings"]))
+
+
+class TestSearchSaysWhatItDidNotRead(ToolTest):
+    """A regex is matched against a bounded prefix; a caller must be told.
+
+    A plain substring search reads every string in full and a regex search
+    does not, and the two reported the same shape -- so "no hits" from a regex
+    over a project with long script lines was indistinguishable from a search
+    that had genuinely looked everywhere.
+    """
+
+    def long_note(self):
+        """Put a needle past the prefix a regex will look at."""
+        item = self.project.get_entry("items", 1)
+        padding = "x" * (MAX_SUBJECT_CHARS + 500)
+        item.set("note", self.project.codec.make_string(padding + "NEEDLE"))
+        self.project.save_file(self.project.filename_for("items"),
+                               tool="test", summary="long note")
+
+    def test_a_clipped_regex_search_says_so(self):
+        self.long_note()
+        out = self.call("search", query="NEEDLE", regex=True,
+                        scopes=["database"])
+        self.assertEqual(out["hits"], [])
+        self.assertIn("notes", out)
+        self.assertIn(str(MAX_SUBJECT_CHARS), out["notes"])
+
+    def test_a_substring_search_reads_the_whole_string(self):
+        self.long_note()
+        out = self.call("search", query="NEEDLE", scopes=["database"])
+        self.assertEqual(out["count"], 1)
+        # Nothing was clipped, so nothing is claimed to have been.
+        self.assertNotIn("notes", out)
+
+
+class TestCommandReferenceSaysWhoseLayoutsTheseAre(ToolTest):
+    """An unmodelled engine's layouts are Ace's, and must not read as its own.
+
+    `command_table` and `param_specs` fall back to Ace for an engine this
+    server does not model. Reading is still useful; presenting those layouts as
+    confirmed is how a caller writes a raw command with the wrong parameter
+    order, which the interpreter then misreads.
+    """
+
+    def test_a_modelled_engine_says_yes(self):
+        out = self.call("command_reference", search="text")
+        self.assertTrue(out["layouts_are_this_engines"])
+        self.assertNotIn("engine_warning", out)
+
+    def test_one_code_says_it_too(self):
+        out = self.call("command_reference", code=101)
+        self.assertTrue(out["layouts_are_this_engines"])
+
+    def test_the_move_route_listing_says_it_too(self):
+        """This branch returned before the engine was ever consulted.
+
+        The tool description promises every reply carries the key, and the
+        move-route listing was the one that did not -- so a model reading move
+        codes on an unmodelled engine got no caveat while believing it had one.
+        """
+        out = self.call("command_reference", move_commands=True)
+        self.assertTrue(out["layouts_are_this_engines"])
+        self.assertTrue(out["move_commands"])
+
+    def test_move_commands_refuses_the_arguments_it_ignores(self):
+        """It reads neither `code` nor `search`, and used to accept both."""
+        for extra in ({"code": 101}, {"search": "text"}):
+            with self.subTest(extra=extra):
+                with self.assertRaises(ToolError) as caught:
+                    self.call("command_reference", move_commands=True, **extra)
+                self.assertIn(sorted(extra)[0], str(caught.exception))
+
+
+class TestReferenceCountsDoNotUnderstate(ToolTest):
+    """A preview limit reported as a total is a count that misleads.
+
+    find_references was asked for REFERENCE_PREVIEW hits and len() of the
+    result was reported as the number of references, so an entry referenced
+    three hundred times was said to be referenced twenty-five times -- and a
+    caller could believe it had seen them all.
+    """
+
+    def flood_references(self, count):
+        """Point `count` event commands at item 1."""
+        commands = [{"raw": {"code": 126, "parameters": [1, 0, 0, 1]}}
+                    for _ in range(count)]
+        self.call("event_edit", map_id=1, ops=[
+            {"op": "set_commands", "event_id": 1, "page": 0,
+             "commands": commands}])
+
+    def test_a_count_past_the_preview_says_at_least(self):
+        self.flood_references(REFERENCE_PREVIEW + 10)
+        out = self.call("db_edit", table="items", dry_run=True, ops=[
+            {"op": "delete", "id": 1}])
+        warning = " ".join(out["warnings"])
+        self.assertIn("at least", warning)
+
+    def test_a_count_inside_the_preview_is_exact(self):
+        self.flood_references(3)
+        out = self.call("db_edit", table="items", dry_run=True, ops=[
+            {"op": "delete", "id": 1}])
+        warning = " ".join(out["warnings"])
+        # However many the demo project already had, a count inside the
+        # preview is the real one and is not hedged.
+        self.assertNotIn("at least", warning)
+        self.assertIn("event command", warning)
+
+
+class TestTileTallySaysWhatItLeftOut(ToolTest):
+    """A tally that showed twelve ids promised "which tile ids appear"."""
+
+    def test_it_reports_the_ids_it_did_not_list(self):
+        # More distinct ids on one layer than the tally lists.
+        rows = [[(x + y * 7) % 400 + 1 for x in range(7)] for y in range(7)]
+        self.call("map_tiles", map_id=1, op="write", x=0, y=0, width=7,
+                  height=7, z=0, rows=rows)
+        counts = self.call("map_get", map_id=1,
+                           tiles="counts")["tile_counts"]
+        layer = counts["0"]
+        self.assertGreater(layer["distinct_tile_ids"], map_read_tools.TOP_TILE_IDS)
+        self.assertEqual(
+            layer["tile_ids_not_shown"],
+            layer["distinct_tile_ids"] - len(layer["most_common"]))
+        self.assertGreater(layer["tile_ids_not_shown"], 0)
+
+
+class TestMapReferenceCountsDoNotUnderstate(ToolTest):
+    """The same preview-as-total that db_edit had, on the map path."""
+
+    def test_a_count_past_the_preview_says_at_least(self):
+        # More Transfer Player commands pointing at map 2 than the preview.
+        transfers = [{"transfer": {"map_id": 2, "x": 0, "y": 0}}
+                     for _ in range(REFERENCE_PREVIEW + 5)]
+        self.call("event_edit", map_id=1, ops=[
+            {"op": "set_commands", "event_id": 1, "page": 0,
+             "commands": transfers}])
+        # Map 2 has children in the demo project, so preview the delete.
+        out = self.call("map_edit", op="delete", map_id=2, dry_run=True)
+        self.assertTrue(out["incoming_transfers_truncated"])
+        self.assertEqual(len(out["incoming_transfers"]),
+                         REFERENCE_PREVIEW)
+
+
+class TestAFilteredListSaysItWasFiltered(ToolTest):
+    """A count of what matched must not read as a count of what exists.
+
+    db_list renamed exactly this to `matching_entries` with a comment saying
+    why; map_list kept `total`. And `map_files_without_tree_entry` was set to
+    an empty list whenever a filter was given, without looking -- so a
+    filtered call reported "no orphan map files" from a check that never ran,
+    which is the "a zero would read as nothing looked" failure this codebase
+    guards against everywhere else.
+    """
+
+    def test_the_count_names_what_it_counted(self):
+        everything = self.call("map_list")
+        filtered = self.call("map_list", parent_id=1)
+        self.assertLess(len(filtered["maps"]), len(everything["maps"]))
+        self.assertNotIn("total", filtered)
+        self.assertEqual(filtered["matching_maps"], len(filtered["maps"]))
+
+    def test_a_filter_does_not_claim_there_are_no_orphans(self):
+        """The orphan check is one set difference over the whole tree.
+
+        With a real orphan present, because comparing two empty lists passes
+        whether the check ran or not.
+        """
+        # A map file with no tree entry: exactly what the key reports.
+        self.call("map_edit", op="create", name="Ghost", map_id=9)
+        infos = self.project.load_data("map_infos")
+        infos.delete(9)
+        self.project.save_file(self.project.filename_for("map_infos"),
+                               tool="test", summary="orphan the file")
+        self.ctx = self.reopen()
+
+        unfiltered = self.call("map_list")
+        self.assertIn(9, unfiltered["map_files_without_tree_entry"])
+        filtered = self.call("map_list", parent_id=1)
+        self.assertEqual(filtered["map_files_without_tree_entry"],
+                         unfiltered["map_files_without_tree_entry"])
+
+
+class TestUnreadableStructuresAreNotReportedAsEmpty(ToolTest):
+    """"We could not read it" and "there is nothing there" are different.
+
+    `event_edit` refuses a map whose @events is not a Hash, by name. The three
+    read tools returned an empty list instead, so a model concluded the map
+    has no events when the field is unreadable.
+    """
+
+    def break_events(self):
+        game_map = self.project.load_map(1)
+        game_map.set("events", self.project.codec.make_string("not a hash"))
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="broken events")
+        self.ctx = self.reopen()
+
+    def test_event_get_says_it_could_not_read_them(self):
+        self.break_events()
+        out = self.call("event_get", map_id=1)
+        self.assertEqual(out["events"], [])
+        self.assertIn("validate", " ".join(str(v) for v in out.values()))
+
+    def test_map_get_says_so_too(self):
+        self.break_events()
+        out = self.call("map_get", map_id=1)
+        self.assertIn("validate", " ".join(str(v) for v in out.values()))
+
+    def test_map_list_says_so_too(self):
+        self.break_events()
+        row = next(m for m in self.call("map_list", include_details=True)["maps"]
+                   if m["id"] == 1)
+        self.assertIn("validate", " ".join(str(v) for v in row.values()))
+
+
+class TestAdviceNamesOnlyWhatWillWork(ToolTest):
+    """A remedy the sibling tool refuses is not a remedy.
+
+    db_get's note offered `db_edit op="create"` for every missing id above
+    zero, and db_edit refuses two whole classes of those: an id far past the
+    end of the table (it would pad the table with empty slots), and any id at
+    all in a table db_edit will not touch. The comment above the filter
+    claimed it named "only the ids db_edit will actually accept".
+    """
+
+    def test_an_id_past_the_create_ceiling_is_not_offered(self):
+        out = self.call("db_get", table="items", ids=[1, 500000])
+        self.assertIn("500000", str(out["missing_ids"]))
+        self.assertNotIn("fills in 500000", out["note"])
+        self.assertIn("500000", out["note"])      # named, as refused
+
+    def test_a_table_db_edit_will_not_touch_is_not_offered(self):
+        out = self.call("db_get", table="map_infos", ids=[500])
+        self.assertNotIn('db_edit with op "create"', out["note"])
+        self.assertIn("map_edit", out["note"])
+
+    def test_an_ordinary_empty_slot_is_still_offered(self):
+        total = self.call("db_list", table="items")["matching_entries"]
+        out = self.call("db_get", table="items", ids=[total + 1])
+        self.assertIn("fills in %d" % (total + 1), out["note"])
+
+
+class TestArgumentDescriptionsComeFromTheTables(ToolTest):
+    """A description that lists the wrong ops sends a caller the wrong way.
+
+    `commands` said "for set_commands/append_commands/create" while
+    EVENT_OP_ARGS lets set_page and add_page read it too -- so a model wanting
+    a page with commands on it splits one op into two, or omits the commands.
+    Generated from the table, so the two cannot disagree again.
+    """
+
+    def ops_reading(self, table, argument):
+        return sorted(op for op, reads in table.items() if argument in reads)
+
+    def test_the_commands_description_names_every_op_that_reads_it(self):
+        properties = (REGISTRY["event_edit"].schema["properties"]["ops"]
+                      ["items"]["properties"])
+        described = properties["commands"]["description"]
+        for op in self.ops_reading(event_tools.EVENT_OP_ARGS, "commands"):
+            self.assertIn(op, described,
+                          "%s reads commands and the description omits it" % op)
+
+    def test_the_patch_description_covers_a_common_event(self):
+        properties = (REGISTRY["event_edit"].schema["properties"]["ops"]
+                      ["items"]["properties"])
+        self.assertIn("RPG::CommonEvent", properties["patch"]["description"])
+
+
+class TestACountIsNamedForWhatItCounted(ToolTest):
+    """A filtered reply must not call its count `total`.
+
+    db_list and map_list already carry this rename -- `matching_entries` and
+    `matching_maps` -- with comments saying why: "total" read as the size of
+    the table, so a filtered listing looked like the whole of a much smaller
+    one. event_get and command_reference both filter and both still said
+    `total`.
+    """
+
+    def test_a_filtered_event_read_names_its_count(self):
+        every = self.call("event_get", map_id=1)
+        self.assertIn("matching_events", every)
+        self.assertNotIn("total", every,
+                         "a count named `total` on a filterable reply")
+
+    def test_the_count_follows_the_filter(self):
+        every = self.call("event_get", map_id=1)["matching_events"]
+        one = self.call("event_get", map_id=1, event_ids=[1])
+        self.assertEqual(one["matching_events"], len(one["events"]))
+        self.assertLessEqual(one["matching_events"], every)
+
+    def test_a_map_with_no_events_names_its_count_the_same_way(self):
+        """The zero case is a second literal, so it can drift from the first."""
+        game_map = self.project.load_map(1)
+        game_map.set("events", RubyHash())
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+
+        out = self.call("event_get", map_id=1)
+        self.assertEqual(out["events"], [])
+        self.assertEqual(out["matching_events"], 0)
+        self.assertNotIn("total", out)
+
+    def test_a_filtered_command_reference_names_its_count(self):
+        every = self.call("command_reference")
+        self.assertIn("matching_commands", every)
+        self.assertNotIn("total", every)
+        some = self.call("command_reference", search="text")
+        self.assertEqual(some["matching_commands"], len(some["commands"]))
+        self.assertLess(some["matching_commands"], every["matching_commands"])
+
+    def test_an_unfiltered_count_keeps_its_honest_name(self):
+        """`scripts op="list"` returns every slot, so `total` is true there."""
+        out = self.call("scripts", op="list")
+        self.assertEqual(out["total"], len(out["scripts"]))
+
+
+class TestAScopeIsClaimedOnlyOnceRead(ToolTest):
+    """`_Hits.searching` exists so a scope that was asked for is not reported
+    as read. The events scope claimed itself before opening anything.
+
+    Every other scope moved its claim after a successful load, each with a
+    comment saying why -- "before it, a file that would not load claimed to
+    have been searched". The events walk kept its claim on the first line.
+    """
+
+    def break_every_events_file(self):
+        """Leave nothing in the project that holds an event command list."""
+        for name in ("common_events", "troops"):
+            self.project.path_for(
+                self.project.filename_for(name)).write_bytes(b"not marshal")
+        for map_id, _ in self.project.entries("map_infos"):
+            path = self.project.path_for(self.project.map_file(map_id))
+            if path.exists():
+                path.write_bytes(b"not marshal")
+        self.ctx = self.reopen()
+
+    def test_an_unreadable_project_does_not_claim_the_events_scope(self):
+        self.break_every_events_file()
+        out = self.call("search", query="anything", scopes=["events"])
+        self.assertNotIn(
+            "events", out["scopes_searched"],
+            "the events scope was reported as searched when nothing in it "
+            "could be opened, so zero hits reads as zero matches")
+
+    def test_it_says_that_it_read_nothing_rather_than_going_quiet(self):
+        self.break_every_events_file()
+        out = self.call("search", query="anything", scopes=["events"])
+        self.assertTrue(out.get("events_note"),
+                        "nothing in the reply explains the empty result: %s"
+                        % sorted(out))
+
+    def test_a_readable_project_still_claims_it(self):
+        out = self.call("search", query="Potion", scopes=["events"])
+        self.assertIn("events", out["scopes_searched"])
+        self.assertNotIn("events_note", out)
+
+
+class TestNoDeadPublicApi(unittest.TestCase):
+    """A public method nothing calls is a method a reader has to understand.
+
+    Four were never referenced from src or tests: `EngineProfile.filename_for`
+    (duplicating `Project.filename_for`, which is the one that is used),
+    `EngineProfile.database_tables`, `EngineProfile.map_filename`, and
+    `Project.forget_assets` -- whose own sibling docstring instructs callers
+    to call it.
+    """
+
+    # `Project.forget_assets` is deliberately not here. It looked dead too,
+    # and turned out to be the only cure for a live bug -- see
+    # TestAnAssetAddedMidSessionIsSeen. Unreferenced is a reason to ask why,
+    # not a reason to delete.
+    GONE = ("EngineProfile.filename_for", "EngineProfile.database_tables",
+            "EngineProfile.map_filename")
+
+    def test_they_are_gone(self):
+        from rpgvxace_mcp.project import Project
+        from rpgvxace_mcp.schema import EngineProfile
+        owners = {"EngineProfile": EngineProfile, "Project": Project}
+        still_here = []
+        for dotted in self.GONE:
+            owner, method = dotted.split(".")
+            if hasattr(owners[owner], method):
+                still_here.append(dotted)
+        self.assertEqual(still_here, [],
+                         "these are unreferenced from src and tests; remove "
+                         "them or give them a caller")
+
+    def test_nothing_calls_one_on_a_profile(self):
+        """A call site left behind is worse than the method.
+
+        Matched on the receiver, not the bare name: `filename_for` and
+        `map_filename` are live and correct on `Project` and as a module
+        function in `schema`, and only the `EngineProfile` methods went. A
+        grep for the bare names flags all three of those, which is how a test
+        ends up describing something other than what it checks.
+        """
+        root = Path(__file__).resolve().parent.parent / "src"
+        calls = []
+        for path in sorted(root.rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            for dotted in self.GONE:
+                method = dotted.split(".")[1]
+                for receiver in ("profile.", "PROFILE.", "_profile."):
+                    if receiver + method in text:
+                        calls.append("%s calls %s%s"
+                                     % (path.name, receiver, method))
+        self.assertEqual(calls, [], "; ".join(calls))
+
+
+class TestACraftedNameIsBoundedInAReplyToo(ToolTest):
+    """A name from the file is capped and sanitised wherever it is printed.
+
+    `analysis._text` has done this for findings since the round that added it.
+    The tools' own copies of the same one-line decode did neither, so the
+    reasoning in that docstring held on one path out of two.
+    """
+
+    HUGE = 1_000_000
+
+    def name_map_one(self, text):
+        infos = self.project.load_data("map_infos")
+        first = infos.items()[0]
+        first[1].set("name", self.project.codec.make_string(text))
+        self.project.save_file(self.project.filename_for("map_infos"),
+                               tool="test", summary="a crafted name")
+        self.ctx = self.reopen()
+        return first[0]
+
+    def longest_name(self, rows, key="name"):
+        return max((str(row[key]) for row in rows), key=len)
+
+    def test_map_list_caps_a_crafted_name(self):
+        self.name_map_one("A" * self.HUGE)
+        name = self.longest_name(self.call("map_list")["maps"])
+        self.assertLess(
+            len(name), self.HUGE,
+            "a %d-character name went into the reply whole" % len(name))
+
+    def test_map_list_sanitises_control_characters(self):
+        """By id, not by length -- picking the longest name was vacuous.
+
+        `longest_name` answered "Riverbend Cave" (14 characters) rather
+        than the crafted "Town" plus two control characters (10), so
+        this assertion was about a name nothing had touched. Measured:
+        it passed while the escape went into the reply intact.
+        """
+        map_id = self.name_map_one("Town\x07\x1b[31m")
+        rows = self.call("map_list")["maps"]
+        name = next(str(r["name"]) for r in rows if r["id"] == map_id)
+        self.assertNotIn("\x07", name)
+        self.assertNotIn("\x1b", name)
+
+    def test_map_get_caps_it_too(self):
+        map_id = self.name_map_one("B" * self.HUGE)
+        out = self.call("map_get", map_id=map_id)
+        self.assertLess(len(str(out.get("name", ""))), self.HUGE)
+
+    def test_a_capped_name_says_it_was_capped(self):
+        """Silently truncating a name is how a caller looks for the wrong map."""
+        self.name_map_one("C" * self.HUGE)
+        name = self.longest_name(self.call("map_list")["maps"])
+        self.assertIn("bytes", name,
+                      "the reply gives no sign the name was cut: %r"
+                      % name[-40:])
+
+    def test_an_ordinary_name_is_untouched(self):
+        self.name_map_one("Riverbend")
+        names = [str(row["name"]) for row in self.call("map_list")["maps"]]
+        self.assertIn("Riverbend", names)
+
+    def test_an_event_name_is_bounded_as_well(self):
+        game_map = self.project.load_map(1)
+        event = game_map.get("events").sorted_items()[0][1]
+        event.set("name", self.project.codec.make_string("D" * self.HUGE))
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+        out = self.call("map_get", map_id=1, include_events=True)
+        self.assertLess(len(self.longest_name(out["events"])), self.HUGE)
+
+
+class TestOneDecodeForTheWholeToolsLayer(unittest.TestCase):
+    """Four spellings of one line, and only one of them was the careful one."""
+
+    def test_the_shared_one_exists(self):
+        from rpgvxace_mcp.tools.registry import decoded
+        self.assertTrue(callable(decoded))
+
+    def test_no_tool_module_defines_its_own(self):
+        """A function named `_text` is one way to write a second copy."""
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "src"
+        folder = root / "rpgvxace_mcp" / "tools"
+        copies = []
+        for path in sorted(folder.glob("*.py")):
+            if path.name == "registry.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in tree.body:
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                if node.name in ("_text", "_name", "_decoded"):
+                    copies.append("%s defines %s" % (path.name, node.name))
+        self.assertEqual(copies, [], "; ".join(copies))
+
+    # Modules that decode for the *matcher* rather than for a reply, and
+    # how many such calls each may make. A cap of 200 characters would mean
+    # searching only the first 200 of a script line, so these read the whole
+    # string -- and `_Hits.add` caps what actually reaches the response. A
+    # count rather than a bare exemption, so a new bare decode in the same
+    # module is still caught.
+    MATCHER_DECODES = {"search_tools.py": 3}
+
+    def test_no_tool_module_calls_the_codec_directly(self):
+        """And an inline call is the way it was actually written.
+
+        The name-based scan above could not see any of the four inline
+        copies its own docstring names, which is the same vacuity as a
+        ceiling test that keyed on a bare constant name: the defect was
+        `ctx.codec.decode(value.data)` written in place, not a helper. This
+        looks for the call.
+        """
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "src"
+        folder = root / "rpgvxace_mcp" / "tools"
+        counts: dict[str, int] = {}
+        calls = []
+        for path in sorted(folder.glob("*.py")):
+            if path.name == "registry.py":
+                continue        # where `decoded` lives
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if (isinstance(func, ast.Attribute) and func.attr == "decode"
+                        and isinstance(func.value, ast.Attribute)
+                        and func.value.attr == "codec"):
+                    counts[path.name] = counts.get(path.name, 0) + 1
+                    calls.append("%s: %s" % (path.name, ast.unparse(node)))
+        over = [name for name, found in counts.items()
+                if found > self.MATCHER_DECODES.get(name, 0)]
+        self.assertEqual(
+            over, [],
+            "these decode a value out of a file without the cap and the "
+            "sanitising `decoded` applies: " + "; ".join(calls))
+
+    def test_no_matcher_exemption_outlives_its_calls(self):
+        """An allowance that is larger than the code needs hides a copy."""
+        import ast
+
+        root = (Path(__file__).resolve().parent.parent / "src"
+                / "rpgvxace_mcp" / "tools")
+        for name, allowed in self.MATCHER_DECODES.items():
+            tree = ast.parse((root / name).read_text(encoding="utf-8"))
+            found = sum(
+                1 for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "decode"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "codec")
+            self.assertEqual(
+                found, allowed,
+                "%s is allowed %d bare decodes and makes %d; lower the "
+                "allowance so the next one is caught" % (name, allowed, found))
+
+    def test_it_agrees_with_the_analysis_one(self):
+        """Two receivers, one implementation -- so they cannot drift."""
+        from rpgvxace_mcp.analysis import _text
+        from rpgvxace_mcp.convert import TextCodec
+        from rpgvxace_mcp.rubytypes import RubyString
+        from rpgvxace_mcp.tools.registry import decoded
+
+        class Holder:
+            codec = TextCodec("utf-8")
+
+        value = RubyString(("E" * 5000).encode("utf-8"))
+        self.assertEqual(decoded(Holder(), value), _text(Holder(), value))
+
+
+class TestAScriptSlotIdIsCalledAnId(ToolTest):
+    """`schema` and `docs` both call it an id; only the code said "magic".
+
+    `scripts op="get"` returns the project layer's row verbatim, so whatever
+    the code calls the field is what the model reads.
+    """
+
+    def test_the_reply_names_it_id(self):
+        slot = self.call("scripts", op="list")["scripts"][0]["index"]
+        out = self.call("scripts", op="get", index=slot)
+        self.assertIn("id", out)
+        self.assertNotIn("magic", out,
+                         "the reply calls the slot id a magic number: %s"
+                         % sorted(out))
+
+    def test_the_documented_shape_agrees(self):
+        """The two descriptions the model reads before calling."""
+        from rpgvxace_mcp.schema import ACE_DATA_FILES
+        self.assertIn("id", ACE_DATA_FILES["scripts"].description.lower())
+
+    def test_the_value_is_still_the_slot_id(self):
+        """Renaming must not change what is reported."""
+        rows = self.call("scripts", op="list")["scripts"]
+        for row in rows:
+            got = self.call("scripts", op="get", index=row["index"])
+            self.assertEqual(got["index"], row["index"])
+
+
+class TestATruncatedSummarySaysSoOnEveryPath(ToolTest):
+    """The row budget expiring on the *last* event reported no truncation.
+
+    The pages loop `break`s on the ceiling, then the event's row is appended
+    and the outer loop ends normally at `return out, False`. So one event
+    with more pages than the ceiling came back as a short page list with no
+    `events_truncated` at all -- a reply that is wrong rather than partial,
+    which is the one outcome this module's comments are all about avoiding.
+    """
+
+    def craft_one_event_with_pages(self, count):
+        game_map = self.project.load_map(1)
+        page = RubyObject("RPG::Event::Page")
+        page.set("condition", RubyObject("RPG::Event::Page::Condition"))
+        page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
+        page.set("trigger", 0)
+        page.set("list", [])
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", [page] * count)
+        events = RubyHash()
+        events.set(1, event)
+        game_map.set("events", events)
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+
+    def test_a_single_event_over_the_ceiling_is_reported_as_cut_short(self):
+        from rpgvxace_mcp.tools import map_read_tools
+        self.craft_one_event_with_pages(
+            map_read_tools.MAX_EVENT_SUMMARY_ROWS + 50)
+        rows, cut_short = map_read_tools._event_summaries(
+            self.ctx, self.project.load_map(1))
+        self.assertTrue(cut_short,
+                        "one event with more pages than the ceiling reported "
+                        "a complete summary")
+
+    def test_the_reply_carries_the_note(self):
+        """The flag has to reach the caller, not only the helper's return."""
+        from rpgvxace_mcp.tools import map_read_tools
+        self.craft_one_event_with_pages(
+            map_read_tools.MAX_EVENT_SUMMARY_ROWS + 50)
+        result = self.call("map_get", map_id=1)
+        self.assertIn("events_truncated", result)
+
+    def test_a_row_says_how_many_pages_the_event_really_has(self):
+        """`event_get` adds `page_count` for exactly this reason."""
+        from rpgvxace_mcp.tools import map_read_tools
+        total = map_read_tools.MAX_EVENT_SUMMARY_ROWS + 50
+        self.craft_one_event_with_pages(total)
+        rows, _ = map_read_tools._event_summaries(
+            self.ctx, self.project.load_map(1))
+        self.assertEqual(rows[0]["page_count"], total,
+                         "a truncated page list did not say how many pages "
+                         "the event has")
+
+
+class TestAListedNameIsCappedLikeEveryOtherName(ToolTest):
+    """The fifth bare decode in the tools layer, in a listing.
+
+    `registry.decoded`'s docstring says four copies of this call were
+    consolidated and "cannot differ again". `db_list` kept a fifth, on the
+    one field of the row that is always present -- while `_brief_field`
+    seven lines below goes through `decoded`, and its own docstring gives the
+    reason: "this is a listing, so one crafted name would otherwise be
+    repeated into every row".
+    """
+
+    LONG = 300_000
+
+    def craft_named_entry(self, name):
+        items = self.project.load_data("items")
+        entry = items[1]
+        entry.set("name", self.project.codec.make_string(name))
+        self.project.save_file(self.project.filename_for("items"),
+                               tool="test", summary="long name")
+        self.ctx = self.reopen()
+
+    def test_a_long_entry_name_is_capped_in_the_row(self):
+        self.craft_named_entry("A" * self.LONG)
+        rows = self.call("db_list", table="items")["entries"]
+        first = next(r for r in rows if r["id"] == 1)
+        self.assertLess(len(first["name"]), 1000,
+                        "db_list returned a %d-character name"
+                        % len(first["name"]))
+
+    def test_the_cap_says_what_it_cut(self):
+        """A name silently cut is how a caller looks for the wrong entry."""
+        self.craft_named_entry("A" * self.LONG)
+        rows = self.call("db_list", table="items")["entries"]
+        first = next(r for r in rows if r["id"] == 1)
+        # Either unit: a long RubyString is sliced and reported in
+        # bytes, a long str in characters.
+        self.assertTrue("characters" in first["name"]
+                        or "bytes" in first["name"],
+                        "a capped name did not say it was capped: %r"
+                        % first["name"][-40:])
+
+    def test_an_escape_in_a_name_is_sanitised(self):
+        self.craft_named_entry("Potion" + chr(27) + "[31m")
+        rows = self.call("db_list", table="items")["entries"]
+        first = next(r for r in rows if r["id"] == 1)
+        self.assertNotIn(chr(27), first["name"])
+
+    def test_an_ordinary_name_is_unchanged(self):
+        rows = self.call("db_list", table="items")["entries"]
+        self.assertTrue(any(r["name"] for r in rows),
+                        "capping removed every name in the table")
+
+    def test_the_filter_still_finds_an_ordinary_name(self):
+        rows = self.call("db_list", table="items")["entries"]
+        wanted = next(r for r in rows if r["name"])
+        found = self.call("db_list", table="items",
+                          name_contains=wanted["name"][:4].lower())["entries"]
+        self.assertTrue(any(r["id"] == wanted["id"] for r in found))
+
+
+class TestEveryReferenceTargetHasANoun(unittest.TestCase):
+    """`TABLE_NOUNS` is a hand-kept table parallel to two others.
+
+    Read at two bare-subscript sites, so a reference rule or a nested
+    reference added without a noun raises KeyError in the middle of a
+    `validate` walk -- reported to the caller as an internal error about a
+    dictionary.
+    """
+
+    def test_every_reference_rule_target_is_named(self):
+        from rpgvxace_mcp.analysis import (MAP_TARGET, NESTED_DB_REFERENCES,
+                                           REFERENCE_RULES, TABLE_NOUNS)
+        wanted = (set(REFERENCE_RULES) - {MAP_TARGET}) | {
+            ref.target for ref in NESTED_DB_REFERENCES}
+        missing = sorted(wanted - set(TABLE_NOUNS))
+        self.assertEqual(missing, [],
+                         "these tables are referenced by a rule and have no "
+                         "noun, so naming one raises KeyError mid-walk")
+
+    def test_no_noun_outlives_its_table(self):
+        """The other half: a noun nothing reads is a dead table entry.
+
+        "Read" means either named by a reference rule -- where the walk
+        subscripts this table by the rule's target -- or subscripted
+        literally somewhere in the source. Both, because two findings name
+        their noun directly rather than through a rule: the tileset sheet
+        check and the actor class check.
+        """
+        import ast
+        from rpgvxace_mcp.analysis import (MAP_TARGET, NESTED_DB_REFERENCES,
+                                           REFERENCE_RULES, TABLE_NOUNS)
+        root = Path(__file__).resolve().parent.parent / "src"
+        literal = set()
+        for path in sorted((root / "rpgvxace_mcp").rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if (isinstance(node, ast.Subscript)
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id == "TABLE_NOUNS"
+                        and isinstance(node.slice, ast.Constant)):
+                    literal.add(node.slice.value)
+        used = ((set(REFERENCE_RULES) - {MAP_TARGET})
+                | {ref.target for ref in NESTED_DB_REFERENCES} | literal)
+        self.assertEqual(sorted(set(TABLE_NOUNS) - used), [],
+                         "these nouns name a table nothing reads")
