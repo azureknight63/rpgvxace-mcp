@@ -237,24 +237,29 @@ class GuardTableTest(unittest.TestCase):
                 with self.subTest(guard=guard.name):
                     self.assertNotEqual(present, reverted)
 
-    def test_no_two_aliases_name_one_class(self):
-        """Two names for one test class read as two different subjects.
+    def test_no_two_aliases_name_one_thing(self):
+        """Two names for one test class or one file read as two subjects.
 
-        `T` and `SYMDEPTH` held the same string, as did `FAST` and
-        `MEASURED`: renaming that class needs two edits, and nothing said the
-        two guards were on one class. This is the same shape as the alias
-        collision that made a guard watch the wrong tests.
+        `T` and `SYMDEPTH` held the same test class, `FAST` and `MEASURED`
+        another, and `TYPES` and `RUBYTYPES` the same source file: renaming
+        any of them needs two edits, and nothing said the guards using each
+        name were on one thing. Same shape as the alias collision that made
+        a guard watch the wrong tests.
+
+        Both kinds, because the first version of this test looked only at
+        test-class aliases and the file-path pair went on standing.
         """
         by_value: dict[str, list[str]] = {}
         for name, value in vars(prove_guards).items():
             if (name.isupper() and isinstance(value, str)
-                    and value.startswith("tests/") and "::" in value):
+                    and (value.startswith("tests/")
+                         or value.startswith("src/") or value.startswith("scripts/"))):
                 by_value.setdefault(value, []).append(name)
         shared = ["%s: %s" % (value, ", ".join(sorted(names)))
                   for value, names in sorted(by_value.items())
                   if len(names) > 1]
         self.assertEqual(shared, [],
-                         "these test-class aliases hold one value each, so "
+                         "these aliases name one thing each, so "
                          "collapse them:\n  " + "\n  ".join(shared))
 
 

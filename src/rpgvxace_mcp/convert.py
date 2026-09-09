@@ -63,7 +63,25 @@ MAX_NORMALIZE_DEPTH = 24
 
 # Path-based cycle detection has to repeat a shared value at every reference,
 # because JSON has no links. This bounds what that can add up to.
-MAX_JSON_NODES = 2_000_000
+#
+# Sized from the response ceiling instead of chosen beside it. `_dump_json`
+# indents, so every node costs at least four characters of output -- a payload
+# that actually reached the old two million serialised to eight megabytes and
+# was then *certainly* rejected at the transport, which bounds the response
+# and not the work or the peak memory. So the largest conversion this server
+# permitted was always thrown away, after several seconds and a few hundred
+# megabytes. This is `server.MAX_TOOL_RESULT_CHARS // 8`, eight characters a
+# node being the conservative divisor; written as a number because `server`
+# imports this module and not the other way round, and held to that
+# relationship by `TestTheNodeBudgetFitsTheResponse`.
+#
+# The cost, said out loud: on a crafted file this now refuses where it used
+# to return a truncated reply with a note, because the truncated reply was
+# itself past what the transport would carry. The refusal names the remedy --
+# read one entry, one event, or a tile region -- so it is actionable, which
+# is what makes it a better answer than eight megabytes of work discarded at
+# the transport.
+MAX_JSON_NODES = 250_000
 
 # The most a single opaque _dump payload may carry, so a base64 blob cannot be
 # used to inflate a data file without bound.
@@ -154,31 +172,39 @@ class TextCodec:
         """
         return RubyString(self.encode_strict(text), dict(self.string_ivars) or None)
 
-    def encode_strict(self, text: str) -> bytes:
-        """Encode text that came from a caller rather than from a file."""
+    def _encode(self, text: str, errors: "str | None",
+                chain: bool) -> bytes:
+        """One body for both encoders, so one sentence covers both.
+
+        `encode` and `encode_strict` were the same six lines with the same
+        word-for-word message, differing only in the error handler and in
+        `from None` versus `from exc` -- two places to reword one refusal,
+        and the refusal is the part a caller acts on.
+        """
         try:
-            return text.encode(self.name)
+            return (text.encode(self.name) if errors is None
+                    else text.encode(self.name, errors))
         except UnicodeEncodeError as exc:
             bad = text[exc.start:exc.end]
-            raise ConversionError(
+            error = ConversionError(
                 "%r cannot be written in this project's %s encoding. Either use "
                 "characters that fit that code page, or restart the server with "
-                "--encoding set to a codec that covers them." % (bad, self.name)
-            ) from None
+                "--encoding set to a codec that covers them." % (bad, self.name))
+            # `from exc` where the failure came out of a file, `from None`
+            # where it came out of the caller's own request: the traceback is
+            # noise in the second case and evidence in the first.
+            raise error from (exc if chain else None)
+
+    def encode_strict(self, text: str) -> bytes:
+        """Encode text that came from a caller rather than from a file."""
+        return self._encode(text, None, chain=False)
 
     def is_default_style(self, value: RubyString) -> bool:
         return value.ivars == self.string_ivars
 
     def encode(self, text: str) -> bytes:
-        try:
-            return text.encode(self.name, "surrogateescape")
-        except UnicodeEncodeError as exc:
-            bad = text[exc.start:exc.end]
-            raise ConversionError(
-                "%r cannot be written in this project's %s encoding. Either use "
-                "characters that fit that code page, or restart the server with "
-                "--encoding set to a codec that covers them." % (bad, self.name)
-            ) from exc
+        """Encode text that came back out of a file this server read."""
+        return self._encode(text, "surrogateescape", chain=True)
 
     def is_clean(self, data: bytes) -> bool:
         """Whether ``data`` decodes to text with no undecodable bytes left over."""

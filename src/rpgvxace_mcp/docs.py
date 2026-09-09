@@ -164,8 +164,7 @@ def _shared_values(engine: str) -> list[str]:
         # event id, which is the part a generated list cannot say for itself.
         "* Character targets: %s, and any other number is an event id."
         % _numbered(CHARACTER_TARGETS),
-        "* Event triggers: %s." % _numbered(
-            {code: name for code, name in TRIGGER_NAMES.items()}),
+        "* Event triggers: %s." % _numbered(TRIGGER_NAMES),
     ]
     return lines
 

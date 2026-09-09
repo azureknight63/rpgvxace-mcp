@@ -454,7 +454,11 @@ def measure_cost(pattern: str) -> None:
     # model treats as untrusted. The child needs nothing but the stdlib, so
     # isolation costs it nothing. `cwd` is set as well, so the answer does not
     # depend on how the client happened to launch us.
-    command = [sys.executable, "-I", "-c", _CHILD]
+    # `-S` as well as `-I`: `-I` implies `-E` and `-s` but not `-S`, so the
+    # child still imported `site` and built a `sys.path` for site-packages,
+    # which is most of interpreter startup on Windows. `_CHILD` imports
+    # `base64`, `re` and `sys` and nothing else, so the scan buys it nothing.
+    command = [sys.executable, "-I", "-S", "-c", _CHILD]
     payload = "\n".join([encode(pattern)]
                         + [encode(subject) for subject in _subjects(pattern)])
     verdict: "str | None" = None

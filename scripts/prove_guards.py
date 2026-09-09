@@ -41,7 +41,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CODEC = "src/rpgvxace_mcp/marshal_rb.py"
-TYPES = "src/rpgvxace_mcp/rubytypes.py"
 SCHEMA = "src/rpgvxace_mcp/schema.py"
 DOCS = "src/rpgvxace_mcp/docs.py"
 MAP_COMMON = "src/rpgvxace_mcp/tools/map_common.py"
@@ -206,6 +205,14 @@ COUNTS = ("tests/test_tools.py::TestACountIsNamedForWhatItCounted::")
 DRYRUN = ("tests/test_tools.py::TestADryRunDoesNotReadAsDone::")
 SCOPECLAIM = ("tests/test_tools.py::TestAScopeIsClaimedOnlyOnceRead::")
 SUMMARY = ("tests/test_tools.py::TestMapGetBoundsItsEventSummary::")
+BYTES = ("tests/test_tools.py::TestARenderedCommandLineIsBoundedInBytes::")
+SLOTS = ("tests/test_tools.py::TestASkippedPageSlotIsStillCountedForReading::")
+EVERYPATH = ("tests/test_tools.py::TestATruncatedSummarySaysSoOnEveryPath::")
+LISTEDNAME = ("tests/test_tools.py::TestAListedNameIsCappedLikeEveryOtherName::")
+RAWPATH = ("tests/test_tools.py::TestARawPathCannotBeUnboundedlyLong::")
+SCOPEALLOW = ("tests/test_tools.py::TestEveryScopeSpendsTheSameAllowance::")
+DSLIDS = ("tests/test_tools.py::TestEveryIdInTheDslRefusesACoercibleValue::")
+CRAFTEDCOMMON = ("tests/test_tools.py::TestACraftedCommonEventIsReportedNotCrashed::")
 CHILD = ("tests/test_tools.py::TestTheMeasurementReachesItsChild::")
 REMEMBERS = ("tests/test_tools.py::TestWhatTheMeasurementRemembers::")
 SHAPECLOSED = ("tests/test_tools.py::TestTheShapeGateFailsClosedThroughout::")
@@ -282,7 +289,7 @@ GUARDS = [
         "'+' on the way back out",
     ),
     Guard(
-        "table extent validation", TYPES,
+        "table extent validation", RUBYTYPES,
         """def _check_extents(xsize: int, ysize: int, zsize: int) -> None:
     \"\"\"Refuse extents no real table has, before allocating for them.\"\"\"""",
         """def _check_extents(xsize: int, ysize: int, zsize: int) -> None:
@@ -295,7 +302,7 @@ GUARDS = [
         "and the map tools then iterate four billion times",
     ),
     Guard(
-        "table declared dimension", TYPES,
+        "table declared dimension", RUBYTYPES,
         """        if not 1 <= dim <= 3:
             raise ValueError("Table declares %d dimensions, expected 1, 2 or 3" % dim)
 """,
@@ -305,7 +312,7 @@ GUARDS = [
         "makes the cells unreachable in the engine",
     ),
     Guard(
-        "table payload exact length", TYPES,
+        "table payload exact length", RUBYTYPES,
         "        if len(payload) != expected:",
         "        if len(payload) < expected:",
         [T + "test_table_with_trailing_payload_bytes_degrades"],
@@ -490,12 +497,9 @@ GUARDS = [
         "a typo writes an RPG::BGM into an ME or SE slot on VX Ace",
     ),
     Guard(
-        "response text has no lone surrogates", TYPES,
-        """    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
-        return text.encode("utf-8", "replace").decode("utf-8")
-    return text""",
+        "response text has no lone surrogates", RUBYTYPES,
+        """    return "".join(char if char.isprintable() or char in KEPT_CONTROLS
+                   else "?" for char in text)""",
         "    return text",
         [SAFE + "test_class_names_from_a_file_survive_json_encoding",
          SAFE + "test_printable_text_replaces_lone_surrogates"],
@@ -814,8 +818,8 @@ GUARDS = [
     ),
     Guard(
         "the findings limit cannot be negative", ANALYSIS,
-        "    limit = max(1, _int(limit) or DEFAULT_LIMIT)",
-        "    limit = _int(limit) or DEFAULT_LIMIT",
+        "    limit = max(1, _int(limit) or DEFAULT_FINDING_LIMIT)",
+        "    limit = _int(limit) or DEFAULT_FINDING_LIMIT",
         [VSCOPE + "test_a_negative_limit_does_not_drop_findings"],
         "a negative limit slices the findings list from the wrong end and drops "
         "the ones the caller most needed to see",
@@ -1017,8 +1021,8 @@ GUARDS = [
     ),
     Guard(
         "raw_data sees the @ spelling too", RAW_TOOLS,
-        '    if path and _bare_name(path[0]) in STRUCTURAL_MAP_PATHS:',
-        '    if path and path[0] in STRUCTURAL_MAP_PATHS:',
+        '    if path and _bare_name(path[0]) in STRUCTURAL_MAP_FIELDS:',
+        '    if path and path[0] in STRUCTURAL_MAP_FIELDS:',
         [ATFIELD + "test_raw_data_cannot_reach_a_structural_field"],
         'the same bypass on the escape hatch: path "@width" reaches the '
         'field this refuses',
@@ -1225,11 +1229,8 @@ GUARDS = [
     Guard(
         'a reference count says when it is a floor', ANALYSIS,
         '''    return ReferencePreview(found[:REFERENCE_PREVIEW],
-                            len(found) > REFERENCE_PREVIEW,
-                            budget.note(what))''',
-        '''    return ReferencePreview(found[:REFERENCE_PREVIEW],
-                            False,
-                            budget.note(what))''',
+                            len(found) > REFERENCE_PREVIEW, note)''',
+        '''    return ReferencePreview(found[:REFERENCE_PREVIEW], False, note)''',
         # Both callers' tests. This was two guards on the same line written
         # twice in two files, which is why the line was worth merging: the
         # "ask for one past the limit" half had been added to db_edit and not
@@ -1282,8 +1283,9 @@ GUARDS = [
     ),
     Guard(
         'the snapshot preview asks the snapshot', MISC_TOOLS,
-        '        return ctx.project.snapshot(label, dry_run=dry_run)',
-        '        if dry_run:\n            return {"would_snapshot": sorted(\n                p.name for p in ctx.project.data_dir.glob(\n                    "*" + ctx.project.extension)),\n                "label": label, "dry_run": True}\n        return ctx.project.snapshot(label)',
+        '''        return write_reply(ctx.project.snapshot(label, dry_run=dry_run),
+                           dry_run)''',
+        '        if dry_run:\n            return {"would_copy": sorted(\n                p.name for p in ctx.project.data_dir.glob(\n                    "*" + ctx.project.extension)),\n                "label": label, "dry_run": True}\n        return write_reply(ctx.project.snapshot(label), dry_run)',
         [SNAPDRY + "test_the_preview_leaves_out_what_the_snapshot_skips"],
         'the preview lists the symlinked data files the real snapshot skips, so it names files no backup would hold',
     ),
@@ -1452,8 +1454,8 @@ GUARDS = [
     ),
     Guard(
         'the delete preview matches the delete', MAP_EDIT,
-        '            "would_delete": filename if has_file else None,',
-        '            "would_delete": filename,',
+        '            "deleted": filename if has_file else None}',
+        '            "deleted": filename}',
         [DELPREV + "test_the_preview_says_there_is_no_file_to_delete"],
         "the preview promises a file deletion the real call will not perform, which this module's own comments call worse than no preview",
     ),
@@ -1542,8 +1544,28 @@ GUARDS = [
     ),
     Guard(
         'a delete asks what points at it under a budget', ANALYSIS,
-        '    for location, commands in iter_command_lists(project, None, budget):',
-        '    for location, commands in iter_command_lists(project):',
+        # Both walks: `find_references` answers one id and
+        # `find_references_for` answers a batch in one pass, and each takes
+        # the caller's allowance. Two anchors rather than one, because
+        # either walk left unbounded is the whole defect back.
+        ['''    hits: dict[int, list[dict[str, Any]]] = {i: [] for i in entry_ids}
+    if table not in REFERENCE_RULES or not entry_ids:
+        return hits
+    wanted = set(entry_ids)
+    for location, commands in iter_command_lists(project, None, budget):''',
+         '''    if table not in REFERENCE_RULES:
+        return []
+    hits: list[dict[str, Any]] = []
+    for location, commands in iter_command_lists(project, None, budget):'''],
+        ['''    hits: dict[int, list[dict[str, Any]]] = {i: [] for i in entry_ids}
+    if table not in REFERENCE_RULES or not entry_ids:
+        return hits
+    wanted = set(entry_ids)
+    for location, commands in iter_command_lists(project):''',
+         '''    if table not in REFERENCE_RULES:
+        return []
+    hits: list[dict[str, Any]] = []
+    for location, commands in iter_command_lists(project):'''],
         [WRITEPATH + "test_deleting_an_entry_bounds_its_reference_scan",
          WRITEPATH + "test_deleting_a_map_bounds_its_reference_scan"],
         'find_references runs on both delete paths and returns early only when it finds hits, so "nothing points at it" is the answer that walks every command in the project -- five million visits from a 7 KB map, and the caller then deletes',
@@ -1710,10 +1732,17 @@ GUARDS = [
     ),
     Guard(
         'the event summary has a ceiling', MAP_READ,
-        """        if rows >= MAX_EVENT_SUMMARY_ROWS:
+        # Two anchors: the round that made every examined page slot count
+        # gave this ceiling a second test, inside the pages loop. Either one
+        # alone bounds the total, so reverting one left the other and the
+        # guard read VACUOUS -- the property is doubly held, and asking "is
+        # it held at all" means removing both.
+        ["""        if rows >= MAX_EVENT_SUMMARY_ROWS:
             return out, True""",
-        """        if False:
+         """            if rows >= MAX_EVENT_SUMMARY_ROWS:"""],
+        ["""        if False:
             return out, True""",
+         """            if False:"""],
         [SUMMARY + "test_the_summary_stops_at_its_ceiling",
          SUMMARY + "test_a_stopped_summary_says_so"],
         'events times pages, both out of the file: the shared-object map is fifty events of fifty pages all one object, so 7 KB produced 2500 rows and nothing said why',
@@ -1821,8 +1850,8 @@ GUARDS = [
     ),
     Guard(
         'the preflight child cannot import from the working directory', SAFETY,
-        '    command = [sys.executable, "-I", "-c", _CHILD]',
-        '    command = [sys.executable, "-c", _CHILD]',
+        '    command = [sys.executable, "-I", "-S", "-c", _CHILD]',
+        '    command = [sys.executable, "-S", "-c", _CHILD]',
         [CHILD + "test_the_child_cannot_import_from_the_working_directory"],
         "python -c puts the process's CWD first on sys.path, so a re.py in an untrusted project directory is executed by the first regex search of the session -- and the CWD is routinely the project folder",
     ),
@@ -1991,6 +2020,202 @@ GUARDS = [
         '                "magic": slot_id,',
         [SLOTID + "test_the_reply_names_it_id"],
         'schema documents the file as "Array of [id, name, zlib code]" and docs renders that to the model, while the code called the first element a magic number -- and scripts op="get" hands that row to the caller verbatim, so the name in the code is the one a model reads',
+    ),
+    # ---------------- round 8: bytes, and every branch ----------------
+    Guard(
+        'a rendered command line is capped in bytes', COMMANDS,
+        """    if isinstance(value, RubyObject):
+        # The Ruby class is the useful answer for a parameter that is an
+        # object. `decoded_text` would say `<RubyObject>`, which names this
+        # reader's wrapper rather than anything that is in the file.
+        return "<%s>" % decoded_text(codec, value.cls)
+    return decoded_text(codec, value)""",
+        """    if isinstance(value, RubyObject):
+        return "<%s>" % value.cls
+    return str(value)""",
+        [BYTES + "test_one_long_string_parameter_is_capped",
+         BYTES + "test_a_long_string_in_a_specced_field_is_capped"],
+        'every bound in this project counted nodes and none counted bytes: one command holding a megabyte string was a single step of the walk budget, and the rendered line was the one text with no cap at all',
+    ),
+    Guard(
+        'a command line renders a bounded number of parts', COMMANDS,
+        """        return "%s: %s" % (name, rendered(p(0) or [],
+                                          lambda c: _text(c, codec),
+                                          separator=" / "))""",
+        """        return "%s: %s" % (name, " / ".join(
+            _text(c, codec) for c in (p(0) or [])))""",
+        [BYTES + "test_a_long_choice_list_is_capped"],
+        'Show Choices renders every choice and the list length comes out of the file, not from MAX_CHOICES which bounds authoring: an Array of a million links to one string is three megabytes on disk',
+    ),
+    Guard(
+        'a capped list is sliced before it is built', RUBYTYPES,
+        '    shown = [render(value) for value in items[:limit]]',
+        '    shown = [render(value) for value in items]',
+        [BYTES + "test_only_the_entries_that_survive_the_cap_are_rendered"],
+        'the point of this function is where the work happens: named(render(v) for v in values) has rendered every entry by the time named sees the first, and for values out of a file that rendering is the cost being bounded',
+    ),
+    Guard(
+        'the troop branch of the walk charges too', ANALYSIS,
+        """    for entry_id, troop in _safe_entries(project, "troops"):
+        if budget is not None and not budget.spend(1):
+            return
+        if not isinstance(troop, RubyObject):""",
+        """    for entry_id, troop in _safe_entries(project, "troops"):
+        if not isinstance(troop, RubyObject):""",
+        [SPENDS + "test_a_troops_array_of_non_troops_is_charged_for"],
+        'round 7 charged per event and per page slot in the map branch and left the other two charging len(commands), which is zero for a slot that is not a page',
+    ),
+    Guard(
+        'a troop page slot is charged for', ANALYSIS,
+        """        for page_index, page in enumerate(_seq(troop.get("pages"))):
+            if budget is not None and not budget.spend(1):
+                return
+            if isinstance(page, RubyObject):""",
+        """        for page_index, page in enumerate(_seq(troop.get("pages"))):
+            if isinstance(page, RubyObject):""",
+        [SPENDS + "test_a_troop_pages_list_of_non_pages_is_charged_for"],
+        'the troop branch is the one that costs a product: a Troops array of a million links to one troop whose @pages is a million integers is four megabytes on disk and 10^12 iterations, with spend never reached',
+    ),
+    Guard(
+        'a common event slot is charged for', ANALYSIS,
+        """    for entry_id, common in _safe_entries(project, "common_events"):
+        if budget is not None and not budget.spend(1):
+            return
+        if isinstance(common, RubyObject):""",
+        """    for entry_id, common in _safe_entries(project, "common_events"):
+        if isinstance(common, RubyObject):""",
+        [SPENDS + "test_a_common_events_array_of_non_events_is_charged_for"],
+        'linear in file size rather than a product, so cheaper -- but a row that is not an RPG::CommonEvent still cost nothing',
+    ),
+    Guard(
+        'the summary counts a page slot it skips', MAP_READ,
+        """            rows += 1
+            if not isinstance(page, RubyObject):
+                continue""",
+        """            if not isinstance(page, RubyObject):
+                continue
+            rows += 1""",
+        [SLOTS + "test_the_map_summary_counts_a_slot_it_skips"],
+        'round 7 made every appended row count and not every examined slot, so the ceiling was reached only through the outer per-event charge and the inner loop ran to completion once per event',
+    ),
+    Guard(
+        'the summary counts an event slot it skips', MAP_READ,
+        """        rows += 1
+        if not isinstance(event, RubyObject):
+            continue""",
+        """        if not isinstance(event, RubyObject):
+            continue
+        rows += 1""",
+        [SLOTS + "test_the_map_summary_counts_an_event_slot_it_skips"],
+        'the same defect one level up: a hash of a million integers where events belong was walked free',
+    ),
+    Guard(
+        "event_get charges for a page slot before both skips", EVENT_TOOLS,
+        """            if not command_budget.spend(1):
+                break
+            if only_page is not None and index != only_page:
+                continue""",
+        """            if only_page is not None and index != only_page:
+                continue""",
+        [SLOTS + "test_the_event_page_list_charges_for_a_slot_it_skips",
+         SLOTS + "test_naming_one_page_does_not_make_the_rest_free"],
+        'naming `page` made it worse rather than better: the continue for every other index sat above the only charge on the path',
+    ),
+    Guard(
+        'a summary cut short on its last event says so', MAP_READ,
+        """                cut_short = True
+                break""",
+        """                break""",
+        [EVERYPATH + "test_a_single_event_over_the_ceiling_is_reported_as_cut_short",
+         EVERYPATH + "test_the_reply_carries_the_note"],
+        'the pages loop breaks on the ceiling, then the row is appended and the outer loop ends normally at return out, False -- so one event with more pages than the ceiling came back short with no events_truncated at all',
+    ),
+    Guard(
+        'a summary row says how many pages there are', MAP_READ,
+        '            "page_count": len(pages),',
+        '',
+        [EVERYPATH + "test_a_row_says_how_many_pages_the_event_really_has"],
+        'a short page list that does not say it is short is read as complete; event_get carries this field for exactly that reason',
+    ),
+    Guard(
+        'a listed name is capped like every other name', DB_TOOLS,
+        """        name = decoded(ctx, entry.get("name")) if isinstance(
+            entry, RubyObject) else """"",
+        """        name = ""
+        if isinstance(entry, RubyObject):
+            raw_name = entry.get("name")
+            if isinstance(raw_name, RubyString):
+                name = ctx.codec.decode(raw_name.data)""",
+        [LISTEDNAME + "test_a_long_entry_name_is_capped_in_the_row",
+         LISTEDNAME + "test_an_escape_in_a_name_is_sanitised"],
+        'the fifth bare copy of this decode, on the one field of the row that is always present, seven lines from the _brief_field that goes through decoded and says why: a listing repeats one crafted name into every row',
+    ),
+    Guard(
+        'a path cannot be unboundedly long', RAW_TOOLS,
+        '    if len(path) > MAX_PATH_SEGMENTS:',
+        '    if False:',
+        [RAWPATH + "test_a_path_with_too_many_segments_is_refused"],
+        'a hash may legally contain itself -- _read_hash_pairs registers it before reading its pairs -- and each hash segment costs three linear scans, so "events/" + "1/" * 4,000,000 fits inside MAX_MESSAGE_CHARS and asks for 10^11 comparisons',
+    ),
+    Guard(
+        'every scope gets the same allowance', ANALYSIS,
+        """    walk_budget = WalkBudget()
+    if "maps" in scopes:""",
+        """    if "maps" in scopes:""",
+        [SCOPEALLOW + "test_the_maps_scope_says_it_stopped"],
+        'this was built between two of the four scopes, so the map tree, the map properties, the encounters, the tilesets and the database cross-references walked with no allowance at all -- every one of them a row-times-child product out of a file',
+    ),
+    Guard(
+        'a tileset sheet slot is charged for', ANALYSIS,
+        """            if budget is not None and not budget.spend(1):
+                break
+            sheet = (TILESET_SHEET_NAMES[index]""",
+        """            sheet = (TILESET_SHEET_NAMES[index]""",
+        [SCOPEALLOW + "test_the_maps_scope_is_given_an_allowance"],
+        '_AssetChecker.check returns before it counts anything when the name is empty, so checker.full never became true and the row-times-slot product had no bound at all',
+    ),
+    Guard(
+        'a parent chain cannot collect past the ceiling', ANALYSIS,
+        """            if not findings.room:
+                break
+            if budget is not None and not budget.spend(1):
+                break
+            if looped:""",
+        """            if looped:""",
+        [SCOPEALLOW + "test_a_parent_chain_stops_walking_as_well_as_collecting"],
+        'the ceiling was on the outer `for start in infos`, so one MapInfos that is a single cycle through every entry reached this loop once and appended a finding per entry',
+    ),
+    Guard(
+        'the map tree collects into one bounded list', ANALYSIS,
+        '    _parent_cycles(infos, findings, budget)\n    return findings.items',
+        '    return findings.items + _parent_cycles(infos, None, budget)',
+        [SCOPEALLOW + "test_a_parent_chain_cannot_collect_past_the_ceiling"],
+        'each pass bounded a list of its own and the three were then concatenated, so a ceiling of MAX_FINDINGS produced up to three times that -- the fourth time a ceiling here was written against the wrong list',
+    ),
+    Guard(
+        'every id in the compiler refuses a coercible value', COMMANDS,
+        """            operand_type, operand = 1, _needs_int(cond["from_variable"],
+                                                  "from_variable")""",
+        """            operand_type, operand = 1, int(cond["from_variable"])""",
+        [DSLIDS + "test_a_condition_operand_variable_is_not_coerced",
+         DSLIDS + "test_every_id_in_the_compiler_goes_through_the_checker"],
+        'in the same return statement as a _needs_int call: {"variable": 3, "from_variable": 2.9} compared against variable 2 and answered "rewrote page 0 of event 1"',
+    ),
+    Guard(
+        'a transfer destination refuses a coercible value', COMMANDS,
+        """            _needs_int(t["map_id"], "transfer.map_id"),""",
+        """            int(t["map_id"]),""",
+        [DSLIDS + "test_a_transfer_destination_map_is_not_coerced",
+         DSLIDS + "test_every_id_in_the_compiler_goes_through_the_checker"],
+        'a Transfer Player destination is what the command is, and int(2.9) is 2, so a wrong-typed coordinate moved the player one tile from where the caller said and the reply reported success',
+    ),
+    Guard(
+        'a crafted common event is reported, not crashed', EVENT_TOOLS,
+        '        if not isinstance(common, RubyObject):',
+        '        if False:',
+        [CRAFTEDCOMMON + "test_a_string_in_a_common_event_slot_is_reported",
+         CRAFTEDCOMMON + "test_an_array_in_a_common_event_slot_is_reported"],
+        'the read path called .get("list") straight away, so a file holding an Array in that slot raised AttributeError -- reported with the hint "an argument was not the shape the tool expected", a diagnosis about the caller for a fact about the file',
     ),
 ]
 

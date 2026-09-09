@@ -7,6 +7,7 @@ test to fail.
 """
 
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -415,3 +416,47 @@ class TestToolModulesAreLeaves(unittest.TestCase):
         self.assertIn("events", STRUCTURAL_MAP_FIELDS)
         self.assertIsNone(unreadable_events_note(RubyHash()))
         self.assertIsNotNone(unreadable_events_note(42))
+
+
+class TestOneBlankLineConvention(unittest.TestCase):
+    """Two blank lines between top-level definitions, everywhere.
+
+    The five modules the map-tools split created used one where every
+    pre-existing module used two, so a reader moving between them read the
+    same structure two ways -- and a diff of a moved function showed a
+    whitespace change on top of the move. PEP 8 settles which one; this
+    settles that there is only one.
+
+    Checked with a regular expression rather than a linter, because this
+    project has no third-party dependencies and adding one for whitespace
+    would be a worse trade than a six-line test.
+    """
+
+    def modules(self):
+        root = Path(__file__).resolve().parent.parent
+        return (sorted((root / "src" / "rpgvxace_mcp").rglob("*.py"))
+                + [root / "scripts" / "prove_guards.py"])
+
+    def test_every_top_level_definition_has_two_blank_lines_above_it(self):
+        thin = []
+        for path in self.modules():
+            text = path.read_text(encoding="utf-8")
+            for match in re.finditer(r"[^\n]\n\n(?=(?:def |class |@)\S)",
+                                     text):
+                line = text.count("\n", 0, match.end()) + 1
+                thin.append("%s:%d" % (path.name, line))
+        self.assertEqual(thin, [],
+                         "these top-level definitions have one blank line "
+                         "above them and the rest of the project uses two: "
+                         + ", ".join(thin))
+
+    def test_no_module_has_three_blank_lines_in_a_row(self):
+        fat = []
+        for path in self.modules():
+            text = path.read_text(encoding="utf-8")
+            for match in re.finditer(r"\n{4}", text):
+                line = text.count("\n", 0, match.start()) + 1
+                fat.append("%s:%d" % (path.name, line))
+        self.assertEqual(fat, [],
+                         "three or more blank lines in a row: "
+                         + ", ".join(fat))

@@ -11,8 +11,9 @@ from typing import Any
 from ..analysis import reference_preview
 from ..convert import apply_patch, normalize_strings
 from ..project import MAX_MAP_ID, ProjectError
-from ..rubytypes import RubyHash, RubyObject, Table
-from ..schema import STRUCTURAL_MAP_FIELDS, new_map_info
+from ..rubytypes import RubyHash, RubyObject, Table, named
+from ..analysis import _int
+from ..schema import STRUCTURAL_MAP_FIELDS, new_map_info, on_map
 from .map_common import _RESIZE_REMEDY, _check_budget
 from .registry import (
     Context,
@@ -61,6 +62,7 @@ MAP_OP_ARGS = {
     "delete": {"op", "dry_run", "map_id"},
     "resize": {"op", "dry_run", "map_id", "name", "width", "height", "patch"},
 }
+
 
 @tool(
     "map_edit",
@@ -118,6 +120,7 @@ def map_edit(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 
     with ctx.staged(*request.files()) as write_landed:
         return _apply_map_edit(request, write_landed)
+
 
 class _MapEdit:
     """One map_edit request: resolved once, checked before anything is written.
@@ -223,8 +226,15 @@ def _apply_resize(ctx: Context, args: dict[str, Any], game_map: RubyObject,
                        "discarded" % dropped)
     out_of_bounds = _events_out_of_bounds(game_map, width, height)
     if out_of_bounds:
-        changes.append("events now outside the map: %s" % out_of_bounds)
+        # Capped: this list is one entry per event, from a count that comes
+        # out of the file, and the joined `changes` becomes the `summary`
+        # that `Project.save_file` appends to changes.jsonl -- written before
+        # any reply is measured, so MAX_TOOL_RESULT_CHARS rejecting the reply
+        # afterwards leaves a seven-megabyte line in the work directory.
+        changes.append("events now outside the map: %s"
+                       % named(str(entry) for entry in out_of_bounds))
     return changes
+
 
 def _apply_map_edit(request: "_MapEdit",
                     write_landed: StagedWrite) -> dict[str, Any]:
@@ -285,9 +295,11 @@ def _apply_map_edit(request: "_MapEdit",
     return write_reply({"map_id": map_id, "op": op, "changes": changes,
                         "writes": writes}, dry_run)
 
+
 def _map_fields(ctx: Context, game_map: RubyObject) -> set[str]:
     """What a patch to a map may name: what it has, and what RPG::Map documents."""
     return known_fields(ctx, game_map, "RPG::Map")
+
 
 def _refuse_structural(patch: dict[str, Any]) -> None:
     """Refuse a patch naming a field the rest of the map has to agree with."""
@@ -295,6 +307,7 @@ def _refuse_structural(patch: dict[str, Any]) -> None:
         patch, STRUCTURAL_MAP_FIELDS,
         "It has to stay in step with the rest of the map: use op \"resize\" "
         "for the size, map_tiles for tiles, and event_edit for events.")
+
 
 def _cells_outside(data: Table, width: int, height: int) -> int:
     """How many painted cells a resize to this size would discard.
@@ -312,9 +325,14 @@ def _cells_outside(data: Table, width: int, height: int) -> int:
     buffer = data.data
     for z in range(data.zsize):
         base = z * plane
-        for y in range(data.ysize):
-            row = buffer[base + y * stride:base + (y + 1) * stride]
-            if y >= height:
+        # `row_index`, not `y`: this walks rows of a flat buffer, and `y >=
+        # height` reads exactly like the on-the-map rule `on_map` now owns
+        # while being a different question. The name is the only thing that
+        # distinguished them, so it says which one this is.
+        for row_index in range(data.ysize):
+            row = buffer[base + row_index * stride:
+                         base + (row_index + 1) * stride]
+            if row_index >= height:
                 # Every painted cell in a dropped row goes.
                 dropped += stride - row.count(0)
             else:
@@ -323,13 +341,31 @@ def _cells_outside(data: Table, width: int, height: int) -> int:
                 dropped += len(tail) - tail.count(0)
     return dropped
 
-def _events_out_of_bounds(game_map: RubyObject, width: int, height: int) -> list[int]:
+
+def _events_out_of_bounds(game_map: RubyObject, width: int,
+                          height: int) -> list[int]:
+    """Which events a resize would leave off the map.
+
+    Through `on_map`, which is the copy of this rule that had drifted: this
+    tested only the upper bound, so an event at x = -1 survived a resize
+    unreported; and `or 0` turned a missing coordinate into 0 while a
+    coordinate that is a String reached `>= width` as a TypeError.
+    `_int` answers None for both, and a position that cannot be read is
+    reported rather than assumed to be fine -- a resize is the one moment
+    this list is a caller's only warning.
+    """
     events = game_map.get("events")
     if not isinstance(events, RubyHash):
         return []
-    return [event_id for event_id, event in events.sorted_items()
-            if isinstance(event, RubyObject)
-            and ((event.get("x") or 0) >= width or (event.get("y") or 0) >= height)]
+    out = []
+    for event_id, event in events.sorted_items():
+        if not isinstance(event, RubyObject):
+            continue
+        x, y = _int(event.get("x")), _int(event.get("y"))
+        if x is None or y is None or not on_map(x, y, width, height):
+            out.append(event_id)
+    return out
+
 
 def _new_map_id(ctx: Context, args: dict[str, Any], infos: Any) -> int:
     """The id a new map will take, checked against every id already in use.
@@ -352,6 +388,7 @@ def _new_map_id(ctx: Context, args: dict[str, Any], infos: Any) -> int:
         raise ToolError("map %d already exists" % map_id)
     return map_id
 
+
 def _new_tileset_id(ctx: Context, args: dict[str, Any]) -> int:
     """Which tileset a new map uses, on an engine that has a Tilesets table."""
     tileset_id = opt_int(args, "tileset_id", 1, minimum=1) or 1
@@ -368,6 +405,7 @@ def _new_tileset_id(ctx: Context, args: dict[str, Any]) -> int:
             "tileset %d does not exist; this project has %s"
             % (tileset_id, ", ".join(str(i) for i in sorted(known))))
     return tileset_id
+
 
 def _new_tree_info(ctx: Context, args: dict[str, Any], name: str) -> Any:
     """The MapInfos entry for a new map: its name, parent and tree position."""
@@ -386,6 +424,7 @@ def _new_tree_info(ctx: Context, args: dict[str, Any], name: str) -> Any:
     # page cannot hold is refused rather than mangled.
     apply_patch(info, {"name": name}, ctx.codec)
     return info
+
 
 def _create_map(ctx: Context, args: dict[str, Any], dry_run: bool) -> dict[str, Any]:
     name = opt_str(args, "name")
@@ -431,15 +470,21 @@ def _create_map(ctx: Context, args: dict[str, Any], dry_run: bool) -> dict[str, 
         if dry_run:
             # Returning without saving is what discards the tree entry
             # above; the map file itself was never created on this path.
-            return {
-                "op": "create", "map_id": map_id, "name": name, "dry_run": True,
-                "would_write": [filename, infos_file],
+            #
+            # Through `write_reply`, like every other preview. This branch
+            # hand-rolled both halves and got both wrong: `changes` is on the
+            # list of words that read as a completed write, and `would_write`
+            # held names where the act's `writes` holds dicts -- in the very
+            # tool `PREVIEW_NAMES`' comment names as its reason for existing.
+            return write_reply({
+                "op": "create", "map_id": map_id, "name": name,
+                "writes": [filename, infos_file],
                 "size": [width, height],
                 # The patch was applied to the in-memory map above, and a
                 # preview that omits what it understood cannot be checked
                 # against what the real call will do.
                 "changes": changes,
-            }
+            }, True)
         ctx.project.create_file(filename, game_map)
         writes = [
             write_landed.save(filename, tool="map_edit",
@@ -455,6 +500,7 @@ def _create_map(ctx: Context, args: dict[str, Any], dry_run: bool) -> dict[str, 
         ]
     return {"op": "create", "map_id": map_id, "name": name,
             "size": [width, height], "changes": changes, "writes": writes}
+
 
 def _save_tree_after(write_landed: StagedWrite, infos_file: str,
                      summary: str, landed: str, remedy: str) -> dict[str, Any]:
@@ -476,6 +522,7 @@ def _save_tree_after(write_landed: StagedWrite, infos_file: str,
             "%s, but the map tree in %s could not be saved (%s). The two do "
             "not agree now, so this is not \"nothing happened\": %s"
             % (landed, infos_file, exc, remedy)) from exc
+
 
 def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     infos = ctx.project.load_data("map_infos")
@@ -500,8 +547,9 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     # "one past the limit" half was in only one of them.
     preview = reference_preview(ctx.project, "maps", map_id,
                                 "a map delete's transfer scan")
+    # Just the locations: `as_reply` says how many there were and
+    # whether the scan finished.
     incoming = [hit["where"] for hit in preview.rows]
-    more_than_shown, incomplete = preview.truncated, preview.incomplete
 
     filename = ctx.project.map_file(map_id)
     # Asked here, so the preview and the act agree: the file can legitimately
@@ -515,20 +563,21 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
         # on two paths of one function -- with `preview.counted` read further
         # down, correct only because this branch returns. `_op_delete` in
         # db_tools names its reply `reply` for the same reason.
+        #
+        # Through `write_reply`, and through the one helper that decides what
+        # the three reference facts are called: this branch spelled them by
+        # hand and emitted two of them unconditionally while the act below
+        # emitted them only `if incoming` -- so deleting an unreferenced map
+        # previewed two keys the act omits, in the tool whose own comments
+        # say a preview that does not match the act is worse than none.
         reply: dict[str, Any] = {
-            "op": "delete", "map_id": map_id, "dry_run": True,
-            "would_delete": filename if has_file else None,
-            "incoming_transfers": incoming,
-            "incoming_transfers_truncated": more_than_shown}
-        if incomplete:
-            # An empty `incoming_transfers` from a scan that stopped reads as
-            # "no map sends the player here", which is the one thing a caller
-            # about to delete a map acts on.
-            reply["incoming_transfers_scan_stopped"] = incomplete
+            "op": "delete", "map_id": map_id,
+            "deleted": filename if has_file else None}
+        reply.update(preview.as_reply("incoming_transfers", incoming))
         if not has_file:
             reply["note"] = ("there is no %s to delete, so only the tree "
-                               "entry would be removed" % filename)
-        return reply
+                             "entry would be removed" % filename)
+        return write_reply(reply, True)
     # The tree entry goes first. Removing the file first meant that a refused
     # MapInfos save -- the editor holding it open, which is exactly what the
     # staleness check exists for -- left the map deleted and the tree still
@@ -559,12 +608,15 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     if not has_file:
         result["note"] = ("there is no %s to delete, so only the tree entry "
                           "was removed" % filename)
-    if incomplete:
-        result["incoming_transfers_scan_stopped"] = incomplete
+    # The same keys as the preview, on every path rather than only when
+    # there is something to report: a caller comparing the two got a
+    # different key set depending on whether the map happened to be
+    # referenced. `warnings`, plural and a list, because db_edit's reply
+    # spells it that way and a caller reading one tool's replies should not
+    # have to learn two words for one thing.
+    result.update(preview.as_reply("incoming_transfers", incoming))
     if incoming:
-        result["warning"] = (
+        result["warnings"] = [
             "%s Transfer Player command(s) still point at map %d and will now "
-            "send the player nowhere" % (preview.counted, map_id))
-        result["incoming_transfers"] = incoming
-        result["incoming_transfers_truncated"] = more_than_shown
+            "send the player nowhere" % (preview.counted, map_id)]
     return result

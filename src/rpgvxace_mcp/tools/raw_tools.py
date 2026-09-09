@@ -71,7 +71,9 @@ RAW_OP_ARGS = {
 # the two were written separately and had already drifted apart -- this one had
 # "events" and map_edit's did not, so a patch could move an event off the map
 # through the tool that validates while the escape hatch refused it.
-STRUCTURAL_MAP_PATHS = STRUCTURAL_MAP_FIELDS
+#
+# Read under its imported name; the local alias this comment used to sit on
+# had one reader and gave the same list a second spelling.
 
 # The path is the one argument whose cost is a *product* of its own length and
 # the file's. `_read_hash_pairs` registers a hash in the link table before it
@@ -104,9 +106,9 @@ MAX_PATH_SEGMENTS = MAX_JSON_DEPTH
     "already have.",
     schema({
         "op": prop(STR, "get (default) or set. A get renders at most %s "
-                        "values and nests %d deep, and says so when it "
-                        "stopped; a value larger than that has to be read "
-                        "field by field along a deeper path."
+                        "values and nests %d deep, and refuses -- saying so "
+                        "-- above either; a value larger than that has to be "
+                        "read field by field along a deeper path."
                         % ("{:,}".format(MAX_JSON_NODES), MAX_JSON_DEPTH),
                    enum=list(RAW_OP_ARGS)),
         "table": prop(STR, "A data table name, e.g. system, actors, map_infos.",
@@ -221,6 +223,7 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
          "after": to_json(new_value, ctx.codec, "summary"), "write": write},
         dry_run)
 
+
 def _check_structural(path: list[str]) -> None:
     """Refuse any path into a map field the rest of the map has to agree with.
 
@@ -233,12 +236,13 @@ def _check_structural(path: list[str]) -> None:
 
     Bare names, because `_resolve` accepts either spelling of an ivar.
     """
-    if path and _bare_name(path[0]) in STRUCTURAL_MAP_PATHS:
+    if path and _bare_name(path[0]) in STRUCTURAL_MAP_FIELDS:
         raise ToolError(
             "%s cannot be replaced through raw_data, because the rest of the "
             "map has to agree with it. Use map_edit op=\"resize\" for the "
             "size, map_tiles for tiles, and event_edit for events."
             % _bare_name(path[0]))
+
 
 def _check_same_kind(existing: Any, replacement: Any, path: str) -> None:
     """Refuse swapping a structure for something that is not one.
@@ -268,6 +272,7 @@ def _check_same_kind(existing: Any, replacement: Any, path: str) -> None:
                 "%s currently holds %s, and replacing it with %s would leave a "
                 "file the editor cannot open. Set a field inside it instead, or "
                 "use the tool that owns this structure." % (path, held, given))
+
 
 def _resolve(value: Any, path: list[str], codec: TextCodec) -> Any:
     """Walk a path into a loaded file.
@@ -306,6 +311,7 @@ def _resolve(value: Any, path: list[str], codec: TextCodec) -> Any:
                             % (type(current).__name__, trail))
     return current
 
+
 def _list_index(items: list[Any], key: str, trail: str) -> int:
     """One path segment as an index into a list, or a refusal naming where.
 
@@ -326,8 +332,10 @@ def _list_index(items: list[Any], key: str, trail: str) -> int:
                         % (trail, len(items), index))
     return index
 
+
 def _index_list(items: list[Any], key: str, trail: str) -> Any:
     return items[_list_index(items, key, trail)]
+
 
 def _assign(parent: Any, key: str, value: Any, codec: TextCodec,
             trail: str) -> None:
@@ -349,6 +357,7 @@ def _assign(parent: Any, key: str, value: Any, codec: TextCodec,
         parent.set(_hash_key(parent, key, codec), value)
     else:
         raise ToolError("cannot assign into a %s" % type(parent).__name__)
+
 
 def _is_int(text: str) -> bool:
     return bool(re.fullmatch(r"-?\d+", text))

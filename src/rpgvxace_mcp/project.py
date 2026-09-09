@@ -34,7 +34,7 @@ from typing import Any
 
 from . import marshal_rb
 from .convert import TextCodec, detect_encoding
-from .rubytypes import RubyHash, RubyObject, RubyString
+from .rubytypes import RubyHash, RubyObject, RubyString, ruby_children
 from .schema import (
     ARRAY,
     DataFile,
@@ -400,7 +400,13 @@ class Project:
             try:
                 collect_strings(self.load_data(key), samples,
                                 limit=ENCODING_SAMPLE_LIMIT, budget=budget)
-            except (ProjectError, ValueError, OSError):
+            except (ProjectError, ValueError, OSError, MemoryError):
+                # MemoryError too: MAX_DATA_FILE_BYTES bounds the file on
+                # disk and not the graph it decodes to, and a 128 MB file of
+                # four-byte object records becomes about 32 million objects.
+                # This runs from `Project.__init__`, before anything is
+                # served, so an escape here is the traceback that constant's
+                # own comment says it was added to prevent.
                 continue
             sampled.append(key)
             if len(samples) >= ENCODING_SAMPLE_LIMIT:
@@ -410,7 +416,7 @@ class Project:
                 collect_strings(self.load_map(first_map), samples,
                                 limit=ENCODING_SAMPLE_LIMIT, budget=budget)
                 sampled.append("map %d" % first_map)
-            except (ProjectError, ValueError, OSError):
+            except (ProjectError, ValueError, OSError, MemoryError):
                 pass
             finally:
                 self._cache.pop(self.map_file(first_map), None)
@@ -980,9 +986,12 @@ class Project:
             target.mkdir(parents=True, exist_ok=True)
         copied = []
         for path in sorted(self.data_dir.glob("*" + self.extension)):
-            if path.is_symlink():
+            if _is_reparse_point(path):
                 # Copying one would put whatever it points at into the backup
                 # tree, where the read tools would serve it as project data.
+                # Through `_is_reparse_point`, whose own docstring calls
+                # `is_symlink()` insufficient on Windows: this was the one
+                # filter left asking the narrower question.
                 continue
             name = safe_component(path.name, "data file name")
             _contained(target / name, target, "backup of %r" % name)
@@ -992,12 +1001,18 @@ class Project:
         # The prune is part of the act, so the preview reports it too. It was
         # left out of both, so `backups op="create"` quietly removed the
         # oldest snapshot while the sibling op="prune" reports every removal.
-        if dry_run:
-            return {"would_snapshot": copied, "label": clean, "dry_run": True,
-                    "would_prune": self.prune_backups(keep, dry_run=True)}
-        pruned = self.prune_backups(keep)
-        return {"backup": stamp, "path": str(target), "files": copied,
-                "pruned": pruned}
+        #
+        # One key set on both paths. The dry run used to answer
+        # `would_snapshot`, `label` and `would_prune` where the act answers
+        # `backup`, `path`, `files` and `pruned` -- two different replies to
+        # one question, so a caller could not compare them, and the preview
+        # led with a past-tense-free key rather than with the fact that
+        # nothing had happened. Naming a *fact* here and letting the tools
+        # layer phrase it keeps `write_reply` the one place that decides how
+        # a preview reads, and keeps this module below that layer.
+        return {"backup": stamp, "path": str(target), "label": clean,
+                "files": copied,
+                "pruned": self.prune_backups(keep, dry_run=dry_run)}
 
     def list_backups(self) -> list[dict[str, Any]]:
         root = self.backup_root()
@@ -1050,7 +1065,14 @@ class Project:
                 % (stamp, ", ".join(missing), ", ".join(available_files))
             )
         if dry_run:
-            return {"backup": stamp, "would_restore": wanted, "dry_run": True}
+            # The facts, in the same key set as the act below and with no
+            # phrasing of its own: `write_reply` in the tools layer renames
+            # `restored` and puts `dry_run` first. This branch used to say
+            # `would_restore` here and lead with `backup`, so the one thing a
+            # caller most needs to see -- that nothing happened -- came third.
+            # `safety_backup` is absent because a dry run makes none, which is
+            # a real difference and not a phrasing one.
+            return {"backup": stamp, "restored": wanted}
         # Snapshot what is about to be overwritten, so a mistaken restore is
         # itself reversible. `keep` spares the snapshot being restored from:
         # pruning runs inside this call, and would otherwise be free to delete
@@ -1394,16 +1416,13 @@ def collect_strings(value: Any, out: list[bytes], limit: int = 200,
         return
     seen.add(id(value))
 
-    if isinstance(value, RubyObject):
-        children: Any = value.ivars.values()
-    elif isinstance(value, list):
-        children = value
-    elif isinstance(value, RubyHash):
-        children = [item for _, item in value.pairs]
-    else:
-        return
-    for item in children:
+    # Through `ruby_children`, which is where the container set lives now.
+    # This walked three kinds where `schema._observe` walks eight, so a
+    # string inside a RubyIvars, a RubyStruct, a RubyUserMarshal, a
+    # RubyUClass or a RubyExtended was invisible to encoding detection --
+    # and `analysis`' own comment records that the codec really does wrap
+    # values in RubyIvars in files the editor writes.
+    for item in ruby_children(value):
         collect_strings(item, out, limit, depth + 1, seen, budget)
-
 
 

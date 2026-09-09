@@ -10,7 +10,7 @@ from ..analysis import (
     REFERENCE_RULES,
     ReferencePreview,
     WalkBudget,
-    reference_preview,
+    reference_previews,
 )
 from ..convert import TABLE_MODES, apply_patch, new_walk, to_json
 from ..project import ProjectError
@@ -107,7 +107,6 @@ DB_OP_ARGS = {
     "create": {"op", "id", "clone_from", "patch"},
     "delete": {"op", "id"},
 }
-
 
 
 # Every table db_get will read. Scripts is left out rather than advertised and
@@ -491,6 +490,20 @@ def _apply_db_ops(ctx: Context, table: str,
     request = _DbRequest(ctx, table, container, kind)
     applied: list[dict[str, Any]] = []
 
+    # Every delete's reference scan first, in one pass. Asking per op meant
+    # one whole-project traversal per delete over the same unchanged command
+    # lists, and the shared allowance turned that into a batch where the
+    # first few ops were answered and the rest reported their scan as
+    # unfinished. Read here rather than inside `_op_delete` so the batch pays
+    # for one walk; ids that are not deletes are not asked about.
+    request.references = reference_previews(
+        ctx.project, table,
+        {entry_id for entry_id in (opt_int(raw_op, "id")
+                                   for raw_op in ops
+                                   if raw_op.get("op") == "delete")
+         if entry_id is not None},
+        "a delete's reference scan", request.walk)
+
     for index, raw_op in enumerate(ops):
         op = one_of(raw_op, "op", list(DB_OP_ARGS))
         check_op_args(op, raw_op, DB_OP_ARGS, "ops[%d]" % index)
@@ -505,7 +518,8 @@ class _DbRequest:
     Also collects the warnings, which several ops add to.
     """
 
-    __slots__ = ("ctx", "table", "container", "kind", "warnings", "walk")
+    __slots__ = ("ctx", "table", "container", "kind", "warnings", "walk",
+                 "references", "_siblings")
 
     def __init__(self, ctx: Context, table: str, container: Any, kind: str):
         self.ctx = ctx
@@ -520,6 +534,15 @@ class _DbRequest:
         # two hundred whole-project traversals in one uninterruptible call.
         # `validate` states the same rule for itself one module over.
         self.walk = WalkBudget()
+        # Every delete's reference scan, answered in one pass before the ops
+        # are dispatched. Filled by `_apply_db_ops`; empty for a batch with
+        # no deletes in it.
+        self.references: dict[int, ReferencePreview] = {}
+        # `sibling_fields` re-runs `project.entries(table)` -- a
+        # `container_kind` call and a `sorted_items()` sort -- and a create
+        # asks it twice. Neither answer can change inside one call, and
+        # `MAX_OPS` is 200 of them.
+        self._siblings: "set[str] | None" = None
 
     def entry_id(self, raw_op: dict[str, Any], op: str,
                  existing: bool) -> int:
@@ -540,11 +563,18 @@ class _DbRequest:
         What a blank create is judged against: the class model documents no
         database class, so the project's own entries are the only authority
         for which fields one of these has.
+
+        Answered once per call. It cannot change while a call is running --
+        nothing here adds a field to an existing sibling -- and asking again
+        re-sorts the whole table.
         """
-        for _, row in self.ctx.project.entries(self.table):
-            if isinstance(row, RubyObject):
-                return set(row.fields())
-        return set()
+        if self._siblings is None:
+            self._siblings = set()
+            for _, row in self.ctx.project.entries(self.table):
+                if isinstance(row, RubyObject):
+                    self._siblings = set(row.fields())
+                    break
+        return self._siblings
 
     def refuse_id_patch(self, patch: dict[str, Any], entry_id: int) -> None:
         """Refuse a patch that would move an entry's own id.
@@ -658,11 +688,14 @@ def _op_delete(request: _DbRequest, raw_op: dict[str, Any],
     # "nothing points at it" is exactly the answer that costs a full
     # traversal. `reference_preview` carries all three facts, because each of
     # them used to be derived here and again in map_edit.
-    preview = (reference_preview(ctx.project, table, entry_id,
-                                 "a delete's reference scan", request.walk)
-               if scanned else ReferencePreview([], False, None))
-    references, more_than_shown = preview.rows, preview.truncated
-    incomplete = preview.incomplete
+    # From the one pass `_apply_db_ops` made before dispatching, so a batch
+    # of two hundred deletes is one traversal rather than two hundred.
+    preview = (request.references.get(entry_id)
+               or ReferencePreview([], False, None)) if scanned else \
+        ReferencePreview([], False, None)
+    # `preview.as_reply` carries `truncated` and `incomplete` into the
+    # reply now, so only the rows are still read here.
+    references, incomplete = preview.rows, preview.incomplete
     if kind == ARRAY:
         # Keep the slot, so every later id keeps its position. That is what the
         # editor does when you clear an entry.
@@ -693,17 +726,11 @@ def _op_delete(request: _DbRequest, raw_op: dict[str, Any],
              # Not a plain boolean any more: a scan that started and stopped
              # is neither "checked" nor "no scan exists".
              "references_checked": scanned and not incomplete,
-             # In the reply as well as in the warning: a model reading the
-             # number rather than the sentence took the preview limit for a
-             # total.
-             "references_truncated": more_than_shown,
-             "references_found": len(references) if scanned else None,
-             "references": references}
-    if incomplete:
-        # Only when it happened. A key that is present and null is one more
-        # thing for a caller to interpret, and every other note in this file
-        # appears the same way.
-        reply["references_scan_stopped"] = incomplete
+             "references_found": len(references) if scanned else None}
+    # The other three keys from `as_reply`, so this path and map_edit's
+    # delete cannot drift again: `references`, `references_truncated`, and
+    # `references_scan_stopped` only when the scan did stop.
+    reply.update(preview.as_reply("references"))
     return reply
 
 

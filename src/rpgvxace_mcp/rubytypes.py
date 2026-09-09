@@ -90,29 +90,24 @@ KEPT_CONTROLS = "\t\n\r"
 def printable_text(text: str) -> str:
     """Text that is safe to put in a JSON response, and in a terminal.
 
-    A name read out of a file is decoded with ``surrogateescape``, so it can
-    hold lone surrogates. ``json.dumps`` emits those happily and the UTF-8
-    transport then cannot encode them, which would end the session over one
-    corrupt byte in one class name. Replacing them costs nothing real: no RGSS
-    class or instance variable is named in anything but ASCII.
+    Two problems, one answer. A name read out of a file is decoded with
+    ``surrogateescape``, so it can hold lone surrogates; ``json.dumps`` emits
+    those happily and the UTF-8 transport then cannot encode them, which
+    would end the session over one corrupt byte in one class name. And a
+    reply is read by a terminal, where an ESC in a name out of a file this
+    server did not write is a sequence that terminal acts on.
 
-    Control characters go for a different reason, and it is not encoding: a
-    reply is read by a terminal, and an ESC in a name out of a file this
-    server did not write is a sequence that terminal acts on. `decoded_text`
-    has claimed to sanitise since the round that wrote it, and the test that
-    was supposed to hold the claim asserted about the *longest* name in the
-    reply rather than the crafted one -- so it passed while an escape went
-    into `map_list` whole.
+    One filter covers both, because no character that fails UTF-8 encoding is
+    printable -- checked over the whole code-point range, not assumed: every
+    unencodable character is a lone surrogate, and those are category Cs.
+    This used to be a separate `encode("utf-8", "replace")` and nothing at
+    all for the control characters, while `decoded_text` claimed to sanitise;
+    the test that was supposed to hold that claim asserted about the
+    *longest* name in the reply rather than the crafted one, so it passed
+    while an escape went into `map_list` whole.
     """
     # Every real name takes this branch, and both are C-level checks: this
     # runs once per class name and once per field name across a project.
-    if text.isascii() and text.isprintable():
-        return text
-    if not text.isascii():
-        try:
-            text.encode("utf-8")
-        except UnicodeEncodeError:
-            text = text.encode("utf-8", "replace").decode("utf-8")
     if text.isprintable():
         return text
     # A question mark rather than a deletion, so the length still says
@@ -666,3 +661,47 @@ class Tone(RGSSFloats):
     __slots__ = ()
     CLASS_NAME = "Tone"
     FIELDS = ("red", "green", "blue", "gray")
+
+
+def ruby_children(value: "Any") -> "list[Any]":
+    """Every value nested one level inside a Ruby wrapper.
+
+    "Which of these wrappers contains other values" was encoded in five
+    separate walks and they disagreed: `project.collect_strings` descended
+    into three kinds where `schema._observe` walks eight, so encoding
+    detection never saw a string inside a `RubyIvars` -- and `analysis`' own
+    comment records that this codec really does wrap values in `RubyIvars`
+    in files the editor writes. One function, so the set is stated once and a
+    wrapper added later is a container everywhere or nowhere.
+
+    Hash keys as well as values, because a Ruby Hash may be keyed by a
+    String and a walk that skipped keys would not find it. Ivar records are
+    included wherever a wrapper carries them, which is the half three of the
+    five copies missed.
+
+    Callers keep their own memo and their own budget: this answers what is
+    inside one value, and says nothing about how far to go.
+    """
+    if isinstance(value, RubyObject):
+        return list(value.ivars.values())
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, RubyHash):
+        out: list[Any] = []
+        for key, item in value.pairs:
+            out.append(key)
+            out.append(item)
+        return out
+    if isinstance(value, RubyStruct):
+        return list(value.members.values())
+    if isinstance(value, (RubyUserMarshal, RubyData)):
+        # These name a class and keep their whole state in one nested value.
+        return [value.value]
+    if isinstance(value, (RubyIvars, RubyUClass, RubyExtended)):
+        return [value.inner] + list(getattr(value, "ivars", {}).values())
+    if isinstance(value, (RubyUserDef, RubyString, RubySymbol)):
+        # A payload is bytes, not a value tree; the ivar record is a tree.
+        return list(value.ivars.values())
+    return []

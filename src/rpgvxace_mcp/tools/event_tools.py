@@ -27,7 +27,9 @@ from ..analysis import WalkBudget
 from ..project import MAX_MAP_ID
 from ..rubytypes import RubyHash, RubyObject
 from ..schema import (
+    COMMON_EVENT_TRIGGER_NAMES,
     TRIGGER_NAMES,
+    on_map,
     unreadable_events_note,
     new_event,
     new_event_command,
@@ -301,7 +303,21 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         common = ctx.project.get_entry("common_events", common_id, refresh)
         if common is None:
             raise ToolError("there is no common event %d" % common_id)
-        commands = common.get("list") or []
+        if not isinstance(common, RubyObject):
+            # The same refusal `_edit_common_event` makes, in the same words.
+            # The read path called `.get("list")` straight away, so a file
+            # holding an Array or a String in that slot raised AttributeError
+            # -- reported with the hint "an argument was not the shape the
+            # tool expected", which is a diagnosis about the caller for a
+            # fact about the file.
+            raise ToolError(
+                "common event %d does not hold an RPG::CommonEvent object, "
+                "so it cannot be read. Run validate to see what is wrong "
+                "with the file." % common_id)
+        raw_list = common.get("list")
+        # A slot that holds an RPG::CommonEvent whose @list is not an
+        # Array is the same class of crafted file, one level down.
+        commands = raw_list if isinstance(raw_list, list) else []
         # One allowance and one conversion budget for this reply, the same two
         # the map branch below takes. This branch had neither: it rendered the
         # whole list, so a common event whose @list is 250,000 links to one
@@ -315,11 +331,11 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         command_budget = WalkBudget()
         walk = new_walk()
         shown = commands[:command_budget.take(len(commands))]
-        triggers = {0: "none", 1: "autorun", 2: "parallel"}
         result: dict[str, Any] = {
             "common_event_id": common_id,
             "name": decoded(ctx, common.get("name")),
-            "trigger": triggers.get(common.get("trigger"), common.get("trigger")),
+            "trigger": COMMON_EVENT_TRIGGER_NAMES.get(
+                common.get("trigger"), common.get("trigger")),
             "switch_id": common.get("switch_id"),
             "command_count": len(commands),
             "script": render_script(shown, ctx.codec),
@@ -596,7 +612,11 @@ def _check_bounds(x: Any, y: Any, width: int, height: int) -> None:
             "is wrong with the map." % (width, height))
     if not isinstance(x, int) or not isinstance(y, int):
         raise ToolError("event coordinates must be whole numbers, got (%r, %r)" % (x, y))
-    if x < 0 or y < 0 or (width and x >= width) or (height and y >= height):
+    # `on_map`, not a fourth copy of the arithmetic. The `and width` /
+    # `and height` clauses this line used to carry were dead: both are
+    # refused above unless they are >= 1, which is what the docstring says
+    # was decided -- so the code contradicted its own history note.
+    if not on_map(x, y, width, height):
         raise ToolError(
             "(%d, %d) is outside this map, which is %dx%d. Tile coordinates start "
             "at (0, 0) in the top-left corner." % (x, y, width, height)
@@ -615,13 +635,29 @@ class _EventRequest:
     it.
     """
 
-    __slots__ = ("ctx", "events", "width", "height")
+    __slots__ = ("ctx", "events", "width", "height", "_by_id")
 
     def __init__(self, ctx: Context, events: RubyHash, width: int, height: int):
         self.ctx = ctx
         self.events = events
         self.width = width
         self.height = height
+        # One index for the whole call. `RubyHash` is a list of pairs, so
+        # every `get` and every `keys()` is a linear scan whose length comes
+        # out of the file -- and `MAX_OPS` is a caller-controlled multiplier
+        # on it: a 10 MB crafted map holds about 2.5 million pairs, so two
+        # hundred ops is 5x10^8 comparisons in one uninterruptible call. The
+        # class docstring on `RubyHash` prescribes exactly this ("a caller
+        # doing repeated lookups in a loop should hoist dict(hash.items())
+        # out of it") and no caller did it.
+        #
+        # Numbers only, and `float` as well as `int`: an event id is a
+        # number, and `_find` compares with `==`, where `1 == 1.0` -- so
+        # indexing both keeps the answer identical to the scan's rather than
+        # merely close to it. A key that is neither is not an event id and
+        # cannot be reached by `event_id`, which comes from `opt_int`.
+        self._by_id = {key: value for key, value in events.items()
+                       if isinstance(key, (int, float))}
 
     def event_id(self, raw_op: dict[str, Any], op: str) -> int:
         event_id = opt_int(raw_op, "event_id")
@@ -632,10 +668,30 @@ class _EventRequest:
     def event(self, raw_op: dict[str, Any], op: str) -> "tuple[int, RubyObject]":
         """The event an op names, or a refusal saying it is not there."""
         event_id = self.event_id(raw_op, op)
-        event = self.events.get(event_id)
+        event = self._by_id.get(event_id)
         if not isinstance(event, RubyObject):
             raise ToolError("this map has no event %d" % event_id)
         return event_id, event
+
+    @property
+    def used_ids(self) -> "set[int]":
+        """Which event ids this map already has, without rescanning it."""
+        return {key for key in self._by_id if isinstance(key, int)}
+
+    def add(self, event_id: int, event: RubyObject) -> None:
+        """Put a new event in the map *and* in the index.
+
+        Both, in one method, because an index that the create op forgets to
+        update is worse than no index: the next op in the same batch would be
+        told the event it just created does not exist.
+        """
+        self.events.set(event_id, event)
+        self._by_id[event_id] = event
+
+    def remove(self, event_id: int) -> None:
+        """Take an event out of the map and out of the index."""
+        self.events.delete(event_id)
+        self._by_id.pop(event_id, None)
 
     def pages(self, event: RubyObject, event_id: int) -> list:
         """One event's page list, type-checked like the map's @events.
@@ -708,7 +764,7 @@ class _EventRequest:
 def _op_create(request: _EventRequest, raw_op: dict[str, Any],
                op: str) -> dict[str, Any]:
     """A new event, with its first page."""
-    used = {k for k in request.events.keys() if isinstance(k, int)}
+    used = request.used_ids
     # `or next(...)` treated an explicit 0 as "choose one for me", so a caller
     # naming an id it should have been told was invalid silently got a
     # different event.
@@ -739,7 +795,7 @@ def _op_create(request: _EventRequest, raw_op: dict[str, Any],
     page = event.get("pages")[0]
     changes = request.patch_page(page, raw_op, "a new event's first page")
     request.set_commands(page, raw_op, op)
-    request.events.set(event_id, event)
+    request.add(event_id, event)
     return {"op": op, "event_id": event_id, "x": x, "y": y, "changes": changes,
             "summary": "created event %d" % event_id}
 
@@ -747,7 +803,7 @@ def _op_create(request: _EventRequest, raw_op: dict[str, Any],
 def _op_delete(request: _EventRequest, raw_op: dict[str, Any],
                op: str) -> dict[str, Any]:
     event_id, _event = request.event(raw_op, op)
-    request.events.delete(event_id)
+    request.remove(event_id)
     return {"op": op, "event_id": event_id,
             "summary": "deleted event %d" % event_id}
 

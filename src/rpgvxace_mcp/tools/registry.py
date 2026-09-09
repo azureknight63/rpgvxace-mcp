@@ -41,20 +41,13 @@ def echo(value: Any) -> str:
 
 
 def decoded(ctx: "Context", value: Any) -> str:
-    """Text from a project file, ready to put in a reply.
+    """Text from a project file, ready to put in a reply: capped, sanitised.
 
-    The tools layer's one spelling of this. There were four -- two named
-    functions and two inline copies -- all of them a bare
-    `ctx.codec.decode(value.data) if isinstance(value, RubyString) else ""`,
-    with no cap and no sanitising, while `analysis._text` did the same job
-    carefully and said why: a value out of a file this server did not write
-    would otherwise be repeated whole into every message about it.
-
-    That reasoning is about where the value came from, so it holds for a reply
-    too. Measured before this: a 1,000,006-character map name carrying an ANSI
-    escape went into map_list's reply intact, while the same name in a
-    validate finding came back capped. Both go through
-    `convert.decoded_text` now, so they cannot differ again.
+    The tools layer's one spelling of this, over `convert.decoded_text`.
+    Inline it and you get the version this replaced -- a bare
+    `codec.decode(value.data)` with no cap, which put a 1,000,006-character
+    map name carrying an ANSI escape into `map_list`'s reply whole.
+    `TestOneDecodeForTheWholeToolsLayer` is what holds that.
     """
     return decoded_text(ctx.codec, value)
 
@@ -189,8 +182,6 @@ class StagedWrite:
         return write
 
 
-
-
 REGISTRY: dict[str, Tool] = {}
 
 
@@ -265,6 +256,17 @@ DRY_RUN = prop(BOOL, "Report what would change without writing anything to disk.
 # tool, two conventions, nothing for a caller to learn.
 PREVIEW_NAMES = {
     "applied": "would_apply",
+    # `writes` is a list of dicts and `would_write` was a list of names, in
+    # two branches of one tool: `_create_map` built the second by hand while
+    # every other path here built the first. Same key either side of the
+    # rename now, so the preview and the act are the same sentence.
+    "writes": "would_write",
+    "cloned_from": "would_clone_from",
+    # A snapshot's two lists. `Project.snapshot` names the facts and this
+    # names them for a preview, so the project layer stays below the layer
+    # that decides how a reply reads.
+    "files": "would_copy",
+    "pruned": "would_prune",
     "changes": "would_change",
     "changed": "would_change",
     "created": "would_create",
@@ -458,23 +460,15 @@ def check_op_args(op: str, args: dict[str, Any],
     a refusal -- it will not retry what it believes already happened.
 
     ``uses`` maps each op to every argument it reads, including the ones the
-    tool reads for every op. An op absent from that table *is* refused, and
-    said to be a bug in this server rather than a mistake by the caller: an op
-    reaches here only after ``one_of`` has accepted it, so a missing entry
-    means this server's two lists disagree. Returning quietly instead would
-    drop the caller's arguments and report success -- the failure this whole
-    function exists to prevent, reached through the function itself.
+    tool reads for every op. An op absent from that table is refused as a bug
+    in this server: `one_of` has already accepted it, so a missing entry
+    means these two lists disagree -- and returning quietly would drop the
+    caller's arguments and report success, which is the failure this function
+    exists to prevent, reached through the function itself.
 
-    An earlier version of this paragraph said such an op "is not refused
-    here", which is the opposite of what the code below does. The claim was
-    left behind by the round that made it raise.
-
-    Every tool that takes an ``op`` calls this -- the three editing tools, both
-    of event_edit's paths, and map_tiles, raw_data, scripts and backups. That
-    is not a claim to be taken on trust: the first version of this docstring
-    said "nothing is ignored silently here" while four of those tools had no
-    table at all, so ``TestEveryOpSelectingToolHasATable`` walks the registry
-    and fails if one appears without one.
+    ``TestEveryOpSelectingToolHasATable`` walks the registry, so a tool that
+    grows an ``op`` without a table fails rather than silently ignoring
+    arguments.
     """
     allowed = uses.get(op)
     if allowed is None:
@@ -514,6 +508,13 @@ def _check_declared(key: str, value: Any, spec: dict[str, Any]) -> None:
             and len(value) > spec["maxItems"]:
         raise ToolError("%s takes at most %d entries, got %d"
                         % (key, spec["maxItems"], len(value)))
+    # `maxLength` too, which this enforced for lists and not for strings --
+    # so a declared string ceiling was documentation rather than a gate, and
+    # the one property that declares one enforced it again by hand.
+    if "maxLength" in spec and isinstance(value, str) \
+            and len(value) > spec["maxLength"]:
+        raise ToolError("%s takes at most %d characters, got %d"
+                        % (key, spec["maxLength"], len(value)))
     declared = spec.get("type")
     if declared == INT:
         # Only the wrong *kind* is refused here. `as_int` below owns the two

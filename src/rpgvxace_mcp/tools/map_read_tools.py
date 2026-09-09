@@ -46,6 +46,7 @@ TOP_TILE_IDS = 12
 # advertises it and the reader that enforces it are 40 lines apart.
 TILE_DETAIL = ("none", "counts")
 
+
 def _map_names(ctx: Context) -> dict[int, str]:
     names = {}
     try:
@@ -57,6 +58,7 @@ def _map_names(ctx: Context) -> dict[int, str]:
         # empty mapping here means "no names to show" rather than hiding a bug.
         pass
     return names
+
 
 @tool(
     "map_list",
@@ -129,6 +131,7 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         "start_position": _start_position(ctx),
     }
 
+
 def _start_position(ctx: Context) -> dict[str, Any] | None:
     try:
         system = ctx.project.load_data("system")
@@ -143,6 +146,7 @@ def _start_position(ctx: Context) -> dict[str, Any] | None:
         "x": system.get("start_x"),
         "y": system.get("start_y"),
     }
+
 
 @tool(
     "map_get",
@@ -230,7 +234,8 @@ def map_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         result["events"], cut_short = _event_summaries(ctx, game_map)
         if cut_short:
             result["events_truncated"] = (
-                "this map describes more than %d event pages, so the summary "
+                "this map describes more than %d event and page rows, so the "
+                "summary "
                 "stops there. A map that large is usually a file that shares "
                 "one page object across many slots rather than a big map -- "
                 "run validate. Read particular events with event_get."
@@ -242,6 +247,7 @@ def map_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     if warnings:
         result["file_warnings"] = warnings
     return result
+
 
 def _tile_counts(data: Table) -> dict[str, Any]:
     """How often each tile id appears on each layer.
@@ -259,7 +265,7 @@ def _tile_counts(data: Table) -> dict[str, Any]:
     # One Counter per layer over a slice of the flat buffer, rather than a
     # `data.get(x, y, z)` per cell -- two Python calls plus a bounds check and
     # an index multiply, for up to the four million cells `_check_budget`
-    # allows. `_cells_outside` in this file already counts this way and its
+    # allows. `_cells_outside` in map_edit_tools already counts this way and its
     # docstring gives this same reason; this walk simply had not been changed
     # with it.
     #
@@ -287,6 +293,7 @@ def _tile_counts(data: Table) -> dict[str, Any]:
         }
     return out
 
+
 def _tile_sheet(tile_id: int) -> str:
     if tile_id == 0:
         return "empty"
@@ -309,6 +316,7 @@ def _tile_sheet(tile_id: int) -> str:
 # not save that: it is measured after the reply has been serialised, so it
 # bounds the response and not the work or the memory.
 MAX_EVENT_SUMMARY_ROWS = 2000
+
 
 def _event_summaries(ctx: Context, game_map: RubyObject
                      ) -> tuple[list[dict[str, Any]], bool]:
@@ -377,6 +385,7 @@ def _event_summaries(ctx: Context, game_map: RubyObject
     # a two-event map into its own events -- so an ordinary map reported the
     # first event as the whole summary and the second as "truncated".
     return out, cut_short
+
 
 def _conditions(condition: Any) -> list[str]:
     if not isinstance(condition, RubyObject):

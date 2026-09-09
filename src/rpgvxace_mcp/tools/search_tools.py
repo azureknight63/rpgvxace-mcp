@@ -139,6 +139,15 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 "a command_code search only has anything to look at in the "
                 "events scope, because only event command lists hold commands. "
                 "Include \"events\" in scopes.")
+        # A scope named *beside* events is deliberately not refused, and this
+        # is the difference from `regex` below. Both are arguments no path
+        # reads -- but `scopes_searched` names exactly which scopes were read,
+        # so `["events", "database"]` comes back saying database was not one
+        # of them, while a dropped `regex` left no trace anywhere in the
+        # reply. Refusing here would be the second answer to a question the
+        # reply already answers, and it would break a caller that passes the
+        # full scope list on every call. Written down because a review has
+        # now proposed the refusal twice.
         if opt_bool(args, "regex"):
             # `regex` says how to read `query`, and there is no query here.
             # `_matcher` returns on the falsy query before it looks, so this
@@ -165,6 +174,7 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             if scope in scopes and not found.done:
                 walk(ctx, found)
     return found.reply()
+
 
 class _Hits:
     """One search's results, and everything the reply has to say about them.
@@ -314,6 +324,12 @@ class _Hits:
             out["may_have_more"] = True
         return out
 
+
+def _about(code: int) -> dict[str, Any]:
+    """The two facts every command hit carries about its command."""
+    return {"code": code, "command": command_name(code)}
+
+
 def _search_events(ctx: Context, found: _Hits,
                    code_filter: "int | None") -> None:
     """Every event command list on every map, plus common events and troops."""
@@ -337,15 +353,19 @@ def _search_events(ctx: Context, found: _Hits,
             if not isinstance(command, RubyObject):
                 continue
             code = command.get("code", 0)
-            named = {"code": code, "command": command_name(code)}
             if code_filter is not None:
                 if code == code_filter:
                     found.add(location.at(index),
-                              summarize(command, ctx.codec), named)
+                              summarize(command, ctx.codec), _about(code))
                 continue
             for text in _command_texts(ctx, command):
                 if matcher and matcher(text):
-                    found.add(location.at(index), text, named)
+                    # Built here rather than above the branch: only these two
+                    # read it, and above the branch it was one dict per
+                    # command walked -- fifty thousand allocations for the
+                    # hundred that reach a reply. It also shadowed the
+                    # `named` helper this module now imports.
+                    found.add(location.at(index), text, _about(code))
                     if found.done:
                         return
     if not read_something:
@@ -354,6 +374,7 @@ def _search_events(ctx: Context, found: _Hits,
             "events and the troops either hold no events or would not load. "
             "This is not the same as finding nothing in them -- run validate "
             "to see which files are unreadable."))
+
 
 def _search_database(ctx: Context, found: _Hits) -> None:
     """Every string field of every entry of every id-indexed table."""
@@ -387,6 +408,7 @@ def _search_database(ctx: Context, found: _Hits) -> None:
                     if found.done:
                         return
 
+
 def _search_maps(ctx: Context, found: _Hits) -> None:
     """The map names in the tree. The maps themselves are the events scope."""
     matcher = found.matcher
@@ -407,6 +429,7 @@ def _search_maps(ctx: Context, found: _Hits) -> None:
         text = decoded(ctx, name)
         if text and matcher and matcher(text):
             found.add(Location("map", map_id=map_id, field="name"), text)
+
 
 def _search_scripts(ctx: Context, found: _Hits) -> None:
     """Every line of every script slot that inflates."""
@@ -432,6 +455,7 @@ def _search_scripts(ctx: Context, found: _Hits) -> None:
                 if found.done:
                     return
 
+
 def _script_at(script: dict[str, Any], line: int) -> Location:
     """Where a script hit is, in the fields Location already has.
 
@@ -446,6 +470,7 @@ def _script_at(script: dict[str, Any], line: int) -> Location:
     line are what it takes.
     """
     return Location("script", entry_id=script["index"], index=line)
+
 
 def _matcher(args: dict[str, Any], query: str | None) -> "_Matcher | None":
     """The text test one search uses, compiled once.
@@ -490,6 +515,7 @@ def _matcher(args: dict[str, Any], query: str | None) -> "_Matcher | None":
     # Counted, not silent -- see _Matcher.
     return _Matcher(lambda text: pattern.search(text[:MAX_SUBJECT_CHARS]) is not None,
                     whole=False)
+
 
 class _Matcher:
     """One search's text test: how much text it skipped, and when it gave up.
@@ -545,6 +571,7 @@ class _Matcher:
             "end of the project, so it stopped there. The hits below are real; "
             "text it did not reach is not reported as absent. Narrow the "
             "pattern, or pass one scope at a time." % self.seconds)
+
 
 def _command_texts(ctx: Context, command: RubyObject) -> list[str]:
     out = []

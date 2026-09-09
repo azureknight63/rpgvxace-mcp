@@ -7,11 +7,10 @@ could hold, and nothing in it was shared between them.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from ..analysis import (
-    DEFAULT_LIMIT,
+    DEFAULT_FINDING_LIMIT,
     MAX_FINDINGS,
     VALIDATE_SCOPES,
     validate as run_validate,
@@ -224,7 +223,7 @@ def _schema_report(ctx: Context, refresh: bool) -> dict[str, Any]:
                              "included. At most %d." % MAX_MAP_IDS,
                         items={"type": INT}, maxItems=MAX_MAP_IDS),
         "limit": prop(INT, "Maximum findings to return (default %d)."
-                      % DEFAULT_LIMIT, minimum=1, maximum=MAX_FINDINGS),
+                      % DEFAULT_FINDING_LIMIT, minimum=1, maximum=MAX_FINDINGS),
         # Named here rather than shared as REFRESH, because for this tool it
         # means one thing more than it does elsewhere: it also forgets the
         # remembered asset listings, which is the only way a graphic added
@@ -259,7 +258,7 @@ def validate(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         ctx.project.forget_cached()
         ctx.project.forget_assets()
     return run_validate(ctx.project, scopes, map_ids,
-                        opt_int(args, "limit", DEFAULT_LIMIT) or DEFAULT_LIMIT)
+                        opt_int(args, "limit", DEFAULT_FINDING_LIMIT) or DEFAULT_FINDING_LIMIT)
 
 
 @tool(
@@ -396,25 +395,41 @@ def backups(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 "kept": ctx.project.backup_keep}
     dry_run = opt_bool(args, "dry_run")
     if op == "create":
-        label = re.sub(r"[^A-Za-z0-9._-]", "-", opt_str(args, "label") or "manual")
+        # Passed raw: `snapshot` sanitises it with the same character
+        # class, and `_BACKUP_STAMP` -- which decides whether `prune` will
+        # ever consider the directory -- is built from that class too. A
+        # third copy here was pure redundancy, and widening one without the
+        # stamp would have made those snapshots unprunable.
+        label = opt_str(args, "label") or "manual"
         # Asked of the function that does the copying, like the prune
         # branch below: globbing here listed the symlinked data files
         # `snapshot` skips, so the preview named files no backup would hold.
-        return ctx.project.snapshot(label, dry_run=dry_run)
+        #
+        # Through `write_reply`, so a preview reads as one here too. That
+        # branch used to build a reply of its own with a different key set
+        # from the act's and `dry_run` in the middle of it.
+        return write_reply(ctx.project.snapshot(label, dry_run=dry_run),
+                           dry_run)
     if op == "prune":
-        if dry_run:
-            # Asked of prune_backups itself: building the candidate list here
-            # got both the key name and the rules wrong -- it claimed it would
-            # delete this run's own snapshot and any folder a person had put
-            # under backups/.
-            return {"would_remove": ctx.project.prune_backups(dry_run=True),
-                    "kept": ctx.project.backup_keep, "dry_run": True}
-        return {"removed": ctx.project.prune_backups(),
-                "kept": ctx.project.backup_keep}
-    return ctx.project.restore_backup(
+        # One body for both, through `write_reply`. The dry run spelled
+        # `would_remove` by hand and put `dry_run` last, so the two branches
+        # were two sentences about one thing and only one of them led with
+        # the fact that nothing had happened.
+        #
+        # Asked of prune_backups itself either way: building the candidate
+        # list here got both the key name and the rules wrong -- it claimed
+        # it would delete this run's own snapshot and any folder a person had
+        # put under backups/.
+        return write_reply({"op": op,
+                            "removed": ctx.project.prune_backups(
+                                dry_run=dry_run),
+                            "kept": ctx.project.backup_keep}, dry_run)
+    # Through `write_reply` like every other branch here, so a restore's
+    # preview reads as one and its key set matches the act's.
+    return write_reply(ctx.project.restore_backup(
         need_str(args, "backup"),
         str_list(args, "files", MAX_RESTORE_FILES) or None,
         dry_run,
-    )
+    ), dry_run)
 
 

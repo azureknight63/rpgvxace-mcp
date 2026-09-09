@@ -213,6 +213,29 @@ TRIGGER_NAMES = {
     TRIGGER_PARALLEL: "parallel process",
 }
 
+# A common event's @trigger is a different, shorter set: it has no position on
+# a map, so there is nothing to touch. This was inlined in `event_get` as a
+# literal dict while the same three names sat in this file as prose -- the one
+# trigger table that did not get the treatment the page triggers got.
+COMMON_EVENT_TRIGGER_NAMES = {
+    0: "none",
+    1: "autorun",
+    2: "parallel",
+}
+
+
+def numbered(mapping: "dict[int, str]") -> str:
+    """``0: none, 1: autorun, 2: parallel`` from a table like the ones above.
+
+    Here rather than only in `docs`, because the field descriptions in this
+    file were the *other* copy: the page-trigger names, the common-event
+    trigger names and the nine tileset sheet names each appeared once as a
+    table this module exports and once as a sentence a served document
+    renders, so a reword in one made two documents disagree.
+    """
+    return ", ".join("%d: %s" % (code, name)
+                     for code, name in sorted(mapping.items()))
+
 # The nine tileset sheets an RPG::Tileset names, in @tileset_names order.
 TILESET_SHEET_NAMES = ("A1", "A2", "A3", "A4", "A5", "B", "C", "D", "E")
 
@@ -248,8 +271,7 @@ SHARED_CLASS_FIELDS: dict[str, dict[str, str]] = {
         "direction_fix": "[Direction Fix] option",
         "through": "[Through] option",
         "priority_type": "0: below characters, 1: same as characters, 2: above",
-        "trigger": "0: action button, 1: player touch, 2: event touch, "
-                   "3: autorun, 4: parallel process",
+        "trigger": numbered(TRIGGER_NAMES),
         "list": "Array of RPG::EventCommand",
     },
     "RPG::Event::Page::Condition": {
@@ -292,7 +314,7 @@ SHARED_CLASS_FIELDS: dict[str, dict[str, str]] = {
     "RPG::CommonEvent": {
         "id": "Common event id",
         "name": "Common event name",
-        "trigger": "0: none, 1: autorun, 2: parallel",
+        "trigger": numbered(COMMON_EVENT_TRIGGER_NAMES),
         "switch_id": "Switch that enables an autorun or parallel common event",
         "list": "Array of RPG::EventCommand",
     },
@@ -336,8 +358,9 @@ ACE_CLASS_FIELDS: dict[str, dict[str, str]] = {
         "mode": "Observed values are 0 and 1, understood as field type and area "
                 "type; not confirmed against the reference",
         "note": "Free text Note field",
-        "tileset_names": "Nine graphic file names, in order: "
-                         "A1, A2, A3, A4, A5, B, C, D, E",
+        "tileset_names": ("%d graphic file names, in order: %s"
+                          % (len(TILESET_SHEET_NAMES),
+                             ", ".join(TILESET_SHEET_NAMES))),
         "flags": "Table of 8192 per-tile flag words, one per tile id; see the "
                  "advisory flag-bit table for what the bits mean",
     },
@@ -890,3 +913,21 @@ def _tally(fields: dict[str, dict[str, int]], cls: str,
     for name in names:
         bare = _bare_name(name)
         bucket[bare] = bucket.get(bare, 0) + 1
+
+
+def on_map(x: int, y: int, width: int, height: int) -> bool:
+    """Whether a tile coordinate is inside a map of this size.
+
+    One business rule, written four times: twice in `analysis` correctly,
+    once in `event_tools` with two dead `and` clauses left from a version
+    where an unmeasurable size meant "unbounded", and once in
+    `map_edit_tools` with no lower bound at all -- so an event at x = -1
+    survived a resize unreported, and a non-integer x out of a crafted file
+    reached `>= width` as a TypeError.
+
+    Here because `schema` sits below everything that needs it and imports
+    nothing itself. Callers keep their own refusals for an unusable size and
+    for a coordinate that is not a number: this answers the question it is
+    named for and nothing else.
+    """
+    return 0 <= x < width and 0 <= y < height

@@ -644,10 +644,11 @@ def _compile_entry(entry: dict[str, Any], enc: TextCodec, indent: int,
         return _compile_variable(entry, indent)
 
     if "wait" in entry:
-        return [_cmd(230, indent, [int(entry["wait"])])]
+        return [_cmd(230, indent, [_needs_int(entry["wait"], "wait")])]
 
     if "common_event" in entry:
-        return [_cmd(117, indent, [int(entry["common_event"])])]
+        return [_cmd(117, indent,
+                     [_needs_int(entry["common_event"], "common_event")])]
 
     for key, code in (("label", 118), ("jump", 119)):
         if key in entry:
@@ -655,9 +656,17 @@ def _compile_entry(entry: dict[str, Any], enc: TextCodec, indent: int,
 
     if "transfer" in entry:
         t = _needs_object(entry["transfer"], "transfer")
+        # `_needs_int` for all six, not just the ones that read as ids: a
+        # Transfer Player destination is what this command *is*, and
+        # `int(2.9)` is 2 -- so a wrong-typed y moved the player one tile
+        # from where the caller said and the reply reported success.
         return [_cmd(201, indent, [
-            int(t.get("designation", 0)), int(t["map_id"]), int(t["x"]), int(t["y"]),
-            int(t.get("direction", 0)), int(t.get("fade", 0)),
+            _needs_int(t.get("designation", 0), "transfer.designation"),
+            _needs_int(t["map_id"], "transfer.map_id"),
+            _needs_int(t["x"], "transfer.x"),
+            _needs_int(t["y"], "transfer.y"),
+            _needs_int(t.get("direction", 0), "transfer.direction"),
+            _needs_int(t.get("fade", 0), "transfer.fade"),
         ])]
 
     if "exit" in entry:
@@ -801,9 +810,14 @@ def _compile_condition(cond: dict[str, Any], enc: TextCodec) -> list[Any]:
                 % (cond.get("compare"), ", ".join(COMPARISON_CODES))
             )
         if "from_variable" in cond:
-            operand_type, operand = 1, int(cond["from_variable"])
+            # In the same statement as the `_needs_int` two lines down, and
+            # bare: `{"variable": 3, "from_variable": 2.9}` compared against
+            # variable 2 and answered "rewrote page 0 of event 1".
+            operand_type, operand = 1, _needs_int(cond["from_variable"],
+                                                  "from_variable")
         else:
-            operand_type, operand = 0, int(cond.get("value", 0))
+            operand_type, operand = 0, _needs_int(cond.get("value", 0),
+                                                  "value")
         return [COND_VARIABLE, _needs_int(cond["variable"], "variable"),
                 operand_type, operand, comparison]
     if "script" in cond:

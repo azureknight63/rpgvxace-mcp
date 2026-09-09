@@ -356,13 +356,20 @@ def _answer_batch(server: "Server", message: list[Any]) -> list[dict[str, Any]]:
             answer = server.handle(entry)
         if answer is None:
             continue        # a notification takes no response
-        size = len(json.dumps(answer, ensure_ascii=False, default=str))
+        # Measured with the same function that will write it. The second
+        # pass in `_write` is kept deliberately: this loop has to know each
+        # answer's size *before* it decides whether the batch still fits, and
+        # the substitute error below changes that size -- so the frame the
+        # caller finally writes is not always the one measured here. One
+        # extra pass over at most a four-megabyte frame, against a rule that
+        # must be applied per member.
+        size = len(_frame_text(answer))
         if spent + size > MAX_RESPONSE_CHARS:
             answer = _error(
                 answer.get("id"), INTERNAL_ERROR,
                 "the answers to this batch do not fit in one response. Send "
                 "these requests separately, or ask for less in each.")
-            size = len(json.dumps(answer))
+            size = len(_frame_text(answer))
         # The comma this response needs if it is not the first.
         spent += size + (1 if responses else 0)
         responses.append(answer)
@@ -422,6 +429,20 @@ def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
+def _frame_text(payload: Any) -> str:
+    """One payload as the exact characters that would go on the wire.
+
+    Here rather than at each `json.dumps` call, because `_answer_batch`
+    measured each member with a call of its own that passed neither
+    `ensure_ascii=False` nor `default=str` -- so the two spellings of "the
+    frame" disagreed, and changing `_write`'s options would have made the
+    batch accounting undercount and collapse the whole batch into one
+    `id: null` error. That is precisely the regression `_answer_batch`'s own
+    docstring says it exists to prevent.
+    """
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
 def _write(stdout: TextIO, payload: Any) -> None:
     """Write one frame, or an error frame, but never half of one.
 
@@ -432,7 +453,7 @@ def _write(stdout: TextIO, payload: Any) -> None:
     request still gets an answer for it rather than none at all.
     """
     try:
-        frame = json.dumps(payload, ensure_ascii=False, default=str)
+        frame = _frame_text(payload)
         if len(frame) > MAX_RESPONSE_CHARS:
             raise ValueError("response is %d characters, above the %d limit"
                              % (len(frame), MAX_RESPONSE_CHARS))

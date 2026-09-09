@@ -42,6 +42,7 @@ TILE_OP_ARGS = {
               "dry_run"},
 }
 
+
 class _Rect:
     """The rectangle of one map_tiles call, and the table it sits in.
 
@@ -111,6 +112,7 @@ class _Rect:
             self.data.set(self.x + index % self.width,
                           self.y + index // self.width, self.z, value)
 
+
 def _cells_to_fill(ctx: Context, args: dict[str, Any],
                    rect: _Rect) -> "tuple[list[int], str]":
     """One tile id for every cell of the rectangle."""
@@ -122,6 +124,7 @@ def _cells_to_fill(ctx: Context, args: dict[str, Any],
     return ([tile_id] * rect.cells,
             "filled %dx%d at (%d, %d) layer %d with tile %d"
             % (rect.width, rect.height, rect.x, rect.y, rect.z, tile_id))
+
 
 def _cells_from_rows(ctx: Context, args: dict[str, Any],
                      rect: _Rect) -> "tuple[list[int], str]":
@@ -150,6 +153,7 @@ def _cells_from_rows(ctx: Context, args: dict[str, Any],
             cells.append(tile_id)
     return (cells, "wrote %dx%d tiles at (%d, %d) layer %d"
             % (rect.width, rect.height, rect.x, rect.y, rect.z))
+
 
 @tool(
     "map_tiles",

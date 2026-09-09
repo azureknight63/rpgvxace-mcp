@@ -27,6 +27,7 @@ MAX_CELLS_PER_WALK = 4_000_000
 # editor numbers 0 to 63.
 LAYER_CEILINGS = {2: 15, 3: 63}
 
+
 def _check_budget(cells: int, what: str, windowed: bool = True,
                   remedy: str | None = None) -> None:
     """Refuse a cell walk larger than this server will spend time on.
@@ -62,6 +63,7 @@ _RESIZE_REMEDY = (
     "Both the current and the requested size are walked, and this map is "
     "larger than this server will walk in one call. A map this size has to be "
     "resized in the RPG Maker editor.")
+
 
 def _check_tile(ctx: Context, tile_id: int, z: int, what: str) -> None:
     """Refuse a value the layer cannot hold.

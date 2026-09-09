@@ -58,7 +58,12 @@ from .project import (
 )
 from .convert import MAX_TEXT_CHARS, decoded_text
 from .rubytypes import RubyHash, RubyObject, Table
-from .schema import PAGE_CONDITION_FLAGS, TILESET_SHEET_NAMES, TRIGGER_AUTORUN
+from .schema import (
+    PAGE_CONDITION_FLAGS,
+    TILESET_SHEET_NAMES,
+    TRIGGER_AUTORUN,
+    on_map,
+)
 
 # The checks `validate` knows how to run. It implements them, so it owns the
 # list; the tool layer advertises this rather than keeping its own copy.
@@ -70,7 +75,13 @@ ERROR, WARNING, INFO = "error", "warning", "info"
 # come from this one sequence.
 SEVERITIES = (ERROR, WARNING, INFO)
 
-DEFAULT_LIMIT = 200
+# Two caller-facing ceilings, separately: `validate`'s default number of
+# findings and `find_references`' default number of hits. One constant served
+# both, so raising the first silently raised the second -- and they are
+# answers to different questions asked by different tools.
+DEFAULT_FINDING_LIMIT = 200
+
+DEFAULT_REFERENCE_LIMIT = 200
 
 # A ceiling on findings collected, not just findings returned. A project broken
 # enough -- or crafted carefully enough -- to produce a finding per event
@@ -92,7 +103,6 @@ DEFAULT_LIMIT = 200
 # guard at all. Both are why `TestNoWalkCollectsPastTheCeiling` tests the walks
 # directly with this patched small, rather than trusting the list above.
 MAX_FINDINGS = 5000
-
 
 
 class Location:
@@ -185,6 +195,7 @@ def _event_at(map_id: int, event_id: int, event_name: str, page: int) -> Locatio
 # ---------------------------------------------------------------------------
 # Reading untrusted values
 # ---------------------------------------------------------------------------
+
 
 def _seq(value: Any) -> list[Any]:
     """A value from a project file, as something safe to iterate.
@@ -555,6 +566,31 @@ class ReferencePreview:
         """The count as a phrase, hedged when there are more than shown."""
         return "%s%d" % ("at least " if self.truncated else "", len(self.rows))
 
+    def as_reply(self, prefix: str, rows: "list[Any] | None" = None
+                 ) -> dict[str, Any]:
+        """The three facts as reply keys, spelled one way.
+
+        This class unified how the facts are *computed* and left how they are
+        *said* to each caller, and the two delete paths had already diverged:
+        db_edit put whole hit dicts under `references` and mirrored the
+        incompleteness into a warning, while map_edit put only `hit["where"]`
+        strings under `incoming_transfers` and reported it as a field. The
+        shape was written three times.
+
+        ``rows`` lets a caller substitute its own rendering of the hits --
+        map_edit wants the locations and not the whole hit -- without also
+        re-deciding what the other two keys are called or when they appear.
+        The scan-stopped key is present only when it happened, because a key
+        that is there and null is one more thing to interpret.
+        """
+        reply: dict[str, Any] = {
+            prefix: self.rows if rows is None else rows,
+            "%s_truncated" % prefix: self.truncated,
+        }
+        if self.incomplete:
+            reply["%s_scan_stopped" % prefix] = self.incomplete
+        return reply
+
 
 def reference_preview(project: Project, table: str, entry_id: int,
                       what: str,
@@ -577,14 +613,96 @@ def reference_preview(project: Project, table: str, entry_id: int,
     # happens to be exactly full.
     found = find_references(project, table, entry_id, budget,
                             limit=REFERENCE_PREVIEW + 1)
+    return _as_preview(found, budget.note(what))
+
+
+def reference_previews(project: Project, table: str, entry_ids: "set[int]",
+                       what: str, budget: "WalkBudget | None" = None
+                       ) -> dict[int, ReferencePreview]:
+    """:func:`reference_preview` for a batch, from one pass over the project.
+
+    Same three facts per id, same "one past the limit" arithmetic, and the
+    same note when the walk stopped -- the point is that a batch pays for one
+    traversal rather than one per id. Called before any op is dispatched, so
+    every delete in the batch is answered from the project as it was when the
+    call arrived, which is also the answer each op would have got on its own.
+    """
+    budget = WalkBudget() if budget is None else budget
+    found = find_references_for(project, table, entry_ids, budget,
+                                limit=REFERENCE_PREVIEW + 1)
+    note = budget.note(what)
+    return {entry_id: _as_preview(rows, note)
+            for entry_id, rows in found.items()}
+
+
+def _as_preview(found: list[dict[str, Any]],
+                note: "str | None") -> ReferencePreview:
+    """The three facts from one id's hits, so both spellings agree."""
     return ReferencePreview(found[:REFERENCE_PREVIEW],
-                            len(found) > REFERENCE_PREVIEW,
-                            budget.note(what))
+                            len(found) > REFERENCE_PREVIEW, note)
+
+
+def find_references_for(project: Project, table: str, entry_ids: "set[int]",
+                        budget: WalkBudget,
+                        limit: int = DEFAULT_REFERENCE_LIMIT
+                        ) -> dict[int, list[dict[str, Any]]]:
+    """What points at each of ``entry_ids``, from one pass over the project.
+
+    `find_references` answers for one id, and answering for twenty meant
+    twenty passes over the same unchanged command lists. It returns early
+    only on reaching ``limit`` hits, so the ordinary case -- deleting an
+    entry nothing points at -- is the one that costs a full traversal of
+    every map event page, every common event and every troop page. Measured
+    on the developer's own 39-map project: a `db_edit` carrying twenty
+    deletes performed about thirteen whole-project walks against its shared
+    allowance and then reported `references_scan_stopped` for the remaining
+    seven, so the caller was both waited on and told the zeroes were not
+    answers. At MAX_OPS almost the whole batch came back degraded.
+
+    One walk answers all of them, and the shared allowance then covers the
+    batch instead of a fraction of it. Each id gets its own ``limit``,
+    because each is reported separately; the walk stops early only when
+    every id has reached it.
+    """
+    hits: dict[int, list[dict[str, Any]]] = {i: [] for i in entry_ids}
+    if table not in REFERENCE_RULES or not entry_ids:
+        return hits
+    wanted = set(entry_ids)
+    for location, commands in iter_command_lists(project, None, budget):
+        for index, command in enumerate(commands):
+            if not isinstance(command, RubyObject):
+                continue
+            code = command.get("code", CODE_BLANK)
+            params = _seq(command.get("parameters"))
+            named = {value for found, value in _referenced_ids(code, params)
+                     if found == table and value in wanted}
+            if not named:
+                continue
+            # Built once per matching command, not once per id: rendering a
+            # command is the expensive half, and one command can name the
+            # same entry in more than one parameter.
+            located = location.at(index)
+            row = {
+                "where": located.describe(),
+                "location": located.as_dict(),
+                "command": command_name(code),
+                "summary": summarize(command, project.codec),
+            }
+            for entry_id in named:
+                rows = hits[entry_id]
+                if len(rows) < limit:
+                    rows.append(row)
+                    if len(rows) >= limit:
+                        wanted.discard(entry_id)
+            if not wanted:
+                return hits
+    return hits
 
 
 def find_references(project: Project, table: str, entry_id: int,
                     budget: WalkBudget,
-                    limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
+                    limit: int = DEFAULT_REFERENCE_LIMIT
+                    ) -> list[dict[str, Any]]:
     """Find event commands that mention ``entry_id`` from ``table``.
 
     ``budget`` is required, and is the caller's to read afterwards. This runs
@@ -743,7 +861,7 @@ def _safe_entries(project: Project, table: str) -> list[tuple[int, Any]]:
 
 
 def validate(project: Project, scopes: list[str], map_ids: list[int] | None = None,
-             limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+             limit: int = DEFAULT_FINDING_LIMIT) -> dict[str, Any]:
     """Run the rules in ``scopes`` and report what they found.
 
     ``scopes`` takes any of :data:`VALIDATE_SCOPES`; a name outside that set is
@@ -752,7 +870,7 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
     disk. ``counts`` covers every finding collected, while ``findings`` is
     ordered most severe first and truncated to ``limit``.
     """
-    limit = max(1, _int(limit) or DEFAULT_LIMIT)
+    limit = max(1, _int(limit) or DEFAULT_FINDING_LIMIT)
     findings: list[Finding] = []
     ran: list[str] = []
     # One loader for the whole run: several checks want the same tables,
@@ -1212,8 +1330,9 @@ def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
                      if index < len(TILESET_SHEET_NAMES) else str(index))
             checker.check(sheet_name, "tilesets",
                           _db_at("tilesets", entry_id, "tileset_names"),
-                          context="tileset %s (%s) sheet %s"
-                                  % (entry_id, name, sheet))
+                          context="%s %s (%s) sheet %s"
+                                  % (TABLE_NOUNS["tilesets"], entry_id, name,
+                                     sheet))
     return findings + checker.findings
 
 
@@ -1379,7 +1498,7 @@ def _check_transfer(map_id: int, params: list[Any], on_disk: AbstractSet[int],
     x, y = _int(params[TRANSFER_X]), _int(params[TRANSFER_Y])
     if x is None or y is None:
         return []
-    if x < 0 or y < 0 or x >= width or y >= height:
+    if not on_map(x, y, width, height):
         return [Finding(
             ERROR, "transfer_outside_map",
             "Transfer Player sends the party to (%s, %s) on map %s, which is "
@@ -1797,11 +1916,17 @@ def check_database(project: Project, tables: _Tables,
                 continue
             class_id = _int(actor.get("class_id"))
             if class_id is not None and class_id not in class_ids:
+                # The noun from `TABLE_NOUNS`, like the two loops below.
+                # Spelled by hand here while the table carried an entry for
+                # it, which is how a table with two live readers came to have
+                # entries nothing read.
+                noun = TABLE_NOUNS["classes"]
                 findings.append(_missing(
-                    "missing_class",
+                    "missing_%s" % noun,
                     "actor %s has class_id %s" % (entry_id, class_id),
-                    "Set class_id to a class in the Classes table, or add that "
-                    "class.", _db_at("actors", entry_id, "class_id")))
+                    "Set class_id to a %s in the Classes table, or add that "
+                    "%s." % (noun, noun),
+                    _db_at("actors", entry_id, "class_id")))
 
     for ref in NESTED_DB_REFERENCES:
         if not room():
@@ -1892,7 +2017,7 @@ def _check_start_position(project: Project, system: RubyObject,
     width, height = _int(game_map.get("width")), _int(game_map.get("height"))
     if width is None or height is None:
         return []
-    if x < 0 or y < 0 or x >= width or y >= height:
+    if not on_map(x, y, width, height):
         return [Finding(
             ERROR, "start_position_outside_map",
             "the party starts at (%s, %s) on map %s, which is only %sx%s, so "
