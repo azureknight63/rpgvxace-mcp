@@ -4488,8 +4488,13 @@ class TestNoWalkCollectsPastTheCeiling(ToolTest):
     def setUp(self):
         super().setUp()
         from rpgvxace_mcp import analysis
+        from rpgvxace_mcp.analysis import lint
         self.analysis = analysis
-        for module in (analysis,):
+        # `lint` as well as the package: the guards read the constant from
+        # the module they live in, and `analysis` is now a re-export -- so
+        # patching only the package left every real branch reading 5000 and
+        # the assertions failing against a ceiling nothing had lowered.
+        for module in (analysis, lint):
             original = module.MAX_FINDINGS
             self.addCleanup(setattr, module, "MAX_FINDINGS", original)
             module.MAX_FINDINGS = self.CEILING
@@ -6498,6 +6503,9 @@ class TestTheMapScopeStopsCollecting(ToolTest):
         from rpgvxace_mcp import analysis
         self.analysis = analysis
         original = analysis.MAX_FINDINGS
+        from rpgvxace_mcp.analysis import lint
+        self.addCleanup(setattr, lint, "MAX_FINDINGS", original)
+        lint.MAX_FINDINGS = self.CEILING
         self.addCleanup(setattr, analysis, "MAX_FINDINGS", original)
         analysis.MAX_FINDINGS = self.CEILING
 

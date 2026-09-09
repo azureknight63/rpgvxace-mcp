@@ -460,3 +460,84 @@ class TestOneBlankLineConvention(unittest.TestCase):
         self.assertEqual(fat, [],
                          "three or more blank lines in a row: "
                          + ", ".join(fat))
+
+
+class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
+    """`walk <- references <- lint`, checked rather than asserted in prose.
+
+    The module was split because the dependency boundary and the criticality
+    boundary coincided: everything the four map tool modules import lives in
+    `walk`, everything the two delete paths import lives in `references`,
+    and `misc_tools` is the only importer of anything in `lint`. That order
+    is the whole reason the split is worth having, so it is worth a test --
+    a cycle would make the three files one file again with extra steps.
+    """
+
+    # Which siblings each module may import. Lower may not reach higher.
+    ALLOWED = {
+        "walk": set(),
+        "references": {"walk"},
+        "lint": {"walk", "references"},
+    }
+
+    def package(self):
+        return (Path(__file__).resolve().parent.parent / "src"
+                / "rpgvxace_mcp" / "analysis")
+
+    def sibling_imports(self, name):
+        """Which sibling modules one file imports, from its source."""
+        import ast
+        tree = ast.parse((self.package() / (name + ".py")).read_text(
+            encoding="utf-8"))
+        out = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 1:
+                if node.module in self.ALLOWED:
+                    out.add(node.module)
+                for alias in node.names:
+                    if alias.name in self.ALLOWED:
+                        out.add(alias.name)
+        return out
+
+    def test_no_module_imports_a_layer_above_itself(self):
+        for name, allowed in self.ALLOWED.items():
+            with self.subTest(module=name):
+                reached = self.sibling_imports(name)
+                self.assertEqual(
+                    sorted(reached - allowed), [],
+                    "%s imports a layer above it, so the split has a cycle"
+                    % name)
+
+    def test_the_bottom_layer_imports_no_sibling(self):
+        """Stated separately: `walk` is what makes the order an order."""
+        self.assertEqual(self.sibling_imports("walk"), set())
+
+    def test_every_named_module_exists(self):
+        """So the table above cannot outlive a rename."""
+        for name in self.ALLOWED:
+            self.assertTrue((self.package() / (name + ".py")).is_file(),
+                            "%s is named in the layering table and is not "
+                            "there" % name)
+
+    def test_the_package_re_exports_what_the_tools_import(self):
+        """`from ..analysis import X` keeps working, for every X in use.
+
+        The split is about how this code is read, not about making nine
+        tool modules learn which of three files a name lives in -- so the
+        re-export is part of the claim and is checked the same way.
+        """
+        import ast
+        from rpgvxace_mcp import analysis
+        tools = (Path(__file__).resolve().parent.parent / "src"
+                 / "rpgvxace_mcp" / "tools")
+        wanted = set()
+        for path in sorted(tools.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.ImportFrom)
+                        and node.module == "analysis"):
+                    wanted.update(alias.name for alias in node.names)
+        missing = sorted(n for n in wanted if not hasattr(analysis, n))
+        self.assertEqual(missing, [],
+                         "the tools layer imports these from `analysis` and "
+                         "the package does not re-export them")

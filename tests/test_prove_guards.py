@@ -53,7 +53,7 @@ class ProveTest(unittest.TestCase):
         # A guard whose anchor really is in a file of the project, so the
         # revert step behaves as it does in a real run.
         self.guard = Guard(
-            "a test fixture", prove_guards.ANALYSIS,
+            "a test fixture", prove_guards.LINT,
             "MAX_FINDINGS = 5000", "MAX_FINDINGS = 1",
             ["tests/test_tools.py::TestNoWalkCollectsPastTheCeiling"],
             "nothing -- this is a fixture",
@@ -97,7 +97,7 @@ class ProveTest(unittest.TestCase):
                       "the verdict does not say what is broken: %s" % detail)
 
     def test_a_stale_anchor_is_named_as_stale(self):
-        stale = Guard("a stale fixture", prove_guards.ANALYSIS,
+        stale = Guard("a stale fixture", prove_guards.LINT,
                       "this text is not in that file anywhere", "irrelevant",
                       ["tests/test_tools.py::Nothing"], "nothing")
         runner = Runner()
@@ -276,7 +276,7 @@ class MultipleAnchorTest(unittest.TestCase):
 
     def guard(self, present, reverted):
         return prove_guards.Guard(
-            "two anchors", "src/rpgvxace_mcp/analysis.py", present, reverted,
+            "two anchors", "src/rpgvxace_mcp/analysis/lint.py", present, reverted,
             ["tests/test_tools.py::Fake::test_one"], "why")
 
     def test_a_single_anchor_still_reads_as_one(self):
