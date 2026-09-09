@@ -830,6 +830,17 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
     # Ops whose real call cannot be run straight after its own preview, so
     # the key-set comparison skips them. A reason each, for the same reason
     # the read-only list carries one.
+    # Keys an act may add that a preview cannot: each names something
+    # that exists only because the write happened. A reason each, because
+    # this is the escape hatch from the symmetry rule.
+    ACT_ONLY_KEYS = {
+        # The saved-file record. A preview has no bytes written and no
+        # backup path, and `write_reply` renames its preview counterpart.
+        "write",
+        # The snapshot a restore takes of what it is about to overwrite.
+        "safety_backup",
+    }
+
     NOT_REPLAYABLE = {
         # Restoring overwrites the data files the rest of this call reads.
         "backups op=restore",
@@ -952,6 +963,14 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
                 self.assertEqual(
                     sorted(keys(preview) - keys(acted)), [],
                     "%s previews keys the act does not answer" % label)
+                # And the other direction, which was unchecked: an act
+                # carrying keys the preview never mentioned is the same
+                # defect read backwards, and `_delete_map`'s act really did
+                # answer `warnings` where its preview said nothing.
+                self.assertEqual(
+                    sorted(keys(acted) - keys(preview)
+                           - self.ACT_ONLY_KEYS), [],
+                    "%s answers keys its preview never mentioned" % label)
 
     def test_no_row_inside_a_preview_uses_one_either(self):
         """Where a model actually reads what happened."""

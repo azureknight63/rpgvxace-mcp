@@ -29,6 +29,7 @@ from .commands import (
 )
 from .project import CHANGE_LOG, WORK_DIR, Project
 from .schema import (
+    numbered,
     TILESET_FLAG_BITS,
     TRIGGER_NAMES,
     TILESET_FLAG_BITS_NOTE,
@@ -115,10 +116,14 @@ def _bullets(mapping: "dict[str, str]") -> list[str]:
 
 
 def _numbered(mapping: "dict[int, Any]") -> str:
-    """A code-to-meaning mapping as one readable clause."""
-    return ", ".join("%s %s" % (code, meaning)
-                     for code, meaning in sorted(mapping.items(),
-                                                 key=lambda pair: pair[0]))
+    """A code-to-meaning mapping as one readable clause.
+
+    `schema.numbered` with this document's separator. The two used to be
+    independent and disagreed on it -- "0 action button" here, "0: action
+    button" there -- and both are rendered to the same model from the same
+    tables, one in a field description and one in a bullet.
+    """
+    return numbered(mapping, separator=" ")
 
 
 def _shared_values(engine: str) -> list[str]:

@@ -228,7 +228,7 @@ COMMON_EVENT_TRIGGER_NAMES = {
 }
 
 
-def numbered(mapping: "dict[int, str]") -> str:
+def numbered(mapping: "dict[int, str]", separator: str = ": ") -> str:
     """``0: none, 1: autorun, 2: parallel`` from a table like the ones above.
 
     Here rather than only in `docs`, because the field descriptions in this
@@ -236,8 +236,12 @@ def numbered(mapping: "dict[int, str]") -> str:
     trigger names and the nine tileset sheet names each appeared once as a
     table this module exports and once as a sentence a served document
     renders, so a reword in one made two documents disagree.
+
+    The separator is a parameter because `docs` had its own implementation
+    of this and the two disagreed on it -- so one of them had to keep its
+    spelling, and a parameter is cheaper than a second function.
     """
-    return ", ".join("%d: %s" % (code, name)
+    return ", ".join("%d%s%s" % (code, separator, name)
                      for code, name in sorted(mapping.items()))
 
 # The nine tileset sheets an RPG::Tileset names, in @tileset_names order.

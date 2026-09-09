@@ -12,7 +12,7 @@ from ..analysis import reference_preview
 from ..convert import apply_patch, normalize_strings
 from ..project import MAX_MAP_ID, ProjectError
 from ..rubytypes import RubyHash, RubyObject, Table, rendered
-from ..analysis import _int
+from ..analysis import ReferencePreview, _int
 from ..schema import STRUCTURAL_MAP_FIELDS, new_map_info, on_map
 from .map_common import _RESIZE_REMEDY, _check_budget
 from .registry import (
@@ -576,6 +576,11 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
             "op": "delete", "map_id": map_id,
             "deleted": filename if has_file else None}
         reply.update(preview.as_reply("incoming_transfers", incoming))
+        # The same warning the act gives, on the preview that exists to be
+        # read *first*: a caller deciding whether to delete is exactly who
+        # needs to know that commands still point here, and the act said it
+        # while the preview did not.
+        reply["warnings"] = _delete_warnings(preview, incoming, map_id)
         if not has_file:
             reply["note"] = ("there is no %s to delete, so only the tree "
                              "entry would be removed" % filename)
@@ -617,8 +622,21 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     # spells it that way and a caller reading one tool's replies should not
     # have to learn two words for one thing.
     result.update(preview.as_reply("incoming_transfers", incoming))
-    if incoming:
-        result["warnings"] = [
-            "%s Transfer Player command(s) still point at map %d and will now "
-            "send the player nowhere" % (preview.counted, map_id)]
+    result["warnings"] = _delete_warnings(preview, incoming, map_id)
     return result
+
+
+def _delete_warnings(preview: "ReferencePreview", incoming: list[Any],
+                     map_id: int) -> list[str]:
+    """What still points at a map about to go, said the same way twice.
+
+    One function because the preview and the act have to be one sentence,
+    and this was the sentence the act had and the preview did not -- on the
+    tool whose own comments say a preview that does not match the act is
+    worse than no preview. Always a list, so the key set does not depend on
+    whether the map happened to be referenced.
+    """
+    if not incoming:
+        return []
+    return ["%s Transfer Player command(s) still point at map %d and will "
+            "now send the player nowhere" % (preview.counted, map_id)]

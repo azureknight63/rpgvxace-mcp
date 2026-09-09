@@ -46,6 +46,7 @@ from .registry import (
     opt_str,
     prop,
     schema,
+    partial,
     scopes_arg,
     tool,
     decoded,
@@ -338,11 +339,11 @@ class _Hits:
                 "string in full."
                 % (matcher.clipped, "s were" if matcher.clipped > 1 else " was",
                    MAX_SUBJECT_CHARS))
-        if self.empty:
-            # One mapping, not one key per scope: `"%s_note" % scope` built
-            # a key name out of data, so a caller could not look it up in
-            # any schema and had to guess at four possible spellings.
-            out["scopes_not_read"] = dict(self.empty)
+        # Through `partial`, which owns the three suffixes. One mapping,
+        # not one key per scope: `"%s_note" % scope` built a key name out of
+        # data, so a caller could not look it up in any schema and had to
+        # guess at four possible spellings.
+        out.update(partial("scopes", not_read=self.empty))
         if self.unreadable:
             out["scripts_not_searched"] = self.unreadable
         if self.unsearchable:

@@ -34,6 +34,7 @@ from rpgvxace_mcp.rubytypes import (  # noqa: E402
 from rpgvxace_mcp.tools.search_tools import MAX_SUBJECT_CHARS  # noqa: E402
 from rpgvxace_mcp.tools.registry import (  # noqa: E402
     Context,
+    PARTIAL_SUFFIXES,
     REGISTRY,
     ToolError,
 )
@@ -1155,6 +1156,11 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
     Three suffixes now, one type each, and `registry.partial` builds them.
     """
 
+    # The type each suffix promises. Held to `PARTIAL_SUFFIXES` by
+    # `test_every_declared_suffix_has_a_type_here` below, which is what
+    # makes that constant load-bearing: it was referenced nowhere in src or
+    # tests, and this suite kept a second independent copy -- so adding a
+    # fourth suffix to the source of truth changed nothing anywhere.
     TYPES = {"_truncated": bool, "_note": str, "_not_read": dict}
 
     def replies(self):
@@ -1212,6 +1218,25 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
     # produced one of four names depending on which scope came back empty,
     # so a caller had to guess which one to read.
     OWNERS = ("partial", "as_reply")
+
+    def test_every_declared_suffix_has_a_type_here(self):
+        """The other direction: a suffix the module declares is checked.
+
+        Two tables for one vocabulary is how the source-of-truth one went
+        inert. This asserts they name the same set, so a fourth suffix
+        cannot be added to `PARTIAL_SUFFIXES` without a type to hold it.
+        """
+        self.assertEqual(sorted(self.TYPES), sorted(PARTIAL_SUFFIXES),
+                         "the type table and the module's tuple disagree, so "
+                         "one of them is not the vocabulary")
+
+    def test_partial_can_build_every_suffix_it_declares(self):
+        """A function that owns three suffixes has to be able to build them."""
+        from rpgvxace_mcp.tools.registry import partial
+        built = partial("x", truncated=True, notes=("why",),
+                        not_read={"scope": "reason"})
+        self.assertEqual(sorted(built),
+                         sorted("x" + suffix for suffix in PARTIAL_SUFFIXES))
 
     def test_no_reply_key_is_built_out_of_data(self):
         """A key made from a value cannot be looked up in any schema.

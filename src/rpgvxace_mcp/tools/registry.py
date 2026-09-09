@@ -321,14 +321,21 @@ PARTIAL_SUFFIXES = ("_truncated", "_note", "_not_read")
 
 
 def partial(subject: str, truncated: bool = False,
-            notes: "tuple[str, ...] | list[str]" = ()) -> dict[str, Any]:
+            notes: "tuple[str, ...] | list[str]" = (),
+            not_read: "dict[str, str] | None" = None) -> dict[str, Any]:
     """The keys that say an answer about ``subject`` is not complete.
 
-    One function, so the suffixes and their types cannot drift again. The
-    boolean and the prose are separate keys deliberately: a model reads the
-    sentence and a caller's code reads the flag, and folding them into one
-    key is what made `events_truncated` a paragraph where
+    All three suffixes, so this really is the one function the vocabulary
+    rests on: it used to build two and had one caller, while every
+    `_not_read` mapping and most `_note` strings were spelled out by hand.
+
+    The boolean and the prose are separate keys deliberately: a model reads
+    the sentence and a caller's code reads the flag, and folding them into
+    one key is what made `events_truncated` a paragraph where
     `references_truncated` was a boolean.
+
+    A key appears only when there is something to say -- a key that is
+    present and empty is one more thing for a caller to interpret.
     """
     out: dict[str, Any] = {}
     if truncated:
@@ -336,6 +343,8 @@ def partial(subject: str, truncated: bool = False,
     said = [note for note in notes if note]
     if said:
         out["%s_note" % subject] = " ".join(said)
+    if not_read:
+        out["%s_not_read" % subject] = dict(not_read)
     return out
 
 
