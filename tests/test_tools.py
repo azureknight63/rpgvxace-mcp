@@ -16,6 +16,7 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from build_project import build  # noqa: E402
 
 from rpgvxace_mcp import marshal_rb  # noqa: E402
+from rpgvxace_mcp import commands as command_module  # noqa: E402
 from rpgvxace_mcp.commands import CommandError  # noqa: E402
 from rpgvxace_mcp.analysis import (  # noqa: E402
     MAX_FINDINGS,
@@ -4049,10 +4050,13 @@ class TestSharedChildrenCannotAmplifyAWalk(SharedObjectMap, ToolTest):
         self.craft_shared_map()
         out = self.assert_bounded("event_get", map_id=1)
         self.assertIn("commands", " ".join(str(v) for v in out.values()))
-        self.assertTrue(
-            any("stopped" in str(v) or "not read" in str(v)
-                for v in out.values()),
-            "the reply does not say the walk was cut short: %s" % sorted(out))
+        # The key, not a substring of the whole reply. Searching every value
+        # for "stopped" also matches a note about something else entirely,
+        # which is how the validate case below came to be satisfied by the
+        # findings ceiling rather than by the walk bound.
+        self.assertIn("command_walk_stopped", out,
+                      "the reply does not say the walk was cut short: %s"
+                      % sorted(out))
 
     def test_search_stops_and_says_so(self):
         self.craft_shared_map()
@@ -4064,11 +4068,22 @@ class TestSharedChildrenCannotAmplifyAWalk(SharedObjectMap, ToolTest):
                         "nothing found: %s" % sorted(out))
 
     def test_validate_stops_and_says_so(self):
+        """The walk's own signal, which `truncated` is not.
+
+        `truncated` says the findings list hit its limit; `command_walk_stopped`
+        says the walk was abandoned. Measured: with the walk charge reverted
+        this map collects 200 findings and answers `truncated: True` in 6.9
+        seconds, so an assertion of `truncated or "stopped" in str(out)` was
+        satisfied by the findings ceiling and passed with the bound gone --
+        and the 10-second wall-clock allowance did not catch it either,
+        because 6.9 is under 10. Two facts, one assertion, and the weaker
+        fact was the one that answered.
+        """
         self.craft_shared_map()
         out = self.assert_bounded("validate", map_ids=[1], scopes=["events"])
-        self.assertTrue(out.get("truncated") or "stopped" in str(out),
-                        "validate reports a clean bill from a walk that never "
-                        "finished: %s" % sorted(out))
+        self.assertIn("command_walk_stopped", out,
+                      "validate reports a clean bill from a walk that never "
+                      "finished: %s" % sorted(out))
 
 
 class TestAdviceNamesOnlyWhatWillWork(ToolTest):
@@ -5904,6 +5919,61 @@ class TestEveryWalkSpendsItsAllowance(ToolTest):
                         "the map asset walk charged nothing for %d events"
                         % self.SLOTS)
 
+    # ------------------------------------------------------------------
+    # The two branches below the map branch. `iter_command_lists` walks
+    # maps, then common events, then troops; round 7 charged per event and
+    # per page slot in the first and left the other two charging only
+    # `len(commands)`, which is zero for a slot that is not a page.
+    # ------------------------------------------------------------------
+
+    def db_with(self, table, value):
+        """Replace a whole database table's container and reopen."""
+        filename = self.project.filename_for(table)
+        self.project.path_for(filename).write_bytes(marshal_rb.dump(value))
+        self.project = Project(self.tmp / "project")
+        self.ctx = Context(self.project)
+
+    def troop_with_pages(self, pages):
+        troop = RubyObject("RPG::Troop")
+        troop.set("id", 1)
+        troop.set("name", self.project.codec.make_string("T"))
+        troop.set("members", [])
+        troop.set("pages", pages)
+        return troop
+
+    def test_a_troops_array_of_non_troops_is_charged_for(self):
+        """The troop branch reached `spend` only past two isinstance tests."""
+        self.db_with("troops", [None] + [42] * self.SLOTS)
+        budget = self.spent(lambda b: list(
+            self.analysis.iter_command_lists(self.project, [1], b)))
+        self.assertTrue(budget.exhausted,
+                        "an array of %d non-troop values was walked free"
+                        % self.SLOTS)
+
+    def test_a_troop_pages_list_of_non_pages_is_charged_for(self):
+        """One shared troop whose @pages is a long list of integers.
+
+        This is the shape that costs a product rather than a sum: the pages
+        list is written once and every row is a link to the same troop, so
+        the file stays small while the inner loop runs rows x pages times.
+        """
+        troop = self.troop_with_pages([7] * self.SLOTS)
+        self.db_with("troops", [None] + [troop] * 50)
+        budget = self.spent(lambda b: list(
+            self.analysis.iter_command_lists(self.project, [1], b)))
+        self.assertTrue(budget.exhausted,
+                        "a troop @pages list of %d non-page values was "
+                        "walked free" % self.SLOTS)
+
+    def test_a_common_events_array_of_non_events_is_charged_for(self):
+        """Linear in file size, so cheaper -- but still free per slot."""
+        self.db_with("common_events", [None] + [42] * self.SLOTS)
+        budget = self.spent(lambda b: list(
+            self.analysis.iter_command_lists(self.project, [1], b)))
+        self.assertTrue(budget.exhausted,
+                        "an array of %d non-common-event values was walked "
+                        "free" % self.SLOTS)
+
     def test_an_ordinary_project_does_not_exhaust_a_real_allowance(self):
         """The charges must not make a real project look crafted."""
         budget = self.analysis.WalkBudget()
@@ -6628,8 +6698,16 @@ class TestACraftedNameIsBoundedInAReplyToo(ToolTest):
             "a %d-character name went into the reply whole" % len(name))
 
     def test_map_list_sanitises_control_characters(self):
-        self.name_map_one("Town\x07\x1b[31m")
-        name = self.longest_name(self.call("map_list")["maps"])
+        """By id, not by length -- picking the longest name was vacuous.
+
+        `longest_name` answered "Riverbend Cave" (14 characters) rather
+        than the crafted "Town" plus two control characters (10), so
+        this assertion was about a name nothing had touched. Measured:
+        it passed while the escape went into the reply intact.
+        """
+        map_id = self.name_map_one("Town\x07\x1b[31m")
+        rows = self.call("map_list")["maps"]
+        name = next(str(r["name"]) for r in rows if r["id"] == map_id)
         self.assertNotIn("\x07", name)
         self.assertNotIn("\x1b", name)
 
@@ -6992,3 +7070,401 @@ class TestADeclaredTypeIsChecked(ToolTest):
     def test_the_right_types_still_pass(self):
         self.assertIn("maps", self.call("map_list"))
         self.assertIn("entries", self.call("db_list", table="items"))
+
+
+class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
+    """Every bound in this project counted nodes; none counted bytes.
+
+    `analysis._text` and `registry.decoded` both go through
+    `convert.decoded_text`, which caps at MAX_TEXT_CHARS and slices before it
+    decodes. `commands._text` and `commands._value` did neither, and two
+    branches of `summarize` fan out over a list whose length comes out of the
+    file -- so one command holding an Array of a million links to one
+    megabyte string asked for a terabyte of decode and a join that does not
+    fit in memory, while `WalkBudget` charged it a single step.
+    """
+
+    # Links, so the file stays small: a million of these is ~3 MB on disk.
+    FANOUT = 200_000
+    LONG = 400_000
+
+    def command(self, code, parameters):
+        cmd = RubyObject("RPG::EventCommand")
+        cmd.set("code", code)
+        cmd.set("indent", 0)
+        cmd.set("parameters", parameters)
+        return cmd
+
+    def line_for(self, code, parameters):
+        return command_module.summarize(self.command(code, parameters),
+                                        self.project.codec)
+
+    def assert_short(self, line, what):
+        """A cap of a few thousand characters, not one of a few hundred.
+
+        The point is that the length does not follow the file's, so the
+        assertion is loose on purpose: a renderer that caps each of forty
+        fields at 200 characters is doing the right thing and is allowed to
+        produce eight thousand.
+        """
+        self.assertLess(len(line), 20_000,
+                        "%s rendered %d characters" % (what, len(line)))
+
+    def test_one_long_string_parameter_is_capped(self):
+        """Code 401 is a text line: the whole parameter is the message."""
+        huge = self.project.codec.make_string("A" * self.LONG)
+        self.assert_short(self.line_for(401, [huge]), "a text line")
+
+    def test_a_long_choice_list_is_capped(self):
+        """Show Choices renders every choice, and the list comes from a file."""
+        choice = self.project.codec.make_string("yes")
+        self.assert_short(self.line_for(102, [[choice] * self.FANOUT, 0]),
+                          "a Show Choices line")
+
+    def test_a_long_parameter_list_is_capped(self):
+        """A command with no declared spec joins every parameter it carries."""
+        self.assert_short(self.line_for(999, [7] * self.FANOUT),
+                          "an unknown command's parameter list")
+
+    def test_a_long_string_in_a_specced_field_is_capped(self):
+        """The `field=value` branch renders each declared field with `_text`."""
+        huge = self.project.codec.make_string("A" * self.LONG)
+        self.assert_short(self.line_for(101, [huge, 0, 0, 2]),
+                          "a Show Text face field")
+
+    def test_a_crafted_command_is_bounded_through_event_get(self):
+        """The reachable path, so the cap is not only a unit-test property."""
+        game_map = self.project.load_map(1)
+        huge = self.project.codec.make_string("A" * self.LONG)
+        page = RubyObject("RPG::Event::Page")
+        page.set("condition", RubyObject("RPG::Event::Page::Condition"))
+        page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
+        page.set("trigger", 0)
+        page.set("list", [self.command(401, [huge])])
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", [page])
+        events = RubyHash()
+        events.set(1, event)
+        game_map.set("events", events)
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+        result = self.call("event_get", map_id=1, event_ids=[1])
+        rendered = json.dumps(result)
+        self.assertLess(len(rendered), 100_000,
+                        "event_get returned %d characters for one command"
+                        % len(rendered))
+
+
+class TestASkippedPageSlotIsStillCountedForReading(ToolTest):
+    """Round 7 made every appended row count. Not every examined slot.
+
+    `map_get`'s summary and `event_get`'s page list both test their ceiling
+    at the top of the pages loop and then `continue` past a slot that is not
+    an RPG::Event::Page -- so the ceiling is reached only through the *outer*
+    per-event charge, and the inner loop runs to completion once per event.
+    A crafted map is a hash of 2,000 links to one event whose @pages is a
+    long Array of integers: small on disk, a product to walk.
+    """
+
+    EVENTS, SLOTS = 200, 20_000
+
+    def craft(self, pages):
+        game_map = self.project.load_map(1)
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", pages)
+        events = RubyHash()
+        for event_id in range(1, self.EVENTS + 1):
+            events.set(event_id, event)
+        game_map.set("events", events)
+        path = self.project.path_for(self.project.map_file(1))
+        path.write_bytes(marshal_rb.dump(game_map))
+        # The shape only matters because the file is small.
+        self.assertLess(path.stat().st_size, 256 * 1024)
+        self.ctx = self.reopen()
+
+    def test_the_map_summary_counts_a_slot_it_skips(self):
+        """`_event_summaries` is asked how many rows it charged for."""
+        from rpgvxace_mcp.tools import map_read_tools
+        self.craft([7] * self.SLOTS)
+        game_map = self.project.load_map(1)
+        rows, cut_short = map_read_tools._event_summaries(self.ctx, game_map)
+        self.assertTrue(cut_short,
+                        "a map of %d events x %d non-page slots reported no "
+                        "truncation" % (self.EVENTS, self.SLOTS))
+        self.assertLessEqual(
+            len(rows), map_read_tools.MAX_EVENT_SUMMARY_ROWS,
+            "the summary collected more rows than its own ceiling")
+
+    def test_the_event_page_list_charges_for_a_slot_it_skips(self):
+        """`event_get`'s loop builds its own budget, so ask the reply.
+
+        200 x 20,000 slots is twenty times MAX_WALK_STEPS, and 200 events on
+        their own is a two-hundredth of it -- so `command_walk_stopped` is
+        present exactly when the inner slots were charged for.
+        """
+        self.craft([7] * self.SLOTS)
+        result = self.call("event_get", map_id=1)
+        self.assertIn("command_walk_stopped", result,
+                      "%d events x %d non-page slots were walked free"
+                      % (self.EVENTS, self.SLOTS))
+
+    def test_naming_one_page_does_not_make_the_rest_free(self):
+        """`page=0` puts the `continue` above the charge for every other slot."""
+        self.craft([7] * self.SLOTS)
+        result = self.call("event_get", map_id=1, page=0)
+        self.assertIn("command_walk_stopped", result,
+                      "naming one page walked %d x %d slots free"
+                      % (self.EVENTS, self.SLOTS))
+
+
+class TestATruncatedSummarySaysSoOnEveryPath(ToolTest):
+    """The row budget expiring on the *last* event reported no truncation.
+
+    The pages loop `break`s on the ceiling, then the event's row is appended
+    and the outer loop ends normally at `return out, False`. So one event
+    with more pages than the ceiling came back as a short page list with no
+    `events_truncated` at all -- a reply that is wrong rather than partial,
+    which is the one outcome this module's comments are all about avoiding.
+    """
+
+    def craft_one_event_with_pages(self, count):
+        game_map = self.project.load_map(1)
+        page = RubyObject("RPG::Event::Page")
+        page.set("condition", RubyObject("RPG::Event::Page::Condition"))
+        page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
+        page.set("trigger", 0)
+        page.set("list", [])
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", [page] * count)
+        events = RubyHash()
+        events.set(1, event)
+        game_map.set("events", events)
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+
+    def test_a_single_event_over_the_ceiling_is_reported_as_cut_short(self):
+        from rpgvxace_mcp.tools import map_read_tools
+        self.craft_one_event_with_pages(
+            map_read_tools.MAX_EVENT_SUMMARY_ROWS + 50)
+        rows, cut_short = map_read_tools._event_summaries(
+            self.ctx, self.project.load_map(1))
+        self.assertTrue(cut_short,
+                        "one event with more pages than the ceiling reported "
+                        "a complete summary")
+
+    def test_the_reply_carries_the_note(self):
+        """The flag has to reach the caller, not only the helper's return."""
+        from rpgvxace_mcp.tools import map_read_tools
+        self.craft_one_event_with_pages(
+            map_read_tools.MAX_EVENT_SUMMARY_ROWS + 50)
+        result = self.call("map_get", map_id=1)
+        self.assertIn("events_truncated", result)
+
+    def test_a_row_says_how_many_pages_the_event_really_has(self):
+        """`event_get` adds `page_count` for exactly this reason."""
+        from rpgvxace_mcp.tools import map_read_tools
+        total = map_read_tools.MAX_EVENT_SUMMARY_ROWS + 50
+        self.craft_one_event_with_pages(total)
+        rows, _ = map_read_tools._event_summaries(
+            self.ctx, self.project.load_map(1))
+        self.assertEqual(rows[0]["page_count"], total,
+                         "a truncated page list did not say how many pages "
+                         "the event has")
+
+
+class TestAListedNameIsCappedLikeEveryOtherName(ToolTest):
+    """The fifth bare decode in the tools layer, in a listing.
+
+    `registry.decoded`'s docstring says four copies of this call were
+    consolidated and "cannot differ again". `db_list` kept a fifth, on the
+    one field of the row that is always present -- while `_brief_field`
+    seven lines below goes through `decoded`, and its own docstring gives the
+    reason: "this is a listing, so one crafted name would otherwise be
+    repeated into every row".
+    """
+
+    LONG = 300_000
+
+    def craft_named_entry(self, name):
+        items = self.project.load_data("items")
+        entry = items[1]
+        entry.set("name", self.project.codec.make_string(name))
+        self.project.save_file(self.project.filename_for("items"),
+                               tool="test", summary="long name")
+        self.ctx = self.reopen()
+
+    def test_a_long_entry_name_is_capped_in_the_row(self):
+        self.craft_named_entry("A" * self.LONG)
+        rows = self.call("db_list", table="items")["entries"]
+        first = next(r for r in rows if r["id"] == 1)
+        self.assertLess(len(first["name"]), 1000,
+                        "db_list returned a %d-character name"
+                        % len(first["name"]))
+
+    def test_the_cap_says_what_it_cut(self):
+        """A name silently cut is how a caller looks for the wrong entry."""
+        self.craft_named_entry("A" * self.LONG)
+        rows = self.call("db_list", table="items")["entries"]
+        first = next(r for r in rows if r["id"] == 1)
+        # Either unit: a long RubyString is sliced and reported in
+        # bytes, a long str in characters.
+        self.assertTrue("characters" in first["name"]
+                        or "bytes" in first["name"],
+                        "a capped name did not say it was capped: %r"
+                        % first["name"][-40:])
+
+    def test_an_escape_in_a_name_is_sanitised(self):
+        self.craft_named_entry("Potion" + chr(27) + "[31m")
+        rows = self.call("db_list", table="items")["entries"]
+        first = next(r for r in rows if r["id"] == 1)
+        self.assertNotIn(chr(27), first["name"])
+
+    def test_an_ordinary_name_is_unchanged(self):
+        rows = self.call("db_list", table="items")["entries"]
+        self.assertTrue(any(r["name"] for r in rows),
+                        "capping removed every name in the table")
+
+    def test_the_filter_still_finds_an_ordinary_name(self):
+        rows = self.call("db_list", table="items")["entries"]
+        wanted = next(r for r in rows if r["name"])
+        found = self.call("db_list", table="items",
+                          name_contains=wanted["name"][:4].lower())["entries"]
+        self.assertTrue(any(r["id"] == wanted["id"] for r in found))
+
+
+class TestARawPathCannotBeUnboundedlyLong(ToolTest):
+    """Nothing capped the number of path segments, and a hash can be cyclic.
+
+    `_read_hash_pairs` registers a hash in the link table before it reads its
+    pairs, so a file may legally hold a hash that contains itself. Each hash
+    segment then costs three linear scans of its pairs, and the path's length
+    comes from the argument -- so `path="events/" + "1/" * 4_000_000` is a
+    walk this server cannot be interrupted out of. The path is the thing to
+    bound: `to_json` already refuses a cycle, and `_resolve` does not need to
+    know about one.
+    """
+
+    def test_a_path_with_too_many_segments_is_refused(self):
+        long_path = "/".join(["events"] + ["1"] * 5000)
+        with self.assertRaises(ToolError) as caught:
+            self.call("raw_data", op="get", map_id=1, path=long_path)
+        self.assertIn("segment", str(caught.exception).lower())
+
+    def test_the_refusal_says_the_ceiling(self):
+        from rpgvxace_mcp.tools.raw_tools import MAX_PATH_SEGMENTS
+        long_path = "/".join(["events"] + ["1"] * 5000)
+        with self.assertRaises(ToolError) as caught:
+            self.call("raw_data", op="get", map_id=1, path=long_path)
+        self.assertIn(str(MAX_PATH_SEGMENTS), str(caught.exception))
+
+    def test_an_ordinary_path_still_resolves(self):
+        out = self.call("raw_data", op="get", map_id=1, path="events/1/name")
+        self.assertIn("value", out)
+
+    def test_the_ceiling_is_named_in_the_argument_description(self):
+        """`TestEveryCallerFacingCeilingIsDeclared` enforces this too.
+
+        Asserted here as well because that suite checks the ceiling appears
+        *somewhere* in the advertised surface, and this one checks it is on
+        the argument a caller would read before sending a long path.
+        """
+        from rpgvxace_mcp.tools.raw_tools import MAX_PATH_SEGMENTS
+        spec = REGISTRY["raw_data"].schema["properties"]["path"]
+        self.assertIn(str(MAX_PATH_SEGMENTS), spec["description"])
+
+
+class TestEveryScopeSpendsTheSameAllowance(ToolTest):
+    """`validate` built its walk budget after two of its four scopes ran.
+
+    `walk_budget = WalkBudget()` sits below the `"maps"` branch, so the map
+    tree, the map properties, the encounters and the tilesets walked with no
+    allowance at all -- and `"database"` was never given it either. Both are
+    row x child products out of a file: a Tilesets array of a million links
+    to one row whose @tileset_names is a shared million-entry Array is 10^12
+    iterations, and `MAX_FINDINGS` cannot bound it because `_AssetChecker`
+    returns before it counts anything when a sheet name is empty.
+    """
+
+    ROWS, CHILDREN = 400, 4000
+
+    def db_bytes(self, table, value):
+        self.project.path_for(self.project.filename_for(table)).write_bytes(
+            marshal_rb.dump(value))
+        self.project = Project(self.tmp / "project")
+        self.ctx = Context(self.project)
+
+    def shared_tileset(self):
+        """One row, its sheet-name list shared, every slot an empty name."""
+        tileset = RubyObject("RPG::Tileset")
+        tileset.set("id", 1)
+        tileset.set("name", self.project.codec.make_string("T"))
+        tileset.set("mode", 1)
+        # Empty names: `_AssetChecker.check` returns before it counts one, so
+        # the collector ceiling never fills and cannot bound this.
+        tileset.set("tileset_names",
+                    [self.project.codec.make_string("")] * self.CHILDREN)
+        return tileset
+
+    def test_the_maps_scope_is_given_an_allowance(self):
+        from rpgvxace_mcp import analysis
+        self.db_bytes("tilesets", [None] + [self.shared_tileset()] * self.ROWS)
+        budget = analysis.WalkBudget(limit=64)
+        analysis.check_tilesets(self.project, [1],
+                                analysis._Tables(self.project), budget)
+        self.assertTrue(budget.exhausted,
+                        "%d tileset rows x %d sheet slots were walked free"
+                        % (self.ROWS, self.CHILDREN))
+
+    def test_the_maps_scope_says_it_stopped(self):
+        """A walk that stopped and did not say so is the worse half."""
+        self.db_bytes("tilesets", [None] + [self.shared_tileset()] * self.ROWS)
+        out = self.call("validate", scopes=["maps"], map_ids=[1])
+        self.assertIn("command_walk_stopped", out,
+                      "the maps scope stopped early and reported a clean "
+                      "bill: %s" % sorted(out))
+
+    def test_the_database_scope_is_given_an_allowance(self):
+        from rpgvxace_mcp import analysis
+        budget = analysis.WalkBudget(limit=0)
+        analysis.check_database(self.project,
+                                analysis._Tables(self.project), budget)
+        self.assertTrue(budget.exhausted,
+                        "the database scope walked with no allowance spent")
+
+    def test_a_parent_chain_cannot_collect_past_the_ceiling(self):
+        """The ceiling was on the outer loop; one long cycle is one pass."""
+        from rpgvxace_mcp import analysis
+        infos = RubyHash()
+        total = MAX_FINDINGS + 200
+        for map_id in range(1, total + 1):
+            info = RubyObject("RPG::MapInfo")
+            info.set("name", self.project.codec.make_string("M%d" % map_id))
+            # Every map's parent is the next one, and the last points back:
+            # one cycle through every entry, reached in one outer iteration.
+            info.set("parent_id", map_id + 1 if map_id < total else 1)
+            infos.set(map_id, info)
+        self.db_bytes("map_infos", infos)
+        findings = analysis.check_map_tree(self.project)
+        self.assertLessEqual(len(findings), MAX_FINDINGS,
+                             "a %d-entry cycle collected %d findings against "
+                             "a ceiling of %d"
+                             % (total, len(findings), MAX_FINDINGS))
+
+    def test_an_ordinary_project_still_reports_its_real_findings(self):
+        """The charges must not make a real project look crafted."""
+        out = self.call("validate", scopes=["maps", "database"])
+        self.assertNotIn("command_walk_stopped", out)

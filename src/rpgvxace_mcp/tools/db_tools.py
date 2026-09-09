@@ -234,11 +234,15 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             continue
         if id_to is not None and entry_id > id_to:
             continue
-        name = ""
-        if isinstance(entry, RubyObject):
-            raw_name = entry.get("name")
-            if isinstance(raw_name, RubyString):
-                name = ctx.codec.decode(raw_name.data)
+        # Through `decoded`, like every other text this layer returns. The
+        # fifth bare copy of that decode lived here, on the one field of the
+        # row that is always present -- while `_brief_field` below goes
+        # through it and says why: a listing repeats one crafted name into
+        # every row. The filter reads the capped text too, deliberately: a
+        # needle past 200 characters is not a name anyone is looking for, and
+        # the alternative is decoding a megabyte per row to find out.
+        name = decoded(ctx, entry.get("name")) if isinstance(
+            entry, RubyObject) else ""
         if needle and needle not in name.lower():
             continue
         row: dict[str, Any] = {"id": entry_id, "name": name}

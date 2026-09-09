@@ -156,7 +156,7 @@ class GuardTableTest(unittest.TestCase):
         seen: dict[tuple[str, str], str] = {}
         duplicates = []
         for guard in prove_guards.GUARDS:
-            key = (guard.file, guard.present)
+            key = (guard.file, tuple(guard.present))
             if key in seen:
                 duplicates.append("%r and %r" % (seen[key], guard.name))
             seen[key] = guard.name
@@ -233,8 +233,59 @@ class GuardTableTest(unittest.TestCase):
     def test_reverting_a_guard_actually_changes_the_file(self):
         """A guard whose reverted text equals its present text reverts nothing."""
         for guard in prove_guards.GUARDS:
-            with self.subTest(guard=guard.name):
-                self.assertNotEqual(guard.present, guard.reverted)
+            for present, reverted in guard.anchors:
+                with self.subTest(guard=guard.name):
+                    self.assertNotEqual(present, reverted)
+
+    def test_no_two_aliases_name_one_class(self):
+        """Two names for one test class read as two different subjects.
+
+        `T` and `SYMDEPTH` held the same string, as did `FAST` and
+        `MEASURED`: renaming that class needs two edits, and nothing said the
+        two guards were on one class. This is the same shape as the alias
+        collision that made a guard watch the wrong tests.
+        """
+        by_value: dict[str, list[str]] = {}
+        for name, value in vars(prove_guards).items():
+            if (name.isupper() and isinstance(value, str)
+                    and value.startswith("tests/") and "::" in value):
+                by_value.setdefault(value, []).append(name)
+        shared = ["%s: %s" % (value, ", ".join(sorted(names)))
+                  for value, names in sorted(by_value.items())
+                  if len(names) > 1]
+        self.assertEqual(shared, [],
+                         "these test-class aliases hold one value each, so "
+                         "collapse them:\n  " + "\n  ".join(shared))
+
+
+class MultipleAnchorTest(unittest.TestCase):
+    """A property held in two places needs both of them reverted.
+
+    `event_get`'s negative page is refused twice over -- by the `minimum` its
+    schema declares, which `check_args` enforces, and by the `opt_int` call
+    that reads it. Reverting either left the other, so the guard reported
+    VACUOUS while the property was in fact doubly held. That is a real answer
+    about the code and a wrong answer about the guard, which is the failure
+    mode this whole script exists to remove.
+    """
+
+    def guard(self, present, reverted):
+        return prove_guards.Guard(
+            "two anchors", "src/rpgvxace_mcp/analysis.py", present, reverted,
+            ["tests/test_tools.py::Fake::test_one"], "why")
+
+    def test_a_single_anchor_still_reads_as_one(self):
+        guard = self.guard("a", "b")
+        self.assertEqual(guard.anchors, [("a", "b")])
+
+    def test_both_anchors_are_reverted_together(self):
+        guard = self.guard(["a", "c"], ["b", "d"])
+        self.assertEqual(guard.anchors, [("a", "b"), ("c", "d")])
+
+    def test_a_mismatched_pair_is_refused_at_import_time(self):
+        """Better than reverting the first and silently skipping the second."""
+        with self.assertRaises(ValueError):
+            self.guard(["a", "c"], ["b"])
 
 
 if __name__ == "__main__":

@@ -323,22 +323,34 @@ def _event_summaries(ctx: Context, game_map: RubyObject
         return [], False
     out = []
     rows = 0
+    cut_short = False
     for event_id, event in events.sorted_items():
         if rows >= MAX_EVENT_SUMMARY_ROWS:
             return out, True
+        # The event's own row, before the isinstance test rather than after
+        # it. Charging only for a slot that reads as an RPG::Event meant a
+        # hash of a million integers was walked free, which is the same
+        # defect one level up as the pages loop below had.
+        rows += 1
         if not isinstance(event, RubyObject):
             continue
-        # The event's own row. Charged here rather than only in the pages loop
-        # below, which is what let an event with no pages be free.
-        rows += 1
         pages = event.get("pages") or []
         page_rows = []
         for index, page in enumerate(pages):
             if rows >= MAX_EVENT_SUMMARY_ROWS:
+                # Recorded, not just broken out of: this loop is inside the
+                # outer one, so a ceiling reached on the *last* event fell
+                # through to `return out, False` and answered a short page
+                # list as though it were the whole event.
+                cut_short = True
                 break
+            # Every slot examined, not every row appended. A slot that is not
+            # a page `continue`d for free, so the ceiling was reached only
+            # through the outer charge and the inner loop ran to completion
+            # once per event -- a product, out of a file that is small.
+            rows += 1
             if not isinstance(page, RubyObject):
                 continue
-            rows += 1
             commands = page.get("list") or []
             graphic = page.get("graphic")
             page_rows.append({
@@ -354,13 +366,17 @@ def _event_summaries(ctx: Context, game_map: RubyObject
             "name": decoded(ctx, event.get("name")),
             "x": event.get("x"),
             "y": event.get("y"),
+            # How many pages the event really has, beside however many of
+            # them fitted. `event_get` carries this for the same reason: a
+            # short list that does not say it is short is read as complete.
+            "page_count": len(pages),
             "pages": page_rows,
         })
     # Both halves, on every path. Returning a bare list here while the two
     # early returns above returned pairs made `events, cut_short = ...` unpack
     # a two-event map into its own events -- so an ordinary map reported the
     # first event as the whole summary and the second as "truncated".
-    return out, False
+    return out, cut_short
 
 def _conditions(condition: Any) -> list[str]:
     if not isinstance(condition, RubyObject):

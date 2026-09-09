@@ -39,7 +39,8 @@ CELL_MASK = 0xFFFF
 MAX_NAMES_LISTED = 40
 
 
-def named(names: "Any", limit: int = MAX_NAMES_LISTED) -> str:
+def named(names: "Any", limit: int = MAX_NAMES_LISTED,
+          separator: str = ", ") -> str:
     """A list of field names for a message, capped and counted.
 
     Sorted by the caller where order matters; this only bounds it. The count
@@ -53,29 +54,71 @@ def named(names: "Any", limit: int = MAX_NAMES_LISTED) -> str:
     the other hard-coded the constant.
     """
     names = list(names)
-    if len(names) <= limit:
-        return ", ".join(names)
-    return "%s and %d more" % (", ".join(names[:limit]), len(names) - limit)
+    return _capped_join(names, len(names), limit, separator)
+
+
+def rendered(values: "Any", render: "Any", limit: int = MAX_NAMES_LISTED,
+             separator: str = ", ") -> str:
+    """:func:`named`, for entries that have to be built before they can be said.
+
+    A separate function rather than a `render` parameter on ``named``, because
+    the point is *where* the work happens: ``named(render(v) for v in values)``
+    has rendered every entry by the time ``named`` sees the first one, and for
+    values read out of a project file that rendering is the cost being
+    bounded, not the length of the result. Nothing in this project counted
+    bytes -- only nodes -- so an Array of a million links to one megabyte
+    string was a single step of a walk budget and a terabyte of decoding.
+    """
+    items = values if isinstance(values, (list, tuple)) else list(values)
+    shown = [render(value) for value in items[:limit]]
+    return _capped_join(shown, len(items), limit, separator)
+
+
+def _capped_join(shown: list[str], total: int, limit: int,
+                 separator: str) -> str:
+    if total <= limit:
+        return separator.join(shown)
+    return "%s and %d more" % (separator.join(shown[:limit]), total - limit)
+
+
+# Kept, because they are text and not commands: a note field really does
+# carry newlines and tabs, and mangling those would be a worse answer than
+# the one this function exists to avoid.
+KEPT_CONTROLS = "\t\n\r"
 
 
 def printable_text(text: str) -> str:
-    """Text that is safe to put in a JSON response.
+    """Text that is safe to put in a JSON response, and in a terminal.
 
     A name read out of a file is decoded with ``surrogateescape``, so it can
     hold lone surrogates. ``json.dumps`` emits those happily and the UTF-8
     transport then cannot encode them, which would end the session over one
     corrupt byte in one class name. Replacing them costs nothing real: no RGSS
     class or instance variable is named in anything but ASCII.
+
+    Control characters go for a different reason, and it is not encoding: a
+    reply is read by a terminal, and an ESC in a name out of a file this
+    server did not write is a sequence that terminal acts on. `decoded_text`
+    has claimed to sanitise since the round that wrote it, and the test that
+    was supposed to hold the claim asserted about the *longest* name in the
+    reply rather than the crafted one -- so it passed while an escape went
+    into `map_list` whole.
     """
-    # Every real name takes this branch, and it is a C-level check: this runs
-    # once per class name and once per field name across a whole project.
-    if text.isascii():
+    # Every real name takes this branch, and both are C-level checks: this
+    # runs once per class name and once per field name across a project.
+    if text.isascii() and text.isprintable():
         return text
-    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
-        return text.encode("utf-8", "replace").decode("utf-8")
-    return text
+    if not text.isascii():
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            text = text.encode("utf-8", "replace").decode("utf-8")
+    if text.isprintable():
+        return text
+    # A question mark rather than a deletion, so the length still says
+    # something about what was there.
+    return "".join(char if char.isprintable() or char in KEPT_CONTROLS
+                   else "?" for char in text)
 
 
 def _ivar_key(name: str) -> str:

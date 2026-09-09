@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .convert import TextCodec
-from .rubytypes import RubyObject, RubyString, printable_text
+from .convert import TextCodec, decoded_text
+from .rubytypes import RubyObject, RubyString, rendered
 from .schema import new_event_command, new_move_command
 
 # Every code the VX interpreter handles, plus the continuation codes that live
@@ -357,11 +357,20 @@ def command_name(code: int) -> str:
 
 
 def _text(value: Any, codec: TextCodec) -> str:
-    if isinstance(value, RubyString):
-        return printable_text(codec.decode(value.data))
+    """One value from a command's parameters, ready to put in a line.
+
+    A wrapper over `decoded_text` rather than a decode of its own, and that is
+    the fix: `analysis._text` and `registry.decoded` both went through it and
+    this did not, so a rendered command line was the one text in the project
+    with no bound on its length -- and `WalkBudget` charges a command list one
+    step per command whatever those commands carry.
+    """
     if isinstance(value, RubyObject):
-        return "<%s>" % printable_text(value.cls)
-    return str(value)
+        # The Ruby class is the useful answer for a parameter that is an
+        # object. `decoded_text` would say `<RubyObject>`, which names this
+        # reader's wrapper rather than anything that is in the file.
+        return "<%s>" % decoded_text(codec, value.cls)
+    return decoded_text(codec, value)
 
 
 def _id_range(start: Any, end: Any, singular: str, plural: str) -> str:
@@ -401,8 +410,13 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
     if code == 108:
         return "Comment: %s" % _text(p(0, ""), codec)
     if code == 102:
-        choices = [_text(c, codec) for c in (p(0) or [])]
-        return "%s: %s" % (name, " / ".join(choices))
+        # `MAX_CHOICES` is the *authoring* ceiling; this list's length comes
+        # out of the file, so it is not bounded by it. Rendering is capped
+        # rather than the result, because a crafted Array of a million links
+        # to one string is three megabytes on disk.
+        return "%s: %s" % (name, rendered(p(0) or [],
+                                          lambda c: _text(c, codec),
+                                          separator=" / "))
     if code == 402:
         return 'When "%s"' % _text(p(1, ""), codec)
     if code == 111:
@@ -461,13 +475,17 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
         return "%s (%s)" % (name, pairs) if pairs else name
     if params:
         # Numbers and flags read better unquoted than in a Python list repr.
-        return "%s (%s)" % (name, ", ".join(_value(v, codec) for v in params))
+        # Capped for the same reason as the choices above: a command with no
+        # declared spec passes its parameters through untouched, so the count
+        # is whatever the file says.
+        return "%s (%s)" % (name, rendered(params,
+                                           lambda v: _value(v, codec)))
     return name
 
 
 def _value(value: Any, codec: TextCodec) -> str:
     if isinstance(value, RubyString):
-        return '"%s"' % codec.decode(value.data)
+        return '"%s"' % decoded_text(codec, value)
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):

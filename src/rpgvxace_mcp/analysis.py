@@ -354,7 +354,15 @@ def iter_command_lists(project: Project, map_ids: list[int] | None = None,
                     yield (_event_at(map_id, event_id, name, page_index),
                            commands)
 
+    # The same charge, before the same isinstance test, in the two branches
+    # the rule above was written for and did not reach. Charging only
+    # `len(commands)` meant a row that is not an RPG::CommonEvent cost
+    # nothing; and the troop branch is the one that costs a *product*, since
+    # a Troops array of a million links to one troop whose @pages is a
+    # million integers is four megabytes on disk and 10^12 iterations here.
     for entry_id, common in _safe_entries(project, "common_events"):
+        if budget is not None and not budget.spend(1):
+            return
         if isinstance(common, RubyObject):
             commands = _seq(common.get("list"))
             if budget is not None and not budget.spend(len(commands)):
@@ -362,9 +370,13 @@ def iter_command_lists(project: Project, map_ids: list[int] | None = None,
             yield (Location("common_event", entry_id=entry_id), commands)
 
     for entry_id, troop in _safe_entries(project, "troops"):
+        if budget is not None and not budget.spend(1):
+            return
         if not isinstance(troop, RubyObject):
             continue
         for page_index, page in enumerate(_seq(troop.get("pages"))):
+            if budget is not None and not budget.spend(1):
+                return
             if isinstance(page, RubyObject):
                 commands = _seq(page.get("list"))
                 if budget is not None and not budget.spend(len(commands)):
@@ -767,15 +779,19 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
             "nothing about it was checked" % map_id, _map_at(map_id)))
 
     walked_maps = bool({"maps", "events", "assets"} & set(scopes))
+    # One allowance for every walk this call makes, built before the first of
+    # them rather than between two: a file that shares objects by reference
+    # can render as millions of nodes from a few kilobytes, and neither the
+    # Marshal reader nor MAX_FINDINGS bounds that. This sat below the "maps"
+    # branch, so the map tree, the map properties, the encounters and the
+    # tilesets walked with no allowance at all -- and every one of them is a
+    # row-times-child product whose two factors both come out of the file.
+    walk_budget = WalkBudget()
     if "maps" in scopes:
         ran.append("map tree, map properties and encounters")
-        findings += check_map_tree(project)
-        findings += check_maps(project, ids, tables)
-        findings += check_tilesets(project, ids, tables)
-    # One allowance for every command walk this call makes. A file that
-    # shares objects by reference can render as millions of commands from a few
-    # kilobytes, and neither the Marshal reader nor MAX_FINDINGS bounds that.
-    walk_budget = WalkBudget()
+        findings += check_map_tree(project, walk_budget)
+        findings += check_maps(project, ids, tables, walk_budget)
+        findings += check_tilesets(project, ids, tables, walk_budget)
     if "events" in scopes and len(findings) < MAX_FINDINGS:
         ran.append("event command structure and references (plus every common "
                    "event and troop page, which belong to the project rather "
@@ -787,7 +803,7 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
         findings += check_assets(project, ids, walk_budget)
     if "database" in scopes and len(findings) < MAX_FINDINGS:
         ran.append("database cross-references")
-        findings += check_database(project, tables)
+        findings += check_database(project, tables, walk_budget)
 
     # Last, so it covers every table any check actually asked for.
     findings += tables.findings()
@@ -883,9 +899,17 @@ class _Findings:
             self.items.append(finding)
 
 
-def check_map_tree(project: Project) -> list[Finding]:
-    """The editor's map tree against the files on disk."""
-    findings = []
+def check_map_tree(project: Project,
+                   budget: "WalkBudget | None" = None) -> list[Finding]:
+    """The editor's map tree against the files on disk.
+
+    Collects into one `_Findings` across all three of its passes. Each pass
+    used to bound a list of its own and the three were then concatenated, so
+    a ceiling of MAX_FINDINGS produced up to three times that many -- the
+    fourth time a ceiling here was written against the wrong list, after
+    `_AssetChecker`'s four callers, `check_tilesets`, and `check_maps`.
+    """
+    findings = _Findings()
     try:
         infos = dict(project.entries("map_infos"))
     except (ProjectError, ValueError, OSError, TypeError) as exc:
@@ -896,11 +920,15 @@ def check_map_tree(project: Project) -> list[Finding]:
     on_disk = set(project.map_ids_on_disk())
 
     for map_id, info in infos.items():
-        if len(findings) >= MAX_FINDINGS:
+        if not findings.room:
+            break
+        # One step per tree entry. The entry count comes out of MapInfos,
+        # and `MAX_FINDINGS` bounds only the entries that produce a finding.
+        if budget is not None and not budget.spend(1):
             break
         name = _text(project, info.get("name")) if isinstance(info, RubyObject) else "?"
         if _int(map_id) is None or not 1 <= map_id <= MAX_MAP_ID:
-            findings.append(Finding(
+            findings.add(Finding(
                 ERROR, "bad_map_id",
                 "MapInfos has an entry keyed %s, which is not an id any map "
                 "file can have (they run 1 to %d). Remove that entry in the "
@@ -908,7 +936,7 @@ def check_map_tree(project: Project) -> list[Finding]:
                 "MapInfos keys"))
             continue
         if map_id not in on_disk:
-            findings.append(Finding(
+            findings.add(Finding(
                 ERROR, "missing_map_file",
                 "MapInfos lists map %s (%s) but %s is not on disk. Either "
                 "restore that file or delete the tree entry."
@@ -916,7 +944,7 @@ def check_map_tree(project: Project) -> list[Finding]:
                 _map_at(map_id), "MapInfos against the map files present"))
         parent = _int(info.get("parent_id")) if isinstance(info, RubyObject) else None
         if parent and parent not in infos:
-            findings.append(Finding(
+            findings.add(Finding(
                 WARNING, "missing_parent_map",
                 "map %s (%s) has parent_id %s, which is not in the map tree, so "
                 "the editor cannot place it. Set parent_id to an existing map "
@@ -924,16 +952,16 @@ def check_map_tree(project: Project) -> list[Finding]:
                 _map_at(map_id, "parent_id")))
 
     for map_id in sorted(on_disk - set(infos)):
-        if len(findings) >= MAX_FINDINGS:
+        if not findings.room:
             break
-        findings.append(Finding(
+        findings.add(Finding(
             WARNING, "orphan_map_file",
             "%s exists but no MapInfos entry points at it, so the editor will "
             "not show it. Add a tree entry or delete the file."
             % _map_file_name(project, map_id), _map_at(map_id)))
 
-    findings += _parent_cycles(infos)
-    return findings
+    _parent_cycles(infos, findings, budget)
+    return findings.items
 
 
 def _map_file_name(project: Project, map_id: int) -> str:
@@ -944,17 +972,23 @@ def _map_file_name(project: Project, map_id: int) -> str:
         return "no file name is possible for id %s" % map_id
 
 
-def _parent_cycles(infos: dict[Any, Any]) -> list[Finding]:
+def _parent_cycles(infos: dict[Any, Any],
+                   findings: "_Findings | None" = None,
+                   budget: "WalkBudget | None" = None) -> list[Finding]:
     """Maps whose parent chain never reaches the top of the tree.
 
     One pass over the whole tree: walking each map's ancestry separately is
     quadratic, and a MapInfos chained parent-to-parent is a small file that
     would take a very long time.
+
+    Appends to the caller's collector when given one, for the same reason
+    `_check_encounters` does: a list of its own is a second ceiling, and two
+    ceilings of MAX_FINDINGS are a ceiling of twice that.
     """
-    findings = []
+    findings = _Findings() if findings is None else findings
     settled: dict[int, bool] = {}   # map id -> is its chain sound
     for start in infos:
-        if len(findings) >= MAX_FINDINGS:
+        if not findings.room:
             break
         if _int(start) is None or start in settled:
             continue
@@ -978,18 +1012,27 @@ def _parent_cycles(infos: dict[Any, Any]) -> list[Finding]:
             current = info.get("parent_id") if isinstance(info, RubyObject) else 0
         for map_id in chain:
             settled[map_id] = not looped
+            # Inside the chain loop, not only around it. The ceiling was on
+            # the outer `for start in infos`, so one MapInfos that is a
+            # single cycle through every entry reached this loop once and
+            # appended a finding per entry -- past the ceiling, in one
+            # outer iteration.
+            if not findings.room:
+                break
+            if budget is not None and not budget.spend(1):
+                break
             if looped:
-                findings.append(Finding(
+                findings.add(Finding(
                     ERROR, "map_tree_cycle",
                     "map %s has a parent chain that never reaches the top of "
                     "the tree, so the editor's tree is infinite. Set parent_id "
                     "to 0 on one map in the loop." % map_id,
                     _map_at(map_id, "parent_id"), "every parent_id chain"))
-    return findings
+    return findings.items
 
 
-def check_maps(project: Project, map_ids: list[int],
-               tables: _Tables) -> list[Finding]:
+def check_maps(project: Project, map_ids: list[int], tables: _Tables,
+               budget: "WalkBudget | None" = None) -> list[Finding]:
     """Per-map properties: readability, encounters and the tile table.
 
     Collects into a `_Findings`, so the ceiling holds across maps as well as
@@ -1003,6 +1046,8 @@ def check_maps(project: Project, map_ids: list[int],
 
     for map_id in map_ids:
         if not findings.room:
+            break
+        if budget is not None and not budget.spend(1):
             break
         try:
             game_map = project.load_map(map_id)
@@ -1023,7 +1068,8 @@ def check_maps(project: Project, map_ids: list[int],
         # extended, so a map's findings are never built only to be truncated.
         # `extend` would bound it either way -- that is where the ceiling
         # lives -- so this is an efficiency refinement and carries no guard.
-        _check_encounters(project, map_id, game_map, troop_ids, findings)
+        _check_encounters(project, map_id, game_map, troop_ids, findings,
+                          budget)
         # Bounded by the map's own fields rather than by anything from the
         # file, so `extend` is enough: it takes what fits.
         findings.extend(_check_map_dimensions(map_id, game_map))
@@ -1032,7 +1078,8 @@ def check_maps(project: Project, map_ids: list[int],
 
 def _check_encounters(project: Project, map_id: int, game_map: RubyObject,
                       troop_ids: "set[int] | None",
-                      findings: "_Findings | None" = None) -> list[Finding]:
+                      findings: "_Findings | None" = None,
+                      budget: "WalkBudget | None" = None) -> list[Finding]:
     """Encounters against the Troops table, and the encounter step.
 
     Appends to the caller's collector when given one, which is what makes the
@@ -1044,6 +1091,11 @@ def _check_encounters(project: Project, map_id: int, game_map: RubyObject,
     encounters = _seq(game_map.get("encounter_list"))
     if troop_ids is not None:
         for entry in encounters:
+            # The list's length comes out of the map file, and an entry that
+            # names a troop that exists produces no finding -- so the
+            # collector ceiling bounds the reporting and not the walking.
+            if budget is not None and not budget.spend(1):
+                break
             # The list length comes out of the file, and one bad troop id
             # repeated is one finding each.
             if not findings.room:
@@ -1108,8 +1160,8 @@ def _encounter_troop_id(entry: Any) -> int | None:
     return None
 
 
-def check_tilesets(project: Project, map_ids: list[int],
-                   tables: _Tables) -> list[Finding]:
+def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
+                   budget: "WalkBudget | None" = None) -> list[Finding]:
     """VX Ace only: every map names a tileset, and tilesets name graphics."""
     if not project.profile.has_tileset_database:
         return []
@@ -1144,10 +1196,18 @@ def check_tilesets(project: Project, map_ids: list[int],
         # reverted form passes every test.
         if checker.full or len(findings) >= MAX_FINDINGS:
             break
+        if budget is not None and not budget.spend(1):
+            break
         if not isinstance(tileset, RubyObject):
             continue
         name = _text(project, tileset.get("name"))
         for index, sheet_name in enumerate(_seq(tileset.get("tileset_names"))):
+            # Per sheet slot. `_AssetChecker.check` returns before it counts
+            # anything when the name is empty, so `checker.full` never became
+            # true and the row-times-slot product had no bound at all -- and
+            # both factors come out of the file.
+            if budget is not None and not budget.spend(1):
+                break
             sheet = (TILESET_SHEET_NAMES[index]
                      if index < len(TILESET_SHEET_NAMES) else str(index))
             checker.check(sheet_name, "tilesets",
@@ -1715,7 +1775,8 @@ NESTED_DB_REFERENCES = (
 )
 
 
-def check_database(project: Project, tables: _Tables) -> list[Finding]:
+def check_database(project: Project, tables: _Tables,
+                   budget: "WalkBudget | None" = None) -> list[Finding]:
     """Ids one database table holds for another.
 
     Each check walks one table's rows, so the ceiling is tested between them
@@ -1730,6 +1791,8 @@ def check_database(project: Project, tables: _Tables) -> list[Finding]:
     class_ids = tables.ids("classes")
     if class_ids is not None and room():
         for entry_id, actor in tables.rows_of("actors"):
+            if budget is not None and not budget.spend(1):
+                break
             if not isinstance(actor, RubyObject) or not actor.has("class_id"):
                 continue
             class_id = _int(actor.get("class_id"))
@@ -1752,9 +1815,17 @@ def check_database(project: Project, tables: _Tables) -> list[Finding]:
                 # Inside the row loop as well as outside it: one owner table
                 # with a million rows is one iteration of the loop above.
                 break
+            if budget is not None and not budget.spend(1):
+                break
             if not isinstance(row, RubyObject):
                 continue
             for child in _seq(row.get(ref.field)):
+                # Per child, because `room()` is tested per owner row and a
+                # child that is not an RPG object continues for free: one row
+                # whose @members is a shared million-entry Array is a
+                # product, and both factors come out of the file.
+                if budget is not None and not budget.spend(1):
+                    break
                 if not isinstance(child, RubyObject):
                     continue
                 value = _int(child.get(ref.child_field))

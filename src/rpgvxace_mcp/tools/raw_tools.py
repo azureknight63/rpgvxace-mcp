@@ -73,6 +73,18 @@ RAW_OP_ARGS = {
 # through the tool that validates while the escape hatch refused it.
 STRUCTURAL_MAP_PATHS = STRUCTURAL_MAP_FIELDS
 
+# The path is the one argument whose cost is a *product* of its own length and
+# the file's. `_read_hash_pairs` registers a hash in the link table before it
+# reads its pairs, so a file may legally hold a hash that contains itself --
+# and each hash segment costs three linear scans of that hash. Nothing capped
+# the segment count, so `"events/" + "1/" * 4_000_000` fits inside
+# MAX_MESSAGE_CHARS and asks for 10^11 comparisons this server cannot be
+# interrupted out of. Bounding the path rather than teaching `_resolve` about
+# cycles: `to_json` already refuses a cycle, and no real field is this deep.
+# Matched to MAX_JSON_DEPTH, since a path deeper than a renderable value has
+# nothing at the end of it to render.
+MAX_PATH_SEGMENTS = MAX_JSON_DEPTH
+
 
 @tool(
     "raw_data",
@@ -104,7 +116,8 @@ STRUCTURAL_MAP_PATHS = STRUCTURAL_MAP_FIELDS
                           "e.g. \"events/1/pages/0/list/3/parameters/0\". "
                           "Empty for the whole file. An array segment is an "
                           "index, and a negative one counts from the end, so "
-                          "\"pages/-1\" is the last page."),
+                          "\"pages/-1\" is the last page. At most %d segments."
+                          % MAX_PATH_SEGMENTS),
         "value": prop(OBJ, "For set: the new value, wrapped as {\"value\": ...} so "
                            "any JSON type can be passed."),
         "tables": prop(STR, "How to render RGSS Table fields.",
@@ -159,6 +172,14 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         root = ctx.project.load_data(table, refresh)
 
     path = [p for p in (opt_str(args, "path") or "").split("/") if p]
+    if len(path) > MAX_PATH_SEGMENTS:
+        raise ToolError(
+            "path has %d segments and at most %d are read. A path this deep "
+            "does not address a field in an RGSS file: the deepest real one "
+            "is about eight segments. Resolving each segment costs a scan of "
+            "the container it names, so the work is the path's length times "
+            "the file's."
+            % (len(path), MAX_PATH_SEGMENTS))
     mode = one_of(args, "tables", list(TABLE_MODES), TABLE_MODES[0])
 
     if op == "get":

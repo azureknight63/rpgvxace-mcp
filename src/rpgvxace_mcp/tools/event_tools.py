@@ -379,6 +379,12 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             continue
         pages = []
         for index, page in enumerate(event.get("pages") or []):
+            # Before both skips. `_page_view` charges per command, so a slot
+            # that is not a page cost nothing -- and naming `page` made it
+            # worse rather than better, because the `continue` for every
+            # other index sat above the only charge on the path.
+            if not command_budget.spend(1):
+                break
             if only_page is not None and index != only_page:
                 continue
             if isinstance(page, RubyObject):

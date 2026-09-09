@@ -66,14 +66,34 @@ RUBYTYPES = "src/rpgvxace_mcp/rubytypes.py"
 class Guard:
     """One guard, the edit that removes it, and the test that must then fail."""
 
-    def __init__(self, name: str, file: str, present: str, reverted: str,
-                 tests: list[str], why: str):
+    def __init__(self, name: str, file: str, present: "str | list[str]",
+                 reverted: "str | list[str]", tests: list[str], why: str):
         self.name = name
         self.file = file
-        self.present = present
-        self.reverted = reverted
+        # A property can be held in two places at once, and then no single
+        # reversion proves it: `event_get`'s negative page is refused by the
+        # `minimum` its schema declares, which `check_args` enforces, and
+        # again by the `opt_int` call that reads it. Removing either left the
+        # other, so the guard read VACUOUS -- a true answer about the code
+        # and a false one about the guard. Anchors given as a list are
+        # reverted together, which is the only way to ask "is this held at
+        # all" of a property that is held twice.
+        self.present = [present] if isinstance(present, str) else list(present)
+        self.reverted = ([reverted] if isinstance(reverted, str)
+                         else list(reverted))
+        if len(self.present) != len(self.reverted):
+            raise ValueError(
+                "guard %r names %d anchors and %d replacements; reverting "
+                "the first and skipping the second would report a verdict "
+                "about an edit nobody wrote"
+                % (name, len(self.present), len(self.reverted)))
         self.tests = tests
         self.why = why
+
+    @property
+    def anchors(self) -> list[tuple[str, str]]:
+        """Each (present, reverted) pair, in the order they are applied."""
+        return list(zip(self.present, self.reverted))
 
 
 T = "tests/test_marshal.py::TestHostileInput::"
@@ -142,12 +162,10 @@ AREAID = "tests/test_tools.py::TestHashTablesThatCarryTheirOwnId::"
 GATES = "tests/test_tools.py::TestEveryOpSelectingToolHasATable::"
 GATED = "tests/test_tools.py::TestOpArgumentsAreGatedEverywhere::"
 COMMON = "tests/test_tools.py::TestCommonEventOpsAreGatedToo::"
-SYMDEPTH = "tests/test_marshal.py::TestHostileInput::"
 BUDGETONE = "tests/test_tools.py::TestOneBudgetForAWholeResponse::"
 TILETALLY = "tests/test_tools.py::TestTileTallySaysWhatItLeftOut::"
 MAPREFS = "tests/test_tools.py::TestMapReferenceCountsDoNotUnderstate::"
 LOOKAROUND = "tests/test_tools.py::TestLookaroundIsRefusedByName::"
-MEASURED = "tests/test_tools.py::TestSearchPatternsStayFast::"
 CLOSED = "tests/test_tools.py::TestTheShapeGateFailsClosed::"
 WHOLE = "tests/test_tools.py::TestAWholesaleObjectCannotInventFields::"
 NOOP = "tests/test_tools.py::TestNoOpSlipsPastTheGate::"
@@ -317,9 +335,12 @@ GUARDS = [
                 )
 """,
         "",
-        [L + "test_ivar_wrapped_symbol_round_trips"],
+        [L + "test_a_symbol_in_a_name_position_is_reported"],
         "a non-ASCII class or ivar name loads but cannot be written back, and "
-        "nothing says so -- the file quietly changes shape",
+        "nothing says so -- the file quietly changes shape. The test that "
+        "used to be named here checked the value came back whole, which it "
+        "does either way, so this guard read VACUOUS while the warning it "
+        "watches was the only thing standing",
     ),
     Guard(
         "C-level data records", CODEC,
@@ -1315,7 +1336,7 @@ GUARDS = [
         'a symbol cannot recurse without bound', CODEC,
         '        if depth > MAX_DEPTH:\n            raise MarshalError(\n                "a symbol is nested more than %d records deep at byte %d; "',
         '        if False:\n            raise MarshalError(\n                "a symbol is nested more than %d records deep at byte %d; "',
-        [SYMDEPTH + "test_rejects_a_deeply_nested_symbol"],
+        [T + "test_rejects_a_deeply_nested_symbol"],
         '1.2KB of encoding records in a name position raises RecursionError, which is not a MarshalError and escapes to a startup traceback',
     ),
     Guard(
@@ -1344,8 +1365,8 @@ GUARDS = [
         'the measurement bounds the work', SAFETY,
         '    measure_cost(pattern)',
         '    pass  # measurement removed',
-        [MEASURED + "test_every_costly_pattern_is_refused",
-         MEASURED + "test_the_tool_refuses_them_too"],
+        [FAST + "test_every_costly_pattern_is_refused",
+         FAST + "test_the_tool_refuses_them_too"],
         'ten patterns that the shape budget scores as cheap run for tens of seconds or never finish, because a score of 4096 covers patterns from instant to fatal and cannot tell them apart',
     ),
     Guard(
@@ -1417,8 +1438,15 @@ GUARDS = [
     ),
     Guard(
         'event_get checks the page it was given', EVENT_TOOLS,
-        '    only_page = opt_int(args, "page", minimum=0)',
-        '    only_page = opt_int(args, "page")',
+        # Two anchors, because the property is held twice: `check_args`
+        # enforces the `minimum` the schema declares, and `opt_int` checks it
+        # again where it is read. Reverting either left the other and the
+        # guard read VACUOUS -- a true answer about the code and a false one
+        # about the guard.
+        ['''                          "two tools differ on that.", minimum=0),''',
+         '    only_page = opt_int(args, "page", minimum=0)'],
+        ['''                          "two tools differ on that."),''',
+         '    only_page = opt_int(args, "page")'],
         [PAGEARG + "test_a_negative_page_is_refused"],
         'a negative page is accepted and filters nothing out, while event_edit refuses the same value and raw_data gives it the opposite meaning',
     ),
@@ -1438,8 +1466,8 @@ GUARDS = [
     ),
     Guard(
         'a refusal cannot grow with the file', RUBYTYPES,
-        'def named(names: "Any", limit: int = MAX_NAMES_LISTED) -> str:',
-        'def named(names: "Any", limit: int = 10 ** 9) -> str:',
+        'def named(names: "Any", limit: int = MAX_NAMES_LISTED,',
+        'def named(names: "Any", limit: int = 10 ** 9,',
         [BOUNDED + "test_an_unknown_field_refusal_is_capped"],
         'an entry carrying five thousand instance variables produces a fifty-nine-kilobyte error message, from names that came out of the file',
     ),
@@ -1454,9 +1482,14 @@ GUARDS = [
         'shared children cannot amplify a walk', ANALYSIS,
         '                    if budget is not None and not budget.spend(len(commands)):\n                        return',
         '                    if False:\n                        return',
-        [AMPLIFY + "test_event_get_stops_and_says_so",
-         AMPLIFY + "test_search_stops_and_says_so",
-         AMPLIFY + "test_validate_stops_and_says_so"],
+        # Only the validate path. `event_get` walks its own loop with its
+        # own budget and `search` stops on its deadline, so both of those
+        # tests pass with this line reverted -- and each has its own guard
+        # ('a walk stops on the deadline, not only on the limit', and the
+        # per-event and per-page-slot charges below). Naming all three here
+        # meant no single reversion could fail them all, which reads as
+        # VACUOUS and is really three properties in one guard.
+        [AMPLIFY + "test_validate_stops_and_says_so"],
         'a 7 KB map whose objects share children renders as five million commands: event_get takes 36 seconds, search 20 and validate 13, on a server the user cannot interrupt',
     ),
     Guard(
@@ -1471,7 +1504,7 @@ GUARDS = [
         'a nullable atom does not break a run', SAFETY,
         '        if not atom.nullable and span and not seen.intersects(atom.charset):',
         '        if span and not seen.intersects(atom.charset):',
-        [MEASURED + "test_every_costly_pattern_is_refused"],
+        [FAST + "test_every_costly_pattern_is_refused"],
         '"=?~?" repeated twenty-four times scores 2 -- every adjacent pair is literal-disjoint -- and runs over thirty seconds against a line of "=", which is what a stock VX Ace script separator is',
     ),
     Guard(
@@ -1758,8 +1791,10 @@ GUARDS = [
     ),
     Guard(
         'the event summary charges for the event row too', MAP_READ,
-        '''        # The event's own row. Charged here rather than only in the pages loop
-        # below, which is what let an event with no pages be free.
+        '''        # The event's own row, before the isinstance test rather than after
+        # it. Charging only for a slot that reads as an RPG::Event meant a
+        # hash of a million integers was walked free, which is the same
+        # defect one level up as the pages loop below had.
         rows += 1''',
         '''        pass''',
         # An event with *no* pages, which is the case the counter missed:
@@ -2006,15 +2041,17 @@ def prove(guard: Guard, run=None) -> tuple[bool, str]:
 
         target = tree / guard.file
         source = target.read_text(encoding="utf-8")
-        if guard.present not in source:
+        if any(present not in source for present, _ in guard.anchors):
             # Distinct from VACUOUS, and a different thing to fix: the guard is
             # still describing code that has since moved or been reworded, so it
             # has silently stopped watching anything at all.
             return False, ("STALE: this guard's source text is no longer in %s, "
                            "so nothing was reverted. Re-anchor it to the code "
                            "as it now reads." % guard.file)
-        target.write_text(source.replace(guard.present, guard.reverted, 1),
-                          encoding="utf-8")
+        edited = source
+        for present, reverted in guard.anchors:
+            edited = edited.replace(present, reverted, 1)
+        target.write_text(edited, encoding="utf-8")
 
         result = run(tree, guard.tests)
         if result is not None and result.returncode == 0:
@@ -2063,14 +2100,16 @@ def check_anchors(guards: list[Guard]) -> int:
     problems = []
     for guard in guards:
         source = (ROOT / guard.file).read_text(encoding="utf-8")
-        found = source.count(guard.present)
-        if found == 0:
-            problems.append((guard.name, "STALE: no longer in %s" % guard.file))
-        elif found > 1:
-            problems.append((guard.name,
-                             "AMBIGUOUS: matches %d places in %s, so the "
-                             "revert may hit the wrong one"
-                             % (found, guard.file)))
+        for present, _ in guard.anchors:
+            found = source.count(present)
+            if found == 0:
+                problems.append((guard.name,
+                                 "STALE: no longer in %s" % guard.file))
+            elif found > 1:
+                problems.append((guard.name,
+                                 "AMBIGUOUS: matches %d places in %s, so the "
+                                 "revert may hit the wrong one"
+                                 % (found, guard.file)))
     for name, detail in problems:
         print("PROBLEM  %-46s %s" % (name, detail))
     if problems:

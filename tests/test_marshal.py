@@ -378,6 +378,34 @@ class TestLosslessEdgeCases(unittest.TestCase):
         self.assertEqual(str(value), "foo")
         self.assertEqual(value.ivars, {"E": True})
 
+    def test_a_symbol_in_a_name_position_is_reported(self):
+        """The one shape this reader loads and cannot write back.
+
+        A wrapped symbol read as a *value* keeps its record and round
+        trips, which is what `test_ivar_wrapped_symbol_round_trips`
+        above checks -- and why that test could not hold this warning.
+        In a name position (a class name, an instance-variable name) the
+        symbol becomes a plain string key, so the record is gone on the
+        way out. The assertion below is that the file really does change
+        shape, and that the reader says so rather than letting it.
+        """
+        for what, encoded in (
+                ("a class name",
+                 b"\x04\x08oI:\x0aThing\x06:\x06ET\x00"),
+                ("an instance-variable name",
+                 b"\x04\x08o:\x0aThing\x06I:\x07@a\x06:\x06ETi\x06")):
+            with self.subTest(what):
+                value, warnings = load_with_warnings(encoded)
+                self.assertNotEqual(
+                    dump(value), encoded,
+                    "this case round trips after all, so the warning is "
+                    "about nothing")
+                self.assertTrue(
+                    any("name position" in w for w in warnings),
+                    "%s carrying an encoding record was loaded, could "
+                    "not be written back, and nothing said so: %r"
+                    % (what, warnings))
+
     def test_c_level_data_record_round_trips(self):
         # Type 'd' used to be refused outright, failing the whole file.
         encoded = b"\x04\x08d:\x0aThingi\x06"
