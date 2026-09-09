@@ -20,7 +20,13 @@ from ..analysis import (
 )
 from ..commands import command_name, summarize
 from ..project import ProjectError
-from ..rubytypes import RubyObject, RubyString, _bare_name, as_list
+from ..rubytypes import (
+    RubyObject,
+    RubyString,
+    _bare_name,
+    as_list,
+    printable_text,
+)
 from ..schema import ARRAY, HASH
 from .pattern_safety import (
     MEASURED_FLAGS,
@@ -74,6 +80,13 @@ MAX_SUBJECT_CHARS = 2000
 # of a match and no timeout or signal reaches it. So a search overruns this by
 # at most one match, and the reply says when it stopped.
 MAX_SEARCH_SECONDS = 10.0
+
+# How many of one command's parameters are searched. A real command has at
+# most six; the number comes out of the file, and every one of them is
+# decoded before the matcher sees the first. Generous enough that no real
+# command is clipped, small enough that a crafted one cannot make a
+# gigabyte of `str` between two deadline checks.
+MAX_TEXTS_PER_COMMAND = 64
 
 SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
 
@@ -261,6 +274,10 @@ class _Hits:
         # note would otherwise be reflected whole into the response.
         if len(text) > MAX_HIT_CHARS:
             text = text[:MAX_HIT_CHARS] + "... (%d characters)" % len(text)
+        # Sanitised as well as capped: this is text out of a file this
+        # server did not write, going into a reply a terminal renders, and
+        # `printable_text` is what every other such path goes through.
+        text = printable_text(text)
         row = {"where": location.describe(), "location": location.as_dict(),
                "text": text}
         if extra:
@@ -584,11 +601,26 @@ class _Matcher:
 
 
 def _command_texts(ctx: Context, command: RubyObject) -> list[str]:
+    """Every string one command carries, bounded before any of it is built.
+
+    Sliced, because the whole list is materialised before the matcher sees
+    the first entry and `MAX_SEARCH_SECONDS` is checked only *between*
+    matches -- so this was the one decode on the search path the deadline
+    could not see. Measured: one command whose @parameters is 30,000 links
+    to a 30 KB string is ~150 KB of file and 900 MB of `str` per command,
+    built before a single comparison.
+
+    `MAX_TEXTS_PER_COMMAND` rather than `rendered`, because these are
+    matched and not rendered: a cap on the *result* would still decode
+    everything first, which is the same distinction `rendered`'s own
+    docstring draws.
+    """
     out = []
-    for value in as_list(command.get("parameters")):
+    for value in as_list(command.get("parameters"))[:MAX_TEXTS_PER_COMMAND]:
         if isinstance(value, RubyString):
-            out.append(ctx.codec.decode(value.data))
+            out.append(ctx.codec.decode(value.data[:MAX_SUBJECT_CHARS * 4]))
         elif isinstance(value, list):
-            out.extend(ctx.codec.decode(v.data) for v in value
+            out.extend(ctx.codec.decode(v.data[:MAX_SUBJECT_CHARS * 4])
+                       for v in value[:MAX_TEXTS_PER_COMMAND]
                        if isinstance(v, RubyString))
     return [t for t in out if t]

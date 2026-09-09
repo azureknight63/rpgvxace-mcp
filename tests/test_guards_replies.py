@@ -1309,3 +1309,73 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
                 self.assertIn("op", keys,
                               "%s answers %s before it says which op"
                               % (name, keys))
+
+
+class TestTwoClaimsAreChecked(ToolTest):
+    """`printable_text` and `brief` each state a fact. These check them.
+
+    A comment asserting something no test holds is the defect this project
+    treats as equal to a bug -- and both of these were written that way in
+    the round that added them.
+    """
+
+    def test_no_unencodable_character_is_printable(self):
+        """`printable_text`'s comment says "checked over the whole
+        code-point range, not assumed" -- and nothing checked it.
+
+        The claim is what lets one filter do two jobs: replacing every
+        non-printable character also replaces every character that cannot
+        be encoded as UTF-8. If it were false, a lone surrogate that
+        `isprintable()` accepted would reach `json.dumps` and end the
+        session on the transport, which is what the surrogate branch used
+        to exist for.
+        """
+        wrong = []
+        for code_point in range(0x110000):
+            char = chr(code_point)
+            try:
+                char.encode("utf-8")
+            except UnicodeEncodeError:
+                if char.isprintable():
+                    wrong.append(hex(code_point))
+        self.assertEqual(wrong, [],
+                         "these characters are printable and cannot be "
+                         "encoded, so one filter is not enough: %s"
+                         % wrong[:8])
+
+    def test_brief_bounds_a_container_before_it_builds_the_text(self):
+        """`brief` says the bound comes first. It did, for strings only.
+
+        A MapInfos key can legally be an Array, and `_brief`'s one caller
+        passes a MapInfos key. Measured before this: `repr` of a
+        200,000-entry list built 1.3 MB to return 224 characters -- a cap
+        on the result and not on the work.
+
+        Asserted by *time*, because that is the property: a bound that
+        only cuts the answer scales with the input and one that stops the
+        building does not.
+        """
+        import time
+        from rpgvxace_mcp.convert import brief
+        small = brief(list(range(100)))
+        start = time.perf_counter()
+        large = brief(list(range(2_000_000)))
+        elapsed = time.perf_counter() - start
+        self.assertLess(len(large), 1000)
+        self.assertLess(elapsed, 0.5,
+                        "a two-million-entry list took %.2fs to describe, "
+                        "so the whole thing was built first" % elapsed)
+        self.assertLess(abs(len(large) - len(small)), 200,
+                        "the description grew with the input")
+
+    def test_brief_still_says_what_a_short_value_is(self):
+        from rpgvxace_mcp.convert import brief
+        self.assertEqual(brief(5), "5")
+        self.assertEqual(brief([1, 2, 3]), "[1, 2, 3]")
+        self.assertEqual(brief("ab"), "'ab'")
+
+    def test_brief_says_how_long_a_long_string_really_was(self):
+        from rpgvxace_mcp.convert import brief
+        out = brief("A" * 5000)
+        self.assertIn("5000", out)
+        self.assertLess(len(out), 500)

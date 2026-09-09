@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import marshal_rb
-from .convert import TextCodec, detect_encoding
+from .convert import TextCodec, decoded_text, detect_encoding
 from .rubytypes import RubyHash, RubyObject, RubyString, ruby_children
 from .schema import (
     ARRAY,
@@ -728,7 +728,13 @@ class Project:
             entry: dict[str, Any] = {
                 "index": index,
                 "id": slot_id,
-                "name": self.codec.decode(name.data) if isinstance(name, RubyString) else "",
+                # Through `decoded_text`, which caps and sanitises: this
+                # is decoded and retained for every row even when
+                # `with_code` is false, and 200,000 rows all linking one
+                # 1 MB name is a 2.6 MB file and 200 GB of decode --
+                # reachable from `project_info`, the tool the description
+                # tells the model to call first.
+                "name": decoded_text(self.codec, name),
             }
             if not isinstance(packed, RubyString):
                 entry["error"] = "the script body is not a String"

@@ -11,7 +11,7 @@ from typing import Any
 from ..analysis import reference_preview
 from ..convert import apply_patch, normalize_strings
 from ..project import MAX_MAP_ID, ProjectError
-from ..rubytypes import RubyHash, RubyObject, Table, named
+from ..rubytypes import RubyHash, RubyObject, Table, rendered
 from ..analysis import _int
 from ..schema import STRUCTURAL_MAP_FIELDS, new_map_info, on_map
 from .map_common import _RESIZE_REMEDY, _check_budget
@@ -232,7 +232,7 @@ def _apply_resize(ctx: Context, args: dict[str, Any], game_map: RubyObject,
         # any reply is measured, so MAX_TOOL_RESULT_CHARS rejecting the reply
         # afterwards leaves a seven-megabyte line in the work directory.
         changes.append("events now outside the map: %s"
-                       % named(str(entry) for entry in out_of_bounds))
+                       % rendered(out_of_bounds, str))
     return changes
 
 

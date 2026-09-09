@@ -227,7 +227,15 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     fields = list(SUMMARY_FIELDS.get(table, [])) + str_list(
         args, "fields", MAX_EXTRA_FIELDS)
 
+    # Read before the loop, because they bound the *building* and not just
+    # the reply: `MAX_ROWS` capped what came back while every matching row
+    # was built first, so an Items array of a million links to one row made
+    # a million reply dicts before the window was taken.
+    offset = opt_int(args, "offset", 0, minimum=0) or 0
+    limit = opt_int(args, "limit", 50, minimum=1, maximum=MAX_ROWS) or 50
+
     rows = []
+    matching = 0
     for entry_id, entry in entries:
         if id_from is not None and entry_id < id_from:
             continue
@@ -244,6 +252,11 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             entry, RubyObject) else ""
         if needle and needle not in name.lower():
             continue
+        # Counted whatever the window is, so `matching_entries` still
+        # answers "how many match" rather than "how many were returned".
+        matching += 1
+        if len(rows) >= offset + limit:
+            continue
         row: dict[str, Any] = {"id": entry_id, "name": name}
         if isinstance(entry, RubyObject):
             for field in fields:
@@ -253,8 +266,6 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             row["value"] = _brief_field(ctx, entry)
         rows.append(row)
 
-    offset = opt_int(args, "offset", 0, minimum=0) or 0
-    limit = opt_int(args, "limit", 50, minimum=1, maximum=MAX_ROWS) or 50
     window = rows[offset:offset + limit]
     return {
         "table": table,
@@ -263,7 +274,7 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         # The number matching the filters, which is what was counted --
         # "total" read as the size of the table, so a filtered listing looked
         # like the whole of a much smaller one.
-        "matching_entries": len(rows),
+        "matching_entries": matching,
         "returned": len(window),
         "offset": offset,
         "entries": window,

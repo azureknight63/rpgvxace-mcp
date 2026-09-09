@@ -43,6 +43,11 @@ MAP_PROPERTY_FIELDS = (
 # ids appear on each layer" and return only these.
 TOP_TILE_IDS = 12
 
+# How many tree rows one `map_list` returns. A project has a few dozen maps;
+# the number of MapInfos entries comes out of the file, and each row is a
+# dict plus a `map_file()` call. Paged with `offset`, like `db_list`.
+MAX_MAP_ROWS = 500
+
 # How much tile data map_get includes. Named once, because the schema that
 # advertises it and the reader that enforces it are 40 lines apart.
 TILE_DETAIL = ("none", "counts")
@@ -66,11 +71,19 @@ def _map_names(ctx: Context) -> dict[int, str]:
     "List maps",
     "List the map tree from MapInfos: id, name, parent and whether the map file "
     "is present. Pass include_details to also load each map for its size and "
-    "event count.",
+    "event count. Returns at most %d rows -- \"matching_maps\" is how many "
+    "matched the filter, so page with offset when it is larger than "
+    "\"returned\"."
+    % MAX_MAP_ROWS,
     schema({
         "include_details": prop(BOOL, "Load every map file to report size, event "
                                       "count and BGM. Slower on large projects."),
-        "parent_id": prop(INT, "Only list children of this map id (0 for the root)."),
+        "parent_id": prop(INT, "Only list children of this map id (0 for the root).",
+                          minimum=0, maximum=MAX_MAP_ID),
+        "limit": prop(INT, "Maximum rows to return (default %d, at most %d)."
+                           % (MAX_MAP_ROWS, MAX_MAP_ROWS),
+                      minimum=1, maximum=MAX_MAP_ROWS),
+        "offset": prop(INT, "Skip this many matching rows first.", minimum=0),
         "refresh": REFRESH,
     }),
 )
@@ -80,14 +93,30 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     details = opt_bool(args, "include_details")
     parent_filter = opt_int(args, "parent_id")
 
+    # Read before the loop, because they bound the *building* and not just
+    # the reply: this had no window at all, so a MapInfos hash of a million
+    # links built a million reply dicts -- and one `map_file()` call each --
+    # while `MAX_TOOL_RESULT_CHARS` rejected the answer afterwards. That
+    # constant "bounds the response and not the work", as this module's own
+    # comment on MAX_EVENT_SUMMARY_ROWS says.
+    offset = opt_int(args, "offset", 0, minimum=0) or 0
+    limit = opt_int(args, "limit", MAX_MAP_ROWS, minimum=1,
+                    maximum=MAX_MAP_ROWS) or MAX_MAP_ROWS
+
     infos = ctx.project.entries("map_infos", refresh)
     on_disk = set(ctx.project.map_ids_on_disk())
     rows = []
+    matching = 0
     for map_id, info in infos:
         if not isinstance(info, RubyObject):
             continue
         parent = info.get("parent_id") or 0
         if parent_filter is not None and parent != parent_filter:
+            continue
+        # Counted whatever the window is, so `matching_maps` still answers
+        # "how many match" rather than "how many came back".
+        matching += 1
+        if len(rows) >= offset + limit:
             continue
         row: dict[str, Any] = {
             "id": map_id,
@@ -126,11 +155,13 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     # rebuild exactly what `infos` is holding.
     orphans = sorted(on_disk - {i for i, _ in infos})
     return {
-        "maps": rows,
+        "maps": rows[offset:],
         # Named for what it counted. "total" read as the size of the tree, so
         # a filtered listing looked like the whole of a much smaller project --
         # the same rename db_list already carries.
-        "matching_maps": len(rows),
+        "matching_maps": matching,
+        "returned": len(rows[offset:]),
+        "offset": offset,
         "map_files_without_tree_entry": orphans,
         "start_position": _start_position(ctx),
     }

@@ -2491,3 +2491,211 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
         self.assertEqual(idle, [],
                          "these take a budget and neither spend it nor pass "
                          "it on: " + ", ".join(idle))
+
+
+class TestOneEventsIndexPerCall(ToolTest):
+    """The index is built once per call, and the old test could not tell.
+
+    `TestOneIndexPerEventEditCall` counted `RubyHash._find` calls, which the
+    index removes whether it is built once or once per op -- so it passed
+    while `_apply_event_op` constructed a fresh `_EventRequest` inside the
+    per-op loop, leaving intact the `MAX_OPS` multiplier its own comment
+    describes. `events.items()` copies every pair, so 200 ops over a
+    crafted map's 2.5 million pairs was ~10^9 steps.
+
+    This counts the copies instead, which only the hoist can bound.
+    """
+
+    def test_a_batch_builds_the_index_once(self):
+        from rpgvxace_mcp.rubytypes import RubyHash as RH
+        copies = []
+        original = RH.items
+
+        def counting(self):
+            copies.append(1)
+            return original(self)
+
+        RH.items = counting
+        try:
+            self.call("event_edit", map_id=1, dry_run=True, ops=[
+                {"op": "update", "event_id": 1, "name": "R%d" % i}
+                for i in range(8)])
+        finally:
+            RH.items = original
+        self.assertLessEqual(copies.count(1), 2,
+                             "eight ops copied the events hash %d times"
+                             % copies.count(1))
+
+    def test_an_event_created_in_a_batch_is_still_visible_later(self):
+        """The index has to be maintained across ops, not merely built once."""
+        out = self.call("event_edit", map_id=1, ops=[
+            {"op": "create", "event_id": 41, "name": "New", "x": 1, "y": 1},
+            {"op": "update", "event_id": 41, "name": "Renamed"}])
+        self.assertEqual(len(out["applied"]), 2)
+
+    def test_an_event_deleted_in_a_batch_is_gone_for_a_later_op(self):
+        with self.assertRaises(ToolError):
+            self.call("event_edit", map_id=1, ops=[
+                {"op": "delete", "event_id": 1},
+                {"op": "update", "event_id": 1, "name": "Renamed"}])
+
+
+class TestATableCostsWhatItsCellsCost(ToolTest):
+    """A Table cost the conversion budget one node however many cells it had.
+
+    Which made it the one payload shape `MAX_JSON_NODES` could not see, in
+    the round that resized that constant so a conversion cannot build more
+    than the transport will carry. Measured: a map whose @encounter_list is
+    250,000 links to one 256-cell Table is 0.51 MB on disk, and
+    `map_get map_id=1` with no arguments built about a gigabyte of lists and
+    threw it away at the transport.
+    """
+
+    def craft_shared_tables(self, count):
+        game_map = self.project.load_map(1)
+        shared = Table(16, 16, 1)
+        game_map.set("encounter_list", [shared] * count)
+        path = self.project.path_for(self.project.map_file(1))
+        path.write_bytes(marshal_rb.dump(game_map))
+        # Small on disk is the whole point.
+        self.assertLess(path.stat().st_size, 2 * 1024 * 1024)
+        self.ctx = self.reopen()
+
+    def test_a_map_of_shared_tables_is_refused_rather_than_built(self):
+        from rpgvxace_mcp.convert import ConversionError
+        self.craft_shared_tables(250_000)
+        with self.assertRaises((ConversionError, ToolError)) as caught:
+            self.call("map_get", map_id=1)
+        self.assertIn("read a smaller part", str(caught.exception).lower())
+
+    def test_an_ordinary_map_still_reads(self):
+        out = self.call("map_get", map_id=1)
+        self.assertIn("properties", out)
+
+    def test_an_omitted_table_says_so_in_the_shared_vocabulary(self):
+        """`cells_truncated` and `cells_note`, not a `hint` of its own."""
+        entry = self.call("db_get", table="tilesets" if self.ace else "actors",
+                          id=1)["entries"][0]["entry"]
+        big = next(v for v in entry.values()
+                   if isinstance(v, dict) and "cells_omitted" in v)
+        self.assertTrue(big["cells_truncated"])
+        self.assertIn("map_tiles", big["cells_note"])
+
+
+class TestAListingBuildsOnlyItsWindow(ToolTest):
+    """`MAX_ROWS` capped what came back and not what was built.
+
+    So an array of a million links to one row made a million reply dicts
+    before the window was taken -- and `map_list` had no window at all.
+    `MAX_TOOL_RESULT_CHARS` does not save that: this module's own comment
+    says it "bounds the response and not the work or the memory".
+    """
+
+    def test_db_list_builds_only_the_window(self):
+        out = self.call("db_list", table="items", limit=1)
+        self.assertEqual(len(out["entries"]), 1)
+        self.assertGreater(out["matching_entries"], 1,
+                           "the count must still say how many matched")
+
+    def test_map_list_takes_a_window(self):
+        out = self.call("map_list", limit=1)
+        self.assertEqual(len(out["maps"]), 1)
+        self.assertGreater(out["matching_maps"], 1)
+
+    def test_map_list_pages(self):
+        first = self.call("map_list", limit=1)["maps"][0]["id"]
+        second = self.call("map_list", limit=1, offset=1)["maps"][0]["id"]
+        self.assertNotEqual(first, second)
+
+    def test_both_listings_declare_their_ceiling(self):
+        """A bound a caller cannot see is one they hit by surprise."""
+        from rpgvxace_mcp.tools.map_read_tools import MAX_MAP_ROWS
+        spec = REGISTRY["map_list"].schema["properties"]["limit"]
+        self.assertEqual(spec["maximum"], MAX_MAP_ROWS)
+
+
+class TestOneCommandCannotOutrunTheDeadline(ToolTest):
+    """`_command_texts` built every string before the matcher saw one.
+
+    `MAX_SEARCH_SECONDS` is checked *between* matches, so this was the one
+    decode on the search path the deadline could not see: one command whose
+    @parameters is 30,000 links to a 30 KB string is ~150 KB of file and
+    900 MB of `str`, built before a single comparison.
+    """
+
+    def craft(self, links, size):
+        game_map = self.project.load_map(1)
+        text = self.project.codec.make_string("z" * size)
+        command = RubyObject("RPG::EventCommand")
+        command.set("code", 401)
+        command.set("indent", 0)
+        command.set("parameters", [text] * links)
+        page = game_map.get("events").get(1).get("pages")[0]
+        page.set("list", [command] + list(page.get("list")))
+        path = self.project.path_for(self.project.map_file(1))
+        path.write_bytes(marshal_rb.dump(game_map))
+        self.assertLess(path.stat().st_size, 512 * 1024)
+        self.ctx = self.reopen()
+
+    def test_one_command_is_bounded(self):
+        import time
+        self.craft(30_000, 30_000)
+        start = time.perf_counter()
+        self.call("search", query="not-present", scopes=["events"])
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 5.0,
+                        "one crafted command took %.1fs to search" % elapsed)
+
+    def test_an_ordinary_command_is_still_searched(self):
+        out = self.call("search", query="Potion", scopes=["events", "database"])
+        self.assertIn("hits", out)
+
+    def test_a_hit_is_sanitised(self):
+        """Text out of a file, into a reply a terminal renders."""
+        game_map = self.project.load_map(1)
+        command = RubyObject("RPG::EventCommand")
+        command.set("code", 401)
+        command.set("indent", 0)
+        command.set("parameters", [self.project.codec.make_string(
+            "find" + chr(27) + "[31m")])
+        page = game_map.get("events").get(1).get("pages")[0]
+        page.set("list", [command] + list(page.get("list")))
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+        out = self.call("search", query="find", scopes=["events"])
+        self.assertTrue(out["hits"], "the crafted line should be found")
+        self.assertNotIn(chr(27), out["hits"][0]["text"])
+
+
+class TestAPathCannotOutscanItsFile(ToolTest):
+    """`MAX_PATH_SEGMENTS` bounds the path's length, not the product.
+
+    Each hash segment costs a linear scan of that hash, and
+    `_read_hash_pairs` registers a hash before reading its pairs -- so a
+    file may legally hold one that contains itself. 64 segments over a
+    large hash is still the segment count times the pair count.
+    """
+
+    def craft_self_referencing_hash(self, pairs):
+        game_map = self.project.load_map(1)
+        events = RubyHash()
+        for key in range(pairs):
+            events.set(key, key)
+        events.set(9999, events)          # legal Marshal: a hash in itself
+        game_map.set("events", events)
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+
+    def test_a_deep_path_over_a_large_hash_is_refused(self):
+        from rpgvxace_mcp.tools.raw_tools import MAX_PATH_SEGMENTS
+        self.craft_self_referencing_hash(20_000)
+        path = "/".join(["events"] + ["9999"] * (MAX_PATH_SEGMENTS - 1))
+        with self.assertRaises(ToolError) as caught:
+            self.call("raw_data", op="get", map_id=1, path=path)
+        self.assertIn("hash entries", str(caught.exception))
+
+    def test_an_ordinary_path_still_resolves(self):
+        out = self.call("raw_data", op="get", map_id=1, path="events/1/name")
+        self.assertIn("value", out)

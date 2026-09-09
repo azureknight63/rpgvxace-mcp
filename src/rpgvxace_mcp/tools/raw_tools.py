@@ -21,6 +21,7 @@ from ..convert import (
     refuse_invented_in_replacement,
     to_json,
 )
+from ..analysis import MAX_WALK_STEPS, WalkBudget
 from ..project import MAX_MAP_ID
 from ..rubytypes import (
     RubyHash,
@@ -184,8 +185,13 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             % (len(path), MAX_PATH_SEGMENTS))
     mode = one_of(args, "tables", list(TABLE_MODES), TABLE_MODES[0])
 
+    # One allowance for every resolve this call makes, so `op="set"` -- which
+    # walks the path twice, once for the parent and once for the value -- is
+    # bounded across both rather than per walk.
+    walk = WalkBudget()
+
     if op == "get":
-        value = _resolve(root, path, ctx.codec)
+        value = _resolve(root, path, ctx.codec, walk)
         return {"file": filename, "path": "/".join(path),
                 "type": type(value).__name__,
                 "value": to_json(value, ctx.codec, mode)}
@@ -198,10 +204,10 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 
     if map_id is not None:
         _check_structural(path)
-    parent = _resolve(root, path[:-1], ctx.codec)
+    parent = _resolve(root, path[:-1], ctx.codec, walk)
     key = path[-1]
     new_value = from_json(args["value"]["value"], ctx.codec)
-    existing = _resolve(root, path, ctx.codec)
+    existing = _resolve(root, path, ctx.codec, walk)
     _check_same_kind(existing, new_value, "/".join(path))
     # The same check the validating tools make on a replacement. raw_data is
     # deliberately permissive about *values* and has never been permissive
@@ -274,12 +280,21 @@ def _check_same_kind(existing: Any, replacement: Any, path: str) -> None:
                 "use the tool that owns this structure." % (path, held, given))
 
 
-def _resolve(value: Any, path: list[str], codec: TextCodec) -> Any:
-    """Walk a path into a loaded file.
+def _resolve(value: Any, path: list[str], codec: TextCodec,
+             budget: "WalkBudget | None" = None) -> Any:
+    """Walk a path into a loaded file, charged for what it scans.
 
-    The codec is needed because a Ruby Hash can be keyed by RubyStrings as well
-    as by integers, and looking such a key up as a bare Python string finds
-    nothing while reporting that the key does not exist.
+    The codec is needed because a Ruby Hash can be keyed by RubyStrings as
+    well as by integers, and looking such a key up as a bare Python string
+    finds nothing while reporting that the key does not exist.
+
+    `MAX_PATH_SEGMENTS` bounds the path's length and not the product: each
+    hash segment costs a linear scan of that hash, `_read_hash_pairs`
+    registers a hash before reading its pairs so a file may legally hold
+    one that contains itself, and 64 segments over a 2.5-million-pair hash
+    is still ~10^8 comparisons -- tens of seconds this server cannot be
+    interrupted out of. So the pairs are charged as well as the segments,
+    which makes this the same shape as every other walk over file data.
     """
     current = value
     for depth, key in enumerate(path):
@@ -292,6 +307,17 @@ def _resolve(value: Any, path: list[str], codec: TextCodec) -> Any:
         elif isinstance(current, list):
             current = _index_list(current, key, trail)
         elif isinstance(current, RubyHash):
+            # Per pair, before the three scans this segment costs: the
+            # length comes out of the file and the segment count from the
+            # caller, so the cost is their product.
+            if budget is not None and not budget.spend(len(current)):
+                raise ToolError(
+                    "resolving this path scanned more than %s hash entries, "
+                    "so it stopped. Each hash segment costs a scan of that "
+                    "hash, and this file's are large enough that the path's "
+                    "length times their size is the work. Address a shallower "
+                    "path, or read the container and pick the key yourself."
+                    % "{:,}".format(MAX_WALK_STEPS))
             lookup = _hash_key(current, key, codec)
             if lookup not in current:
                 raise ToolError("%s has no key %r (keys: %s)"
@@ -302,7 +328,7 @@ def _resolve(value: Any, path: list[str], codec: TextCodec) -> Any:
             # could not store inline. Unwrap and retry the SAME key: the
             # wrapper is not a level of the path.
             current = current.inner
-            return _resolve(current, path[depth:], codec)
+            return _resolve(current, path[depth:], codec, budget)
         elif isinstance(current, Table):
             raise ToolError("%s is an RGSS Table; use map_tiles to read or write "
                             "its cells" % trail)

@@ -293,9 +293,6 @@ class MultipleAnchorTest(unittest.TestCase):
             self.guard(["a", "c"], ["b"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class SuiteFilesRunAloneTest(unittest.TestCase):
     """Every test file passes when it is the only one collected.
@@ -346,3 +343,12 @@ class SuiteFilesRunAloneTest(unittest.TestCase):
                          "these files do not pass on their own, so every "
                          "guard naming them would report BROKEN: "
                          + "; ".join(failed))
+
+
+# Last in the file, deliberately. It used to sit mid-module,
+# and module statements run in order -- so `python tests/test_prove_guards.py`
+# called `unittest.main()` (which exits) before the classes below
+# it existed, and reported success having skipped them. pytest
+# collects either way, which is why nobody noticed.
+if __name__ == "__main__":
+    unittest.main()

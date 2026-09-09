@@ -2060,11 +2060,11 @@ GUARDS = [
     ),
     Guard(
         'a command line renders a bounded number of parts', COMMANDS,
-        """        return "%s: %s" % (name, rendered(p(0) or [],
+        """        return "%s: %s" % (name, rendered(as_list(p(0)),
                                           lambda c: _text(c, codec),
                                           separator=" / "))""",
         """        return "%s: %s" % (name, " / ".join(
-            _text(c, codec) for c in (p(0) or [])))""",
+            _text(c, codec) for c in as_list(p(0))))""",
         [BYTES + "test_a_long_choice_list_is_capped"],
         'Show Choices renders every choice and the list length comes out of the file, not from MAX_CHOICES which bounds authoring: an Array of a million links to one string is three megabytes on disk',
     ),

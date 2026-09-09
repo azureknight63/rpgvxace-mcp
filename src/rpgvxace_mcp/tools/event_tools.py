@@ -545,10 +545,17 @@ def _apply_event_ops(ctx: Context, map_id: int, filename: str,
         game_map.set("events", events)
     width, height = game_map.get("width") or 0, game_map.get("height") or 0
 
+    # One request, and therefore one index, for the whole call. Built per
+    # op it was the `MAX_OPS` multiplier its own comment describes rather
+    # than the fix for it: `events.items()` copies every pair and the
+    # comprehension iterates them all, so 200 ops over a crafted map's 2.5
+    # million pairs was ~10^9 steps plus 200 allocations of a ~130 MB dict.
+    # `add`/`remove` only mean anything across ops, which is the other half
+    # of why there is one request.
+    request = _EventRequest(ctx, events, width, height)
     applied = []
     for index, raw_op in enumerate(ops):
-        applied.append(_apply_event_op(ctx, events, raw_op, width, height,
-                                       "ops[%d]" % index))
+        applied.append(_apply_event_op(request, raw_op, "ops[%d]" % index))
 
     write = write_landed.save(
         filename, dry_run=dry_run, tool="event_edit",
@@ -926,12 +933,16 @@ _EVENT_OPS = {
 }
 
 
-def _apply_event_op(ctx: Context, events: RubyHash, raw_op: dict[str, Any],
-                    width: int, height: int, where: str = "ops") -> dict[str, Any]:
-    """Run one event_edit op against the cached map. Saves nothing."""
+def _apply_event_op(request: "_EventRequest", raw_op: dict[str, Any],
+                    where: str = "ops") -> dict[str, Any]:
+    """Run one event_edit op against the cached map. Saves nothing.
+
+    Takes the request rather than building one: the index it carries is
+    per *call*, and constructing it here made that comment false and left
+    the `MAX_OPS` multiplier it describes in place.
+    """
     op = one_of(raw_op, "op", list(EVENT_OP_ARGS))
     check_op_args(op, raw_op, EVENT_OP_ARGS, where)
-    request = _EventRequest(ctx, events, width, height)
     return _EVENT_OPS[op](request, raw_op, op)
 
 

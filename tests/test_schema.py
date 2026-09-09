@@ -261,9 +261,6 @@ class TestSchemaReportProvenance(unittest.TestCase):
         self.assertNotIn("RGSS2", report["note"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestTheReferenceAgreesWithTheTables(unittest.TestCase):
     """Every shared-value list in the document comes from the live table.
@@ -541,3 +538,12 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         self.assertEqual(missing, [],
                          "the tools layer imports these from `analysis` and "
                          "the package does not re-export them")
+
+
+# Last in the file, deliberately. It used to sit mid-module,
+# and module statements run in order -- so `python tests/test_schema.py`
+# called `unittest.main()` (which exits) before the classes below
+# it existed, and reported success having skipped them. pytest
+# collects either way, which is why nobody noticed.
+if __name__ == "__main__":
+    unittest.main()
