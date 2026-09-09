@@ -1,6 +1,7 @@
 """Tool-level tests, run against a freshly built demo project each time."""
 
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -15,7 +16,11 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from build_project import build  # noqa: E402
 
 from rpgvxace_mcp import marshal_rb  # noqa: E402
-from rpgvxace_mcp.analysis import validate as run_validate  # noqa: E402
+from rpgvxace_mcp.analysis import (  # noqa: E402
+    MAX_FINDINGS,
+    REFERENCE_PREVIEW,
+    validate as run_validate,
+)
 from rpgvxace_mcp.project import (  # noqa: E402
     Project,
     ProjectError,
@@ -2389,7 +2394,6 @@ class TestCollectionIsBounded(ValidateTest):
     of objects in order to report ten."""
 
     def test_a_flood_of_findings_stops_at_the_ceiling(self):
-        from rpgvxace_mcp.analysis import MAX_FINDINGS
         game_map = self.project.load_map(1)
         event = game_map.get("events").sorted_items()[0][1]
         # Jump to Label with no matching Label: one finding each.
@@ -2901,7 +2905,7 @@ class TestReferenceCountsDoNotUnderstate(ToolTest):
              "commands": commands}])
 
     def test_a_count_past_the_preview_says_at_least(self):
-        self.flood_references(db_tools.REFERENCE_PREVIEW + 10)
+        self.flood_references(REFERENCE_PREVIEW + 10)
         out = self.call("db_edit", table="items", dry_run=True, ops=[
             {"op": "delete", "id": 1}])
         warning = " ".join(out["warnings"])
@@ -3485,7 +3489,7 @@ class TestMapReferenceCountsDoNotUnderstate(ToolTest):
     def test_a_count_past_the_preview_says_at_least(self):
         # More Transfer Player commands pointing at map 2 than the preview.
         transfers = [{"transfer": {"map_id": 2, "x": 0, "y": 0}}
-                     for _ in range(map_tools.REFERENCE_PREVIEW + 5)]
+                     for _ in range(REFERENCE_PREVIEW + 5)]
         self.call("event_edit", map_id=1, ops=[
             {"op": "set_commands", "event_id": 1, "page": 0,
              "commands": transfers}])
@@ -3493,7 +3497,7 @@ class TestMapReferenceCountsDoNotUnderstate(ToolTest):
         out = self.call("map_edit", op="delete", map_id=2, dry_run=True)
         self.assertTrue(out["incoming_transfers_truncated"])
         self.assertEqual(len(out["incoming_transfers"]),
-                         map_tools.REFERENCE_PREVIEW)
+                         REFERENCE_PREVIEW)
 
 
 class TestLookaroundIsRefusedByName(ToolTest):
@@ -4127,7 +4131,7 @@ class TestTheMeasurementFailsClosed(unittest.TestCase):
     def setUp(self):
         from rpgvxace_mcp.tools import pattern_safety
         self.safety = pattern_safety
-        self.addCleanup(self.safety._MEASURED.clear)
+        self.addCleanup(self.safety._PASSED.clear)
 
     def run_with_child(self, pattern, **fields):
         import subprocess
@@ -4335,7 +4339,9 @@ class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
         self.craft_shared_map()
         out = self.assert_bounded("db_edit", table="items", dry_run=True,
                                   ops=[{"op": "delete", "id": 1}])
-        row = out["applied"][0]
+        # `would_apply` on a dry run, not `applied` -- see
+        # TestADryRunDoesNotReadAsDone for why the two names differ.
+        row = out["would_apply"][0]
         self.assertTrue(row.get("references_scan_stopped"),
                         "the reply does not say the scan stopped: %s" % row)
         self.assertFalse(
@@ -4701,3 +4707,565 @@ class TestAnInventedFieldCannotHideInAContainer(ToolTest):
             existing = RubyHash([(1, existing)])
             replacement = RubyHash([(1, replacement)])
         self.assertIsNone(self.refuse(existing, replacement))
+
+
+class TestTheMeasurementReachesItsChild(unittest.TestCase):
+    """The pattern and its subjects travelled as command-line arguments.
+
+    Windows caps a command line at 32767 characters. Base64 of ten 2000-
+    character subjects is about 27000 for ASCII -- within three thousand of
+    the limit -- and three times that for Japanese, where each character is
+    three UTF-8 bytes. Measured: a 40-character kana class produced an 83101
+    character command line.
+
+    The consequence is not a crash. `measure_cost` fails closed, so the
+    OSError became "this server could not run its safety check", and every
+    Japanese pattern with a moderate character class was refused as unsafe
+    when it was nothing of the kind. RPG Maker is Japanese software; a
+    Japanese project is the ordinary case, not the edge one.
+    """
+
+    # Windows CreateProcess. The real cap on the whole command line.
+    ARGV_LIMIT = 32767
+
+    def setUp(self):
+        from rpgvxace_mcp.tools import pattern_safety
+        self.safety = pattern_safety
+        pattern_safety._PASSED.clear()
+
+    def command_for(self, pattern):
+        """What would be spawned for this pattern, without spawning it."""
+        seen = {}
+        real_run = self.safety.subprocess.run
+
+        def spy(command, **kwargs):
+            seen["command"] = command
+            seen["input"] = kwargs.get("input")
+            return real_run(command, **kwargs)
+
+        self.safety.subprocess.run = spy
+        self.addCleanup(setattr, self.safety.subprocess, "run", real_run)
+        try:
+            self.safety.measure_cost(pattern)
+        except self.safety.PatternTooCostly:
+            pass
+        return seen
+
+    def test_a_wide_kana_class_is_measured_not_refused(self):
+        kana = "".join(chr(0x3041 + i) for i in range(40))
+        pattern = "[" + kana + "]+"
+        # One unbounded repeat of one class: nothing competes with it, so this
+        # is a cheap pattern and must be allowed.
+        self.safety.check_pattern(pattern)
+
+    def test_a_line_of_kanji_is_measured_not_refused(self):
+        pattern = "".join(chr(0x4e00 + i) for i in range(170))
+        self.safety.check_pattern(pattern)
+
+    def test_the_command_line_stays_far_below_the_limit(self):
+        """Whatever the pattern, the payload must not ride on argv."""
+        for pattern in ("[" + "".join(chr(0x3041 + i) for i in range(40)) + "]+",
+                        "[" + "".join(chr(ord("a") + i) for i in range(26)) + "]+!",
+                        "".join(chr(0x4e00 + i) for i in range(170))):
+            with self.subTest(pattern=pattern[:20]):
+                seen = self.command_for(pattern)
+                total = sum(len(str(part)) + 1 for part in seen["command"])
+                self.assertLess(
+                    total, self.ARGV_LIMIT // 4,
+                    "the command line is %d characters, which is within reach "
+                    "of the %d Windows allows" % (total, self.ARGV_LIMIT))
+
+    def test_the_subjects_travel_on_stdin(self):
+        seen = self.command_for("Gold[0-9]+")
+        self.assertIsNotNone(seen["input"],
+                             "nothing was written to the child's stdin")
+
+
+class TestWhatTheMeasurementRemembers(unittest.TestCase):
+    """A cached verdict is a cached *timing* observation.
+
+    Caching a pass is sound: a pattern that finished in milliseconds against
+    subjects built from its own characters will do so again, and the search
+    deadline bounds it in use either way. Caching a refusal is not: the only
+    refusals this can produce are a timeout and a failure to spawn, both of
+    which a loaded machine can cause once and not again. Cached, a single
+    transient hiccup refused a legitimate pattern for the life of the server.
+
+    And the cache had no ceiling, so a caller with many distinct patterns grew
+    it without bound.
+    """
+
+    def setUp(self):
+        from rpgvxace_mcp.tools import pattern_safety
+        self.safety = pattern_safety
+        pattern_safety._PASSED.clear()
+        self.addCleanup(pattern_safety._PASSED.clear)
+
+    def spawns_for(self, run):
+        """Count children spawned while `run` executes."""
+        count = []
+        real_run = self.safety.subprocess.run
+
+        def spy(command, **kwargs):
+            count.append(1)
+            return real_run(command, **kwargs)
+
+        self.safety.subprocess.run = spy
+        self.addCleanup(setattr, self.safety.subprocess, "run", real_run)
+        run()
+        self.safety.subprocess.run = real_run
+        return len(count)
+
+    def test_a_pass_is_measured_once(self):
+        def twice():
+            self.safety.measure_cost("Gold[0-9]+")
+            self.safety.measure_cost("Gold[0-9]+")
+        self.assertEqual(self.spawns_for(twice), 1)
+
+    def test_a_refusal_is_not_remembered(self):
+        """So one transient timeout does not refuse a pattern for good."""
+        original = self.safety.PREFLIGHT_SECONDS
+        self.addCleanup(setattr, self.safety, "PREFLIGHT_SECONDS", original)
+        # No time at all, so every child times out: a refusal for a reason
+        # that has nothing to do with the pattern.
+        self.safety.PREFLIGHT_SECONDS = 0.001
+        with self.assertRaises(self.safety.PatternTooCostly):
+            self.safety.measure_cost("Gold[0-9]+")
+
+        self.safety.PREFLIGHT_SECONDS = original
+
+        # The hiccup is over, and the pattern must get another chance -- which
+        # means a child actually runs. Asserting only that the call succeeds
+        # cannot tell that apart from the failure it is guarding against: a
+        # remembered refusal is served by `measure_cost`'s cache hit, which
+        # returns as though the pattern had passed.
+        def again():
+            self.safety.measure_cost("Gold[0-9]+")
+        self.assertEqual(self.spawns_for(again), 1,
+                         "the refused pattern was served from the cache "
+                         "instead of being measured again")
+
+    def test_the_cache_has_a_ceiling(self):
+        for index in range(self.safety.MAX_MEASURED_CACHED * 3):
+            self.safety._remember("pattern-%d" % index, None)
+        self.assertLessEqual(len(self.safety._PASSED),
+                             self.safety.MAX_MEASURED_CACHED)
+
+
+class TestTheShapeGateFailsClosedThroughout(unittest.TestCase):
+    """`check_shape` promises a refusal for anything it cannot analyse.
+
+    Its own docstring says failing open "would quietly remove the cheap half
+    of the protection the moment the standard library raised something
+    unanticipated, and the caller would never know it had". The guard covered
+    the parse and stopped there: `_flatten` and `_worst_run` ran outside it,
+    and both walk a caller-shaped tree recursively.
+    """
+
+    def setUp(self):
+        from rpgvxace_mcp.tools import pattern_safety
+        self.safety = pattern_safety
+
+    def test_a_failure_flattening_the_tree_is_a_refusal(self):
+        def boom(_parsed):
+            raise ValueError("something unanticipated")
+        self.addCleanup(setattr, self.safety, "_flatten", self.safety._flatten)
+        self.safety._flatten = boom
+        with self.assertRaises(self.safety.PatternTooCostly) as caught:
+            self.safety.check_shape("Gold[0-9]+")
+        self.assertIn("could not analyse", str(caught.exception))
+
+    def test_a_recursion_error_is_a_refusal(self):
+        def deep(_parsed):
+            raise RecursionError("too deep")
+        self.addCleanup(setattr, self.safety, "_flatten", self.safety._flatten)
+        self.safety._flatten = deep
+        with self.assertRaises(self.safety.PatternTooCostly):
+            self.safety.check_shape("Gold[0-9]+")
+
+    def test_a_refusal_from_the_analysis_keeps_its_own_message(self):
+        """The outright refusals must not be reworded as "could not analyse"."""
+        with self.assertRaises(self.safety.PatternTooCostly) as caught:
+            self.safety.check_shape("(?=foo)bar")
+        self.assertNotIn("could not analyse", str(caught.exception))
+
+
+class TestACountIsNamedForWhatItCounted(ToolTest):
+    """A filtered reply must not call its count `total`.
+
+    db_list and map_list already carry this rename -- `matching_entries` and
+    `matching_maps` -- with comments saying why: "total" read as the size of
+    the table, so a filtered listing looked like the whole of a much smaller
+    one. event_get and command_reference both filter and both still said
+    `total`.
+    """
+
+    def test_a_filtered_event_read_names_its_count(self):
+        every = self.call("event_get", map_id=1)
+        self.assertIn("matching_events", every)
+        self.assertNotIn("total", every,
+                         "a count named `total` on a filterable reply")
+
+    def test_the_count_follows_the_filter(self):
+        every = self.call("event_get", map_id=1)["matching_events"]
+        one = self.call("event_get", map_id=1, event_ids=[1])
+        self.assertEqual(one["matching_events"], len(one["events"]))
+        self.assertLessEqual(one["matching_events"], every)
+
+    def test_a_map_with_no_events_names_its_count_the_same_way(self):
+        """The zero case is a second literal, so it can drift from the first."""
+        game_map = self.project.load_map(1)
+        game_map.set("events", RubyHash())
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+
+        out = self.call("event_get", map_id=1)
+        self.assertEqual(out["events"], [])
+        self.assertEqual(out["matching_events"], 0)
+        self.assertNotIn("total", out)
+
+    def test_a_filtered_command_reference_names_its_count(self):
+        every = self.call("command_reference")
+        self.assertIn("matching_commands", every)
+        self.assertNotIn("total", every)
+        some = self.call("command_reference", search="text")
+        self.assertEqual(some["matching_commands"], len(some["commands"]))
+        self.assertLess(some["matching_commands"], every["matching_commands"])
+
+    def test_an_unfiltered_count_keeps_its_honest_name(self):
+        """`scripts op="list"` returns every slot, so `total` is true there."""
+        out = self.call("scripts", op="list")
+        self.assertEqual(out["total"], len(out["scripts"]))
+
+
+class TestADryRunDoesNotReadAsDone(ToolTest):
+    """A preview must not be phrased as a confirmation.
+
+    `db_edit dry_run=true` answered with `applied: [{"op": "update", "id": 1,
+    "changes": ["name: \"Potion\" -> \"Zap\""]}]`. Every word of that is
+    past tense, and the one field that says otherwise -- `write.dry_run` -- is
+    nested a level down. A model reading the op rows concluded the rename had
+    landed. The `would_*` names this file already uses for `would_write` and
+    `would_delete` are the fix.
+    """
+
+    def dry_update(self, **extra):
+        return self.call("db_edit", table="items", dry_run=True,
+                         ops=[{"op": "update", "id": 1,
+                               "patch": {"name": "Zap"}}], **extra)
+
+    def test_a_preview_does_not_claim_to_have_applied_anything(self):
+        out = self.dry_update()
+        self.assertNotIn("applied", out,
+                         "a dry run answered with `applied`: %s" % sorted(out))
+        self.assertIn("would_apply", out)
+
+    def test_a_previewed_change_is_named_in_the_conditional(self):
+        row = self.dry_update()["would_apply"][0]
+        self.assertNotIn("changes", row,
+                         "a dry run's op row answered with `changes`: %s" % row)
+        self.assertIn("would_change", row)
+        self.assertIn('"Potion" -> "Zap"', str(row["would_change"]))
+
+    def test_a_preview_says_at_the_top_that_nothing_was_written(self):
+        out = self.dry_update()
+        self.assertTrue(out.get("dry_run"),
+                        "nothing at the top level of the reply says this was "
+                        "a preview: %s" % sorted(out))
+
+    def test_a_real_edit_still_reads_as_done(self):
+        out = self.call("db_edit", table="items",
+                        ops=[{"op": "update", "id": 1,
+                              "patch": {"name": "Zap"}}])
+        self.assertIn("applied", out)
+        self.assertIn("changes", out["applied"][0])
+        self.assertNotIn("would_apply", out)
+        self.assertNotIn("dry_run", out)
+        # And it really landed.
+        self.assertEqual(
+            self.reopen().project.get_entry("items", 1).get("name").data,
+            b"Zap")
+
+    def test_the_preview_and_the_act_describe_the_same_change(self):
+        """Two key names, one description -- they must not drift apart."""
+        preview = self.dry_update()["would_apply"][0]["would_change"]
+        real = self.call("db_edit", table="items",
+                         ops=[{"op": "update", "id": 1,
+                               "patch": {"name": "Zap"}}])["applied"][0]["changes"]
+        self.assertEqual(preview, real)
+
+
+class TestAScopeIsClaimedOnlyOnceRead(ToolTest):
+    """`_Hits.searching` exists so a scope that was asked for is not reported
+    as read. The events scope claimed itself before opening anything.
+
+    Every other scope moved its claim after a successful load, each with a
+    comment saying why -- "before it, a file that would not load claimed to
+    have been searched". The events walk kept its claim on the first line.
+    """
+
+    def break_every_events_file(self):
+        """Leave nothing in the project that holds an event command list."""
+        for name in ("common_events", "troops"):
+            self.project.path_for(
+                self.project.filename_for(name)).write_bytes(b"not marshal")
+        for map_id, _ in self.project.entries("map_infos"):
+            path = self.project.path_for(self.project.map_file(map_id))
+            if path.exists():
+                path.write_bytes(b"not marshal")
+        self.ctx = self.reopen()
+
+    def test_an_unreadable_project_does_not_claim_the_events_scope(self):
+        self.break_every_events_file()
+        out = self.call("search", query="anything", scopes=["events"])
+        self.assertNotIn(
+            "events", out["scopes_searched"],
+            "the events scope was reported as searched when nothing in it "
+            "could be opened, so zero hits reads as zero matches")
+
+    def test_it_says_that_it_read_nothing_rather_than_going_quiet(self):
+        self.break_every_events_file()
+        out = self.call("search", query="anything", scopes=["events"])
+        self.assertTrue(out.get("events_note"),
+                        "nothing in the reply explains the empty result: %s"
+                        % sorted(out))
+
+    def test_a_readable_project_still_claims_it(self):
+        out = self.call("search", query="Potion", scopes=["events"])
+        self.assertIn("events", out["scopes_searched"])
+        self.assertNotIn("events_note", out)
+
+
+class TestMapGetBoundsItsEventSummary(SharedObjectMap, ToolTest):
+    """`_event_summaries` walks events x pages and both come from the file.
+
+    Every other whole-file walk in map_tools goes through `_check_budget` or a
+    CommandBudget. This one built a row per page of every event, so the shared
+    -object map -- fifty events of fifty pages, all one object -- produced
+    2500 rows from 7 KB, and nothing in the reply said the list was long
+    because the file was crafted rather than because the map is big.
+    """
+
+    def test_the_summary_stops_at_its_ceiling(self):
+        self.craft_shared_map()
+        out = self.assert_bounded("map_get", map_id=1, include_events=True)
+        rows = sum(len(event["pages"]) for event in out["events"])
+        self.assertLessEqual(rows, map_tools.MAX_EVENT_SUMMARY_ROWS)
+
+    def test_a_stopped_summary_says_so(self):
+        self.craft_shared_map()
+        out = self.assert_bounded("map_get", map_id=1, include_events=True)
+        self.assertIn("events_truncated", out)
+
+    def test_an_ordinary_map_is_summarised_whole(self):
+        out = self.call("map_get", map_id=1, include_events=True)
+        self.assertNotIn("events_truncated", out)
+        self.assertTrue(out["events"], "the fixture map has events")
+
+
+class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
+    """Every ceiling is declared to callers, or listed here as internal.
+
+    A bound the caller cannot see is a refusal they cannot predict and a
+    truncation they cannot detect. Ten were enforced without appearing
+    anywhere in the advertised surface; four of those were reachable by an
+    ordinary call.
+
+    The internal set below is the other half of the claim, and it is checked
+    too: a name in it that no longer exists fails, so the list cannot quietly
+    accumulate ceilings that were renamed away.
+
+    What the scan sees: a name assigned an arithmetic expression of digits,
+    shifts and products. A ceiling derived from another one --
+    `MAX_TOOL_RESULT_CHARS = MAX_RESPONSE_CHARS // 2` -- is not matched, and
+    is covered by whichever ceiling it is derived from. Said here rather than
+    left to be discovered, because an undeclared bound is exactly what this
+    test is about and its own coverage is a bound of the same kind.
+    """
+
+    # Ceilings a caller cannot reach or would gain nothing from knowing.
+    # Each one needs a reason, because "internal" is the escape hatch here and
+    # an escape hatch without a reason is where undeclared bounds come back.
+    INTERNAL = {
+        # Robustness limits on reading a file this server did not write. A
+        # caller cannot influence them; a file that trips one is reported as
+        # unreadable, which is the actionable fact.
+        "MAX_DEPTH": "marshal nesting in a file being read",
+        "MAX_STRING_SCAN_DEPTH": "how deep a file is scanned for strings",
+        "MAX_TABLE_AXIS": "an RGSS Table axis, fixed by the format",
+        # Cosmetic clamps inside a message or a rendered line.
+        "MAX_ECHO_CHARS": "how much of a bad argument an error quotes back",
+        "MAX_NAMES_LISTED": "how many field names a refusal lists",
+        "MAX_IDS_LISTED": "how many ids a refusal lists",
+        "MAX_RENDER_INDENT": "indent clamp on one rendered script line",
+        "MAX_NORMALIZE_DEPTH": "recursion clamp while restyling strings",
+        # Internal to the pattern gate, whose refusals explain themselves in
+        # the terms a caller can act on -- the pattern's shape, not the score.
+        "MAX_BOUNDED_WEIGHT": "one atom's weight in the shape score",
+        "MAX_BACKTRACK_PATHS": "the shape score's own budget",
+        "UNBOUNDED_WEIGHT": "one atom's weight in the shape score",
+        "MAX_SUBJECTS_PER_CHARACTER": "how many subjects the measurement builds",
+        "MAX_MEASURED_CACHED": "how many passed patterns are remembered",
+        # Server plumbing, not a tool contract.
+        "MAX_BATCH_MESSAGES": "JSON-RPC batch size",
+        # Authoring depth, reported by the compiler's own error.
+        "MAX_AUTHORED_INDENT": "indent depth the DSL compiler accepts",
+        "MAX_DSL_DEPTH": "nesting depth the DSL compiler accepts",
+        # Size limits on reading a file this server did not write. A file that
+        # trips one is reported as unreadable, with the limit and the actual
+        # size in the message; there is no request a caller could have made
+        # differently.
+        "MAX_DATA_FILE_BYTES": "how large a data file may be to read",
+        "MAX_SCRIPT_BYTES": "how large the script pack may be to read",
+        "MAX_GAME_INI_BYTES": "how large Game.ini may be to read",
+        "MAX_TABLE_CELLS": "cells in one RGSS Table being read",
+        "MAX_PAYLOAD_BYTES": "a base64 payload in a write, named in its own "
+                             "refusal along with the size that was sent",
+        # JSON-RPC framing. These *refuse* rather than truncate, and say to
+        # narrow the request, so there is nothing a caller cannot detect.
+        "MAX_MESSAGE_CHARS": "one JSON-RPC request frame",
+        "MAX_RESPONSE_CHARS": "one JSON-RPC response frame",
+    }
+
+    CEILING = re.compile(
+        r"^(MAX_[A-Z0-9_]+|TOP_TILE_IDS|REFERENCE_PREVIEW|PREFLIGHT_SECONDS"
+        r"|UNBOUNDED_WEIGHT)\s*=\s*([0-9_.<*\s]+?)\s*(?:#.*)?$")
+
+    def ceilings(self):
+        """Every numeric ceiling defined in the source, by name.
+
+        The value side accepts an arithmetic expression, not just a literal:
+        `MAX_BACKTRACK_PATHS = 1 << 14` is a ceiling, and a scan that skipped
+        it would let this suite report full coverage of a set it had quietly
+        narrowed -- the same defect the suite exists to catch.
+        """
+        found = {}
+        root = Path(__file__).resolve().parent.parent / "src"
+        for path in sorted(root.rglob("*.py")):
+            for line in path.read_text(encoding="utf-8").split("\n"):
+                match = self.CEILING.match(line)
+                if not match:
+                    continue
+                expression = match.group(2)
+                # Digits, shifts and products only, so this is arithmetic on
+                # the characters the pattern already allowed and not an eval
+                # of whatever the file says.
+                if not re.fullmatch(r"[0-9_.<*\s]+", expression):
+                    continue
+                try:
+                    found[match.group(1)] = str(eval(expression, {}, {}))
+                except (SyntaxError, TypeError, ValueError):
+                    continue
+        return found
+
+    def advertised(self):
+        """Everything a caller can read before calling: descriptions and schemas.
+
+        Thousands separators are stripped, so "10,000" in a sentence and
+        10000 in a schema are the same number to the check below. Without
+        that, excluding a comma at the boundary -- which is what stops "25"
+        matching inside "1,025" -- also rejected `"maxItems": 10000,`, where
+        the comma is JSON punctuation. The check then reported a ceiling
+        declared twice as undeclared.
+        """
+        parts = []
+        for tool in REGISTRY.values():
+            parts.append(tool.description)
+            parts.append(json.dumps(tool.schema))
+        surface = " || ".join(parts)
+        return re.sub(r"(?<=\d),(?=\d\d\d(?!\d))", "", surface)
+
+    def test_the_source_has_ceilings_to_check(self):
+        """So a broken scan cannot make this suite vacuously pass."""
+        self.assertGreater(len(self.ceilings()), 30)
+
+    def test_every_ceiling_is_declared_or_named_internal(self):
+        surface = self.advertised()
+        undeclared = []
+        for name, value in sorted(self.ceilings().items()):
+            if name in self.INTERNAL:
+                continue
+            forms = {value, str(int(float(value)))}
+            forms.add("{:,}".format(int(float(value))))
+            # Digit boundaries, because a bare substring is not a match:
+            # "25" appears inside "125" and "1025", so REFERENCE_PREVIEW = 25
+            # read as declared by any description that happened to name a
+            # larger number. A check that passes for the wrong reason is the
+            # thing this suite is about.
+            found = any(
+                re.search(r"(?<![0-9.])%s(?![0-9.])" % re.escape(form),
+                          surface)
+                for form in forms)
+            if not found:
+                undeclared.append("%s = %s" % (name, value))
+        self.assertEqual(
+            undeclared, [],
+            "these ceilings are enforced but never advertised, so a caller "
+            "cannot predict the refusal or detect the truncation. Declare "
+            "each in the description of the tool that enforces it, or add it "
+            "to INTERNAL with the reason it is unreachable.")
+
+    def test_the_internal_list_has_not_gone_stale(self):
+        names = set(self.ceilings())
+        gone = sorted(set(self.INTERNAL) - names)
+        self.assertEqual(gone, [],
+                         "INTERNAL names ceilings that no longer exist, so it "
+                         "is excusing nothing and hiding the next one")
+
+
+class TestBothDatabaseToolsRefuseATableTheSameWay(ToolTest):
+    """One gate, so the two tools cannot answer the same question differently.
+
+    `_table_arg` knows two things db_get's copy did not: that a table missing
+    because *this engine* does not have it deserves the engine's own
+    explanation, and where that explanation comes from. db_get is the odd one
+    out only in accepting a one-object table like System, which is what the
+    `allow_single` flag is for -- and that one difference is why the copy
+    existed.
+    """
+
+    ENGINE_ONLY = "areas"          # a VX table, absent on VX Ace
+
+    def refusal(self, tool_name, **extra):
+        with self.assertRaises(ToolError) as caught:
+            self.call(tool_name, **extra)
+        return str(caught.exception)
+
+    def test_a_table_this_engine_lacks_is_explained_by_both(self):
+        if self.ENGINE_ONLY in self.project.data_files:
+            self.skipTest("this engine has %s" % self.ENGINE_ONLY)
+        hint = self.project.profile.absence_hint(self.ENGINE_ONLY)
+        self.assertTrue(hint, "the profile has no hint to compare against")
+        for tool_name in ("db_list", "db_get"):
+            with self.subTest(tool=tool_name):
+                message = self.refusal(tool_name, table=self.ENGINE_ONLY)
+                self.assertIn(hint, message,
+                              "%s does not explain why the table is absent, "
+                              "so a caller has nothing to do next" % tool_name)
+
+    def test_a_table_no_engine_has_names_what_this_project_has(self):
+        for tool_name in ("db_list", "db_get"):
+            with self.subTest(tool=tool_name):
+                message = self.refusal(tool_name, table="nonesuch")
+                self.assertIn("actors", message)
+
+    def test_the_scripts_table_sends_both_to_the_scripts_tool(self):
+        for tool_name in ("db_list", "db_get"):
+            with self.subTest(tool=tool_name):
+                self.assertIn("scripts tool",
+                              self.refusal(tool_name, table="scripts"))
+
+    def test_db_get_still_reads_a_one_object_table(self):
+        """The one real difference between the two, and the reason for the flag."""
+        out = self.call("db_get", table="system")
+        self.assertIn("entry", out)
+
+    def test_db_list_still_refuses_one(self):
+        self.assertIn("not an id-indexed table",
+                      self.refusal("db_list", table="system"))
+
+    def test_db_get_still_refuses_ids_on_a_one_object_table(self):
+        """Allowing the table must not start ignoring the ids."""
+        message = self.refusal("db_get", table="system", ids=[1, 2])
+        self.assertIn("not a table of entries", message)

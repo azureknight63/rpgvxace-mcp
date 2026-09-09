@@ -66,10 +66,6 @@ BACKUP_OP_ARGS = {
     "prune": {"op", "dry_run"},
 }
 
-# What each raw_data op reads. `op` defaults to "get", which is the dangerous
-# half: a caller that meant to write and forgot the op got back the value
-# already there, under a "value" key that reads like confirmation of the write
-# it thought it had made. So "get" refuses `value` outright.
 # What each scripts op reads. A slot body is only ever written by "set", and
 # "get" used to accept a `code` and hand back the body already there.
 SCRIPT_OP_ARGS = {
@@ -269,44 +265,61 @@ def scripts(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     """
     op = one_of(args, "op", list(SCRIPT_OP_ARGS))
     check_op_args(op, args, SCRIPT_OP_ARGS, "scripts")
-    if op == "set":
-        code = opt_str(args, "code")
-        if code is not None and len(code) > MAX_SCRIPT_CHARS:
-            raise ToolError(
-                "code is %d characters, above the %d this server writes. A "
-                "script that large would also push the file past what it can "
-                "read back." % (len(code), MAX_SCRIPT_CHARS))
-        name = opt_str(args, "name")
-        if name is not None and len(name) > MAX_SCRIPT_NAME_CHARS:
-            raise ToolError("name is %d characters; the editor shows at most "
-                            "about %d" % (len(name), MAX_SCRIPT_NAME_CHARS))
-    # `list` reports line and character counts, so it needs every body; `get`
-    # needs one; `set` needs only the slot count. Inflating a project's whole
-    # script pack for a `set` is the common case here.
-    index = need_int(args, "index") if op in ("get", "set") else None
-    entries = ctx.project.load_scripts(
-        with_code=op != "set",
-        indices={index} if op == "get" and index is not None else None)
-
     if op == "list":
-        return {"scripts": [
-            {"index": s["index"], "name": s.get("name", ""),
-             "lines": len((s.get("code") or "").splitlines()),
-             "characters": len(s.get("code") or ""),
-             "error": s.get("error")}
-            for s in entries
-        ], "total": len(entries)}
+        return _list_scripts(ctx)
 
-    if index is None:  # never: the branch above sets it for get and set
-        raise ToolError("op %s needs an index" % op)
+    # `list` needs every body for its line and character counts; `get` needs
+    # one; `set` needs only the slot count. Inflating a whole project's script
+    # pack for a `set` is the common case here, so it is the one to avoid.
+    index = need_int(args, "index")
+    entries = ctx.project.load_scripts(with_code=op == "get",
+                                       indices={index} if op == "get" else None)
     if not 0 <= index < len(entries):
-        raise ToolError("script index %d is outside 0..%d" % (index, len(entries) - 1))
-
+        raise ToolError("script index %d is outside 0..%d"
+                        % (index, len(entries) - 1))
     if op == "get":
         return entries[index]
+    return _set_script(ctx, args, index)
 
+
+def _list_scripts(ctx: Context) -> dict[str, Any]:
+    """Every slot with its size, which is what needs every body inflated."""
+    entries = ctx.project.load_scripts(with_code=True)
+    return {"scripts": [
+        {"index": s["index"], "name": s.get("name", ""),
+         "lines": len((s.get("code") or "").splitlines()),
+         "characters": len(s.get("code") or ""),
+         "error": s.get("error")}
+        for s in entries
+        # No filter applies to this listing, so `total` is the whole count and
+        # not a count of matches -- unlike db_list and event_get, which name
+        # theirs `matching_*` for that reason.
+    ], "total": len(entries)}
+
+
+def _set_script(ctx: Context, args: dict[str, Any], index: int) -> dict[str, Any]:
+    """Replace a slot's name, body, or both.
+
+    Its own function so that `name` and `code` are checked and used in one
+    scope. They used to be bound inside `if op == "set":` and read after the
+    list and get branches had returned -- legal, because only a "set" reaches
+    those reads, but an invariant held by the control flow rather than by the
+    scope. This project has had two UnboundLocalErrors of exactly that shape,
+    and both were fixed the same way.
+    """
+    code = opt_str(args, "code")
+    if code is not None and len(code) > MAX_SCRIPT_CHARS:
+        raise ToolError(
+            "code is %d characters, above the %d this server writes. A script "
+            "that large would also push the file past what it can read back."
+            % (len(code), MAX_SCRIPT_CHARS))
+    name = opt_str(args, "name")
+    if name is not None and len(name) > MAX_SCRIPT_NAME_CHARS:
+        raise ToolError("name is %d characters; the editor shows at most "
+                        "about %d" % (len(name), MAX_SCRIPT_NAME_CHARS))
     if name is None and code is None:
         raise ToolError("set needs a name, code, or both")
+
     dry_run = opt_bool(args, "dry_run")
     filename = ctx.project.filename_for("scripts")
     with ctx.staged(filename) as write_landed:

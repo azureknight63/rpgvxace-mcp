@@ -393,9 +393,16 @@ def check_op_args(op: str, args: dict[str, Any],
     a refusal -- it will not retry what it believes already happened.
 
     ``uses`` maps each op to every argument it reads, including the ones the
-    tool reads for every op. An op absent from the table is not refused here:
-    ``one_of`` has already said which ops exist, and duplicating that list
-    would mean two places to update.
+    tool reads for every op. An op absent from that table *is* refused, and
+    said to be a bug in this server rather than a mistake by the caller: an op
+    reaches here only after ``one_of`` has accepted it, so a missing entry
+    means this server's two lists disagree. Returning quietly instead would
+    drop the caller's arguments and report success -- the failure this whole
+    function exists to prevent, reached through the function itself.
+
+    An earlier version of this paragraph said such an op "is not refused
+    here", which is the opposite of what the code below does. The claim was
+    left behind by the round that made it raise.
 
     Every tool that takes an ``op`` calls this -- the three editing tools, both
     of event_edit's paths, and map_tiles, raw_data, scripts and backups. That

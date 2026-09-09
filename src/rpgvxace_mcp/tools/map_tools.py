@@ -12,7 +12,7 @@ from ..convert import (
     normalize_strings,
     to_json,
 )
-from ..analysis import CommandBudget, REFERENCE_PREVIEW, find_references
+from ..analysis import reference_preview
 from ..project import MAX_MAP_ID, ProjectError
 from ..rubytypes import CELL_MASK, RubyHash, RubyObject, RubyString, Table
 from ..schema import TILE_ID_RANGES, TRIGGER_NAMES, new_map_info
@@ -64,7 +64,9 @@ DEFAULT_MAP_WIDTH, DEFAULT_MAP_HEIGHT = 20, 15
 
 # Map fields a patch must not touch, because something else owns the
 # invariants they are part of: setting @width alone leaves a map claiming a
-# size its @data does not have, which is a file the editor refuses to open. "events" is here because a patch merges field by field, so
+# size its @data does not have, which is a file the editor refuses to open.
+#
+# "events" is here because a patch merges field by field, so
 # `patch={"events": {"1": {"x": 99999}}}` reached straight into the event
 # object and moved it off the map, past event_edit's bounds check -- while the
 # refusal message printed right here already told the caller to use event_edit
@@ -114,14 +116,14 @@ MAP_OP_ARGS = {
 }
 
 
-# What each map_tiles op reads. "read" writes nothing, so it takes no
-# dry_run; "fill" paints one id everywhere and "write" takes a grid, and each
-# used to accept the other's argument and ignore it -- a fill carrying rows
-# reported "filled ..." and never looked at them.
 # How much tile data map_get includes. Named once, because the schema that
 # advertises it and the reader that enforces it are 40 lines apart.
 TILE_DETAIL = ("none", "counts")
 
+# What each map_tiles op reads. "read" writes nothing, so it takes no
+# dry_run; "fill" paints one id everywhere and "write" takes a grid, and each
+# used to accept the other's argument and ignore it -- a fill carrying rows
+# reported "filled ..." and never looked at them.
 TILE_OP_ARGS = {
     "read": {"op", "map_id", "x", "y", "width", "height", "z"},
     "fill": {"op", "map_id", "x", "y", "width", "height", "z", "tile_id",
@@ -246,8 +248,18 @@ def _start_position(ctx: Context) -> dict[str, Any] | None:
         "map_id": prop(INT, "Which map to read.", minimum=1,
                        maximum=MAX_MAP_ID),
         "include_events": prop(BOOL, "Include a summary of each event (default true)."),
-        "tiles": prop(STR, "Tile reporting: none (default), counts (which tile ids "
-                           "appear on each layer, and how often).",
+        "tiles": prop(STR, "Tile reporting: none (default), or counts -- the "
+                           "%d most common tile ids on each layer with how "
+                           "often each appears, how many distinct ids the "
+                           "layer holds, and how many of them are not listed. "
+                           "Not every id: a layer can hold thousands, and "
+                           "\"tile_ids_not_shown\" says how many were left "
+                           "out. A tally covers the whole tile table by "
+                           "definition, so it is refused above %s cells -- "
+                           "there is no smaller window to ask for, and "
+                           "map_tiles cannot count either."
+                           % (TOP_TILE_IDS,
+                              "{:,}".format(MAX_CELLS_PER_WALK)),
                       enum=list(TILE_DETAIL)),
         "refresh": REFRESH,
     }, ["map_id"]),
@@ -309,7 +321,14 @@ def map_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             result["tile_counts"] = _tile_counts(data)
 
     if opt_bool(args, "include_events", True):
-        result["events"] = _event_summaries(ctx, game_map)
+        result["events"], cut_short = _event_summaries(ctx, game_map)
+        if cut_short:
+            result["events_truncated"] = (
+                "this map describes more than %d event pages, so the summary "
+                "stops there. A map that large is usually a file that shares "
+                "one page object across many slots rather than a big map -- "
+                "run validate. Read particular events with event_get."
+                % MAX_EVENT_SUMMARY_ROWS)
         unreadable = unreadable_events_note(game_map.get("events"))
         if unreadable:
             result["events_note"] = unreadable
@@ -376,19 +395,41 @@ def unreadable_events_note(events: Any) -> "str | None":
             % type(events).__name__)
 
 
-def _event_summaries(ctx: Context, game_map: RubyObject) -> list[dict[str, Any]]:
+# How many event page rows one map_get summary may build. Events times pages,
+# and both numbers come out of the file: the shared-object map is fifty events
+# of fifty pages, all one object, so 7 KB produced 2500 rows -- and nothing in
+# the reply said the list was long because the file was crafted rather than
+# because the map is big. Every other whole-file walk in this module goes
+# through `_check_budget`; this one went through nothing.
+MAX_EVENT_SUMMARY_ROWS = 2000
+
+
+def _event_summaries(ctx: Context, game_map: RubyObject
+                     ) -> tuple[list[dict[str, Any]], bool]:
+    """Each event on a map in summary, and whether the list was cut short.
+
+    Returns the flag rather than noting it here, because the caller is the one
+    that owns the reply -- and a summary that stopped and does not say so is
+    the shape this module spends most of its comments avoiding.
+    """
     events = game_map.get("events")
     if not isinstance(events, RubyHash):
-        return []
+        return [], False
     out = []
+    rows = 0
     for event_id, event in events.sorted_items():
+        if rows >= MAX_EVENT_SUMMARY_ROWS:
+            return out, True
         if not isinstance(event, RubyObject):
             continue
         pages = event.get("pages") or []
         page_rows = []
         for index, page in enumerate(pages):
+            if rows >= MAX_EVENT_SUMMARY_ROWS:
+                break
             if not isinstance(page, RubyObject):
                 continue
+            rows += 1
             commands = page.get("list") or []
             graphic = page.get("graphic")
             page_rows.append({
@@ -406,7 +447,11 @@ def _event_summaries(ctx: Context, game_map: RubyObject) -> list[dict[str, Any]]
             "y": event.get("y"),
             "pages": page_rows,
         })
-    return out
+    # Both halves, on every path. Returning a bare list here while the two
+    # early returns above returned pairs made `events, cut_short = ...` unpack
+    # a two-event map into its own events -- so an ordinary map reported the
+    # first event as the whole summary and the second as "truncated".
+    return out, False
 
 
 def _conditions(condition: Any) -> list[str]:
@@ -887,16 +932,15 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     # times was said to be referenced twenty-five -- and a caller that fixed
     # those twenty-five would believe the map was free. The constant's own
     # comment claimed this fix before this line had it.
-    # Bounded, and a scan that stopped is reported: the walk returns early
-    # only when it finds hits, so "no map transfers here" is the answer that
-    # costs a full traversal of every command in the project.
-    scan = CommandBudget()
-    found = [hit["where"] for hit in
-             find_references(ctx.project, "maps", map_id, scan,
-                             limit=REFERENCE_PREVIEW + 1)]
-    incomplete = scan.note("a map delete's transfer scan")
-    more_than_shown = len(found) > REFERENCE_PREVIEW
-    incoming = found[:REFERENCE_PREVIEW]
+    # The same three facts db_edit's delete needs, from the same place: the
+    # walk returns early only when it finds hits, so "no map transfers here"
+    # is the answer that costs a full traversal of every command in the
+    # project. This used to be five lines here and five more there, and the
+    # "one past the limit" half was in only one of them.
+    preview = reference_preview(ctx.project, "maps", map_id,
+                                "a map delete's transfer scan")
+    incoming = [hit["where"] for hit in preview.rows]
+    more_than_shown, incomplete = preview.truncated, preview.incomplete
 
     filename = ctx.project.map_file(map_id)
     # Asked here, so the preview and the act agree: the file can legitimately
@@ -954,9 +998,7 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     if incoming:
         result["warning"] = (
             "%s Transfer Player command(s) still point at map %d and will now "
-            "send the player nowhere"
-            % ("at least %d" % len(incoming) if more_than_shown
-               else "%d" % len(incoming), map_id))
+            "send the player nowhere" % (preview.counted, map_id))
         result["incoming_transfers"] = incoming
         result["incoming_transfers_truncated"] = more_than_shown
     return result

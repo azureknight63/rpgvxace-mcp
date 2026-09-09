@@ -109,7 +109,10 @@ SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
         "scopes": prop(ARR, "Where to look (default all): " + ", ".join(SEARCH_SCOPES),
                        items={"type": STR, "enum": SEARCH_SCOPES}),
         "limit": prop(INT, "Maximum hits to return (default 100, at most "
-                           "%d)." % MAX_HITS, minimum=1, maximum=MAX_HITS),
+                           "%d). Each hit carries at most %d characters of "
+                           "its text, and says its real length when it was "
+                           "longer." % (MAX_HITS, MAX_HIT_CHARS),
+                      minimum=1, maximum=MAX_HITS),
     }),
 )
 def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
@@ -177,7 +180,7 @@ class _Hits:
     """
 
     __slots__ = ("rows", "limit", "matcher", "searched", "unsearchable",
-                 "unreadable", "walk")
+                 "unreadable", "empty", "walk")
 
     def __init__(self, limit: int, matcher: "_Matcher | None"):
         self.rows: list[dict[str, Any]] = []
@@ -189,6 +192,11 @@ class _Hits:
         self.searched: list[str] = []
         self.unsearchable: dict[str, str] = {}
         self.unreadable: list[int] = []
+        # Scopes that opened nothing at all. Distinct from `unsearchable`,
+        # which names a file and the error it raised: these are scopes where
+        # the walk swallowed whatever went wrong, so the honest answer is
+        # "nothing was read here" without a claim about why.
+        self.empty: dict[str, str] = {}
         # One allowance for the command walk. A file that shares objects by
         # reference renders as far more commands than its size suggests, and
         # a search that stopped early and found nothing reads exactly like one
@@ -221,6 +229,15 @@ class _Hits:
         """Record a scope as read. Called once its file has actually loaded."""
         if scope not in self.searched:
             self.searched.append(scope)
+
+    def nothing_read(self, scope: str, note: str) -> None:
+        """Record that a scope was entered and produced nothing to search.
+
+        Said rather than left as an absence from `scopes_searched`: a caller
+        reading a list has to notice a missing entry, and an empty result plus
+        a short list is exactly the shape that reads as "looked, found none".
+        """
+        self.empty[scope] = note
 
     def add(self, location: Location, text: str,
             extra: "dict[str, Any] | None" = None) -> None:
@@ -256,6 +273,11 @@ class _Hits:
             "may_have_more": self.full,
             "scopes_searched": self.searched,
         }
+        if self.empty and not self.rows:
+            # Nothing found, and at least one scope never opened anything: the
+            # two together are indistinguishable from a completed search of a
+            # project that does not contain the text.
+            out["may_have_more"] = True
         matcher = self.matcher
         if matcher is not None and matcher.clipped:
             out["strings_clipped_to_first_chars"] = {
@@ -268,6 +290,8 @@ class _Hits:
                 "string in full."
                 % (matcher.clipped, "s were" if matcher.clipped > 1 else " was",
                    MAX_SUBJECT_CHARS))
+        for scope, note in self.empty.items():
+            out["%s_note" % scope] = note
         if self.unreadable:
             out["scripts_not_searched"] = self.unreadable
         if self.unsearchable:
@@ -286,9 +310,18 @@ class _Hits:
 def _search_events(ctx: Context, found: _Hits,
                    code_filter: "int | None") -> None:
     """Every event command list on every map, plus common events and troops."""
-    found.searching("events")
     matcher = found.matcher
+    # Claimed on the first list actually read, not on entry. `iter_maps` and
+    # `_safe_entries` both swallow a file that will not load, so a project
+    # whose maps, common events and troops are all unreadable yielded nothing
+    # and this still reported the scope as searched -- which is the exact
+    # thing `searching` exists to prevent, and every other scope in this file
+    # moved its own claim after a successful load for the same reason.
+    read_something = False
     for location, commands in iter_command_lists(ctx.project, None, found.walk):
+        if not read_something:
+            read_something = True
+            found.searching("events")
         if found.done:
             return
         for index, command in enumerate(commands):
@@ -308,6 +341,12 @@ def _search_events(ctx: Context, found: _Hits,
                     found.add(location.at(index), text, named)
                     if found.done:
                         return
+    if not read_something:
+        found.nothing_read("events", (
+            "no event command list could be read: every map, the common "
+            "events and the troops either hold no events or would not load. "
+            "This is not the same as finding nothing in them -- run validate "
+            "to see which files are unreadable."))
 
 def _search_database(ctx: Context, found: _Hits) -> None:
     """Every string field of every entry of every id-indexed table."""

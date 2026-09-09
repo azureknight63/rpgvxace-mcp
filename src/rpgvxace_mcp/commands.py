@@ -267,7 +267,6 @@ VARIABLE_OP_CODES = {"set": 0, "=": 0, "add": 1, "+": 1, "sub": 2, "-": 2,
 
 COMPARISONS = {0: "==", 1: ">=", 2: "<=", 3: ">", 4: "<", 5: "!="}
 
-# The type a Conditional Branch (111) tests, from its first parameter.
 # Which audio folder each "play this" command draws from. The keys are the
 # command codes, so anything needing the set of audio commands can use them.
 AUDIO_COMMAND_KINDS = {241: "bgm", 245: "bgs", 249: "me", 250: "se"}

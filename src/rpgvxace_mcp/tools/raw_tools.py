@@ -12,6 +12,8 @@ import re
 from typing import Any
 
 from ..convert import (
+    MAX_JSON_DEPTH,
+    MAX_JSON_NODES,
     TABLE_MODES,
     TextCodec,
     _hash_key,
@@ -49,6 +51,13 @@ from .registry import (
 )
 
 
+# What each raw_data op reads. `op` defaults to "get", which is the dangerous
+# half: a caller that meant to write and forgot the op got back the value
+# already there, under a "value" key that reads like confirmation of the write
+# it thought it had made. So "get" refuses `value` outright.
+#
+# This paragraph was left behind in misc_tools when raw_data moved here, where
+# it read as a description of the scripts op table.
 RAW_OP_ARGS = {
     "get": {"op", "table", "map_id", "path", "tables", "refresh"},
     "set": {"op", "table", "map_id", "path", "value", "dry_run", "refresh"},
@@ -82,7 +91,12 @@ STRUCTURAL_MAP_PATHS = STRUCTURAL_MAP_FIELDS
     "structure for a scalar or the reverse; and a field the object does not "
     "already have.",
     schema({
-        "op": prop(STR, "get (default) or set.", enum=list(RAW_OP_ARGS)),
+        "op": prop(STR, "get (default) or set. A get renders at most %s "
+                        "values and nests %d deep, and says so when it "
+                        "stopped; a value larger than that has to be read "
+                        "field by field along a deeper path."
+                        % ("{:,}".format(MAX_JSON_NODES), MAX_JSON_DEPTH),
+                   enum=list(RAW_OP_ARGS)),
         "table": prop(STR, "A data table name, e.g. system, actors, map_infos.",
                       enum=ALL_TABLE_KEYS),
         "map_id": prop(INT, "A map to address instead of a table."),

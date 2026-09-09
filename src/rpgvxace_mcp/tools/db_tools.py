@@ -8,8 +8,8 @@ from typing import Any
 from ..analysis import (
     REFERENCE_PREVIEW,
     REFERENCE_RULES,
-    CommandBudget,
-    find_references,
+    ReferencePreview,
+    reference_preview,
 )
 from ..convert import TABLE_MODES, apply_patch, new_walk, to_json
 from ..project import ProjectError
@@ -61,9 +61,6 @@ SUMMARY_FIELDS: dict[str, list[str]] = {
     "tilesets": ["mode", "tileset_names"],
 }
 
-# Tool schemas are built before a project is open, so the enum is the union of
-# every engine's tables; the runtime check below rejects the ones this project
-# does not have, and says why.
 # The highest entry id this server will create. RPG Maker's own editor tops out
 # far below this; the point is to refuse an id that would pad a database array
 # with hundreds of thousands of nil slots.
@@ -86,6 +83,14 @@ MAX_ROWS = 500
 
 TABLE_LIST = ", ".join(ALL_DATABASE_TABLES)
 
+# The two table lists the schemas below advertise.
+#
+# Both are unions across engines, because a tool schema is built before any
+# project is open: the runtime check in `_table_arg` rejects the tables this
+# particular project does not have, and says why. An enum is still the only
+# place a caller can learn what a tool takes before calling it, so each list
+# is narrowed to what its own tool will really accept.
+
 # The operations db_edit accepts, and what each one reads. One table, so the
 # schema that advertises them, the reader that enforces them and the dispatcher
 # that runs them cannot drift apart -- the comment here claimed that while
@@ -102,39 +107,62 @@ DB_OP_ARGS = {
 
 
 
-# Everything db_edit will actually change. map_infos is left out
-# deliberately: the tree and the map files have to move together, and
-# only map_edit does both, so advertising it here would offer an edit
-# that is always refused.
-# Every table db_get will read. Scripts is left out rather than advertised
-# and then refused at runtime: an enum is the only place a caller can learn
-# what a tool takes before calling it, and db_edit already narrows its own.
+# Every table db_get will read. Scripts is left out rather than advertised and
+# then refused at runtime: it is the script editor, not an id-indexed table,
+# and the scripts tool is what reads it.
 READABLE_DATABASE_TABLES = [t for t in ALL_TABLE_KEYS if t != "scripts"]
 
+# Everything db_edit will actually change. map_infos is left out deliberately:
+# the tree and the map files have to move together and only map_edit does
+# both, so advertising it here would offer an edit that is always refused.
+#
+# This paragraph used to sit above the readable list, where it read as a
+# description of that one -- which is how a comment goes wrong without
+# anything being wrong with the code.
 EDITABLE_DATABASE_TABLES = [t for t in ALL_DATABASE_TABLES
                             if t != "map_infos"]
 
 
-def _table_arg(ctx: Context, args: dict[str, Any]) -> str:
+def _table_arg(ctx: Context, args: dict[str, Any],
+               allow_single: bool = False) -> str:
+    """The `table` argument, refused if the calling tool cannot act on it.
+
+    ``allow_single`` is for db_get, which legitimately reads a one-object file
+    like System while every other caller here needs an id-indexed table.
+
+    That one difference is why db_get used to carry its own copy of these
+    refusals, and the copy had drifted into being worse: it named the fifteen
+    tables the project does have and said nothing about *why* the asked-for
+    one was missing, so `db_get table="areas"` on a VX Ace project answered a
+    question the caller had not asked, while `db_list table="areas"` explained
+    that VX Ace replaced encounter areas with map regions and said to paint
+    region ids on tile layer 3. Same question, same project, and only one of
+    the two answers was usable.
+    """
     table = need_str(args, "table")
     entry = ctx.project.data_files.get(table)
     if entry is None:
         if table in ALL_TABLE_KEYS:
+            # A table this *engine* does not have, which is a different fact
+            # from a name nobody recognises -- and the only one of the two a
+            # caller can do something about.
             raise ToolError(
                 "%s has no %s table. %s"
                 % (ctx.project.profile.label, table,
                    ctx.project.profile.absence_hint(table)))
         raise ToolError("unknown table %r; this project has %s"
                         % (table, ", ".join(sorted(ctx.project.data_files))))
+    if entry.container == SCRIPTS:
+        # Named apart from the generic one-object case: raw_data refuses the
+        # scripts table outright, so offering raw_data as the remedy here
+        # would be a remedy that cannot work.
+        raise ToolError(
+            "%s is the script editor, not an id-indexed table. Use the "
+            "scripts tool, which inflates and decodes a slot body for you."
+            % table)
+    if entry.container == SINGLE and allow_single:
+        return table
     if entry.container not in (ARRAY, HASH):
-        # One remedy each, because the two are not interchangeable: raw_data
-        # refuses the scripts table outright, so offering it for `scripts` was
-        # a remedy that cannot work.
-        if entry.container == SCRIPTS:
-            raise ToolError(
-                "%s is the script editor, not an id-indexed table. Use the "
-                "scripts tool, which inflates and compresses a slot body for "
-                "you." % table)
         raise ToolError(
             "%s is one object, not an id-indexed table. Read a field of it "
             "with raw_data, or the whole thing with db_get." % table)
@@ -254,16 +282,7 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 )
 def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     """Whole entries, every field as stored. Reads only."""
-    table = need_str(args, "table")
-    if table not in ctx.project.data_files:
-        raise ToolError("this %s project has no %r table; it has %s"
-                        % (ctx.project.profile.label, table,
-                           ", ".join(sorted(ctx.project.data_files))))
-    if ctx.project.data_files[table].container == SCRIPTS:
-        raise ToolError(
-            "the scripts table holds zlib-compressed Ruby, which this tool "
-            "would hand back as base64. Use the scripts tool, which inflates "
-            "and decodes it.")
+    table = _table_arg(ctx, args, allow_single=True)
     refresh = opt_bool(args, "refresh")
     mode = one_of(args, "tables", list(TABLE_MODES), TABLE_MODES[0])
 
@@ -348,7 +367,11 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     '{"op": "create", "clone_from": 1, "patch": {...}} -- cloning an existing '
     "entry guarantees the new one carries exactly the fields this project's "
     "editor expects. Every write backs the file up first; pass dry_run to "
-    "preview.",
+    "preview. A delete reports up to %d of the event commands that still "
+    "point at the entry, with \"references_truncated\" when there are more "
+    "and \"references_scan_stopped\" when the scan gave up before finishing "
+    "-- that last one means the zero is not an answer."
+    % REFERENCE_PREVIEW,
     schema({
         "table": prop(STR, "Which table to edit. map_infos is not editable "
                            "here: a tree entry and its Map### file have to "
@@ -416,8 +439,38 @@ def db_edit(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         summary = "; ".join("%s %s" % (item["op"], item["id"]) for item in applied)
         write = write_landed.save(filename, dry_run=dry_run, tool="db_edit",
                                   summary=summary)
-    return {"table": table, "applied": applied, "warnings": warnings,
-            "write": write}
+    return _edit_reply(table, applied, warnings, write, dry_run)
+
+
+def _edit_reply(table: str, applied: list[dict[str, Any]],
+                warnings: list[str], write: dict[str, Any],
+                dry_run: bool) -> dict[str, Any]:
+    """One db_edit reply, phrased for what actually happened.
+
+    A preview used to answer `applied: [{"op": "update", "id": 1, "changes":
+    [...]}]`, every word of it past tense, with the one field saying otherwise
+    -- `write.dry_run` -- nested a level down. A model reading the op rows
+    concluded the change had landed and did not retry it. So the mode is said
+    at the top level, and the two mode-dependent names follow the `would_*`
+    convention this file already uses for `would_write` and `would_delete`.
+
+    The descriptions are identical either way, which is the point: the preview
+    and the act have to be the same sentence, or the preview is not one.
+    """
+    if not dry_run:
+        return {"table": table, "applied": applied, "warnings": warnings,
+                "write": write}
+    return {
+        "table": table,
+        # First, so it is read before the rows are.
+        "dry_run": True,
+        "would_apply": [
+            {("would_change" if key == "changes" else key): value
+             for key, value in row.items()}
+            for row in applied],
+        "warnings": warnings,
+        "write": write,
+    }
 
 
 def _apply_db_ops(ctx: Context, table: str,
@@ -588,21 +641,16 @@ def _op_delete(request: _DbRequest, raw_op: dict[str, Any],
         raise ToolError("%s has no entry %d" % (table, entry_id))
 
     scanned = table in REFERENCE_RULES
-    # One past the preview, so a full page can be told from a page that
-    # happens to be exactly full: `len(references)` was reported as the total,
-    # so an entry referenced three hundred times was said to be referenced
-    # twenty-five times, and a caller could believe it had seen them all.
-    #
-    # The scan is bounded, and a scan that stopped early is a third state
-    # beside "found some" and "found none": the walk is only self-limiting
-    # when there are hits to find, so "nothing points at it" is exactly the
-    # answer that costs a full traversal. See `find_references`.
-    scan = CommandBudget()
-    found = (find_references(ctx.project, table, entry_id, scan,
-                             limit=REFERENCE_PREVIEW + 1) if scanned else [])
-    incomplete = scan.note("a delete's reference scan") if scanned else None
-    more_than_shown = len(found) > REFERENCE_PREVIEW
-    references = found[:REFERENCE_PREVIEW]
+    # A scan that stopped early is a third state beside "found some" and
+    # "found none": the walk returns early only when it finds hits, so
+    # "nothing points at it" is exactly the answer that costs a full
+    # traversal. `reference_preview` carries all three facts, because each of
+    # them used to be derived here and again in map_edit.
+    preview = (reference_preview(ctx.project, table, entry_id,
+                                 "a delete's reference scan") if scanned
+               else ReferencePreview([], False, None))
+    references, more_than_shown = preview.rows, preview.truncated
+    incomplete = preview.incomplete
     if kind == ARRAY:
         # Keep the slot, so every later id keeps its position. That is what the
         # editor does when you clear an entry.
@@ -612,10 +660,8 @@ def _op_delete(request: _DbRequest, raw_op: dict[str, Any],
 
     if references:
         request.warnings.append(
-            "entry %d is still referenced by %s%d event command(s); those "
-            "commands now point at nothing"
-            % (entry_id, "at least " if more_than_shown else "",
-               len(references)))
+            "entry %d is still referenced by %s event command(s); those "
+            "commands now point at nothing" % (entry_id, preview.counted))
     elif not scanned:
         # A zero here would read as "nothing points at it", when in fact
         # nothing looked: only some tables have command parameter rules.

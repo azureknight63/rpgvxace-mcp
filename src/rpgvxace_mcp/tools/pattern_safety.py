@@ -269,18 +269,55 @@ _CATEGORY_SAMPLES = {
 
 # What the child runs. Kept as one string rather than a module, so there is no
 # import path to get wrong and nothing of this project in the child.
+#
+# The pattern and its subjects arrive on stdin, one base64 line each, because
+# they do not fit on a command line. Windows caps a whole command line at
+# 32767 characters; base64 of ten 2000-character subjects is about 27000 for
+# ASCII -- within three thousand of it -- and three times that for Japanese,
+# where a character is three UTF-8 bytes. Measured: a 40-character kana class
+# produced an 83101 character command line, so `subprocess.run` raised OSError
+# and `measure_cost` did the right thing with the wrong question, refusing an
+# ordinary Japanese search as unsafe. RPG Maker is Japanese software; that is
+# not an edge case. stdin has no such limit.
 _CHILD = (
     "import base64, re, sys\n"
-    "pattern = base64.b64decode(sys.argv[1]).decode('utf-8')\n"
+    "lines = sys.stdin.read().split()\n"
+    "pattern = base64.b64decode(lines[0]).decode('utf-8')\n"
     "compiled = re.compile(pattern, re.IGNORECASE)\n"
-    "for encoded in sys.argv[2:]:\n"
+    "for encoded in lines[1:]:\n"
     "    compiled.search(base64.b64decode(encoded).decode('utf-8'))\n"
     "print('ok')\n")
 
-# Verdicts already measured in this process, by pattern. A model searching for
+# Patterns already measured and passed, in this process. A model searching for
 # the same thing across several scopes would otherwise pay for a child each
-# time, and the answer cannot change: it is a property of the pattern.
-_MEASURED: "dict[str, str | None]" = {}
+# time.
+#
+# Passes only, deliberately. A verdict here is a *timing* observation, and the
+# two refusals this can produce -- a timeout and a failure to spawn -- are both
+# things a loaded machine causes once and not again; remembering one refused a
+# legitimate pattern for the life of the server. A pass is safe to remember in
+# the other direction: a pattern that finished in milliseconds against subjects
+# built from its own characters will do so again, and `search`'s deadline
+# bounds it in use regardless.
+# A set, not a map of pattern to verdict, so that "passes only" is a fact
+# about the type rather than a rule a future edit can break: `measure_cost`
+# returns on any hit here, so a refusal that ever got stored would be served
+# as a pass. There is nowhere to put one.
+_PASSED: "dict[str, None]" = {}
+
+# And a ceiling, since a caller can supply endlessly many distinct patterns.
+# A dict rather than a set only for the insertion order, which makes eviction
+# oldest-first; the values are never read.
+MAX_MEASURED_CACHED = 512
+
+
+def _remember(pattern: str, verdict: "str | None") -> None:
+    """Remember a pass, within the ceiling. Refusals are re-measured."""
+    if verdict is not None:
+        return
+    while len(_PASSED) >= MAX_MEASURED_CACHED:
+        del _PASSED[next(iter(_PASSED))]
+    _PASSED[pattern] = None
 
 
 def check_pattern(pattern: str) -> None:
@@ -384,23 +421,23 @@ def measure_cost(pattern: str) -> None:
     is not allowed, or under an OOM killer -- which is the direction that ends
     in a wedged server. The one carve-out is a compile error, which the
     caller's own `re.compile` reports better.
+
+    A pass is remembered and a refusal is not; see `_PASSED` for why.
     """
     import base64
 
-    if pattern in _MEASURED:
-        verdict = _MEASURED[pattern]
-        if verdict is not None:
-            raise PatternTooCostly(verdict)
+    if pattern in _PASSED:
         return
 
     encode = (lambda text:
               base64.b64encode(text.encode("utf-8")).decode("ascii"))
-    command = [sys.executable, "-c", _CHILD, encode(pattern)]
-    command += [encode(subject) for subject in _subjects(pattern)]
+    command = [sys.executable, "-c", _CHILD]
+    payload = "\n".join([encode(pattern)]
+                        + [encode(subject) for subject in _subjects(pattern)])
     verdict: "str | None" = None
     try:
         done = subprocess.run(command, capture_output=True, text=True,
-                              timeout=PREFLIGHT_SECONDS)
+                              timeout=PREFLIGHT_SECONDS, input=payload)
         if done.returncode != 0 and "error" not in (done.stderr or "").lower():
             # A child that died for a reason other than a bad pattern: killed
             # by a signal, out of memory, or a `sys.executable` that is not an
@@ -438,7 +475,7 @@ def measure_cost(pattern: str) -> None:
             "is not something to risk on an unchecked guess. Search for a "
             "plain substring by leaving regex off." % exc)
 
-    _MEASURED[pattern] = verdict
+    _remember(pattern, verdict)
     if verdict is not None:
         raise PatternTooCostly(verdict)
 
@@ -462,18 +499,24 @@ def check_shape(pattern: str) -> None:
         # into a ToolError.
         return
     except Exception as exc:
-        # Anything else means this gate could not run. Refused rather than
-        # skipped: failing open here would quietly remove the cheap half of
-        # the protection the moment the standard library raised something
-        # unanticipated, and the caller would never know it had.
-        raise PatternTooCostly(
-            "this server could not analyse that pattern (%s: %s), so it will "
-            "not run it either. Search for a plain substring by leaving regex "
-            "off." % (type(exc).__name__, exc))
-    # _flatten raises for the shapes that are refused outright rather than
-    # weighed, so its own message survives instead of the budget's.
-    atoms = _flatten(parsed)
-    worst, span = _worst_run(atoms)
+        raise PatternTooCostly(_unanalysable(exc))
+    try:
+        # _flatten raises PatternTooCostly for the shapes that are refused
+        # outright rather than weighed, so its own message survives instead of
+        # the budget's -- hence the re-raise below.
+        #
+        # Anything *else* is a refusal too, and this used to run outside the
+        # guard: both of these walk a caller-shaped tree recursively, which is
+        # precisely where an unanticipated exception comes from, and the
+        # promise above stopped applying one line before the code that needed
+        # it. A RecursionError here reached the caller as an internal error
+        # rather than as this gate declining to run.
+        atoms = _flatten(parsed)
+        worst, span = _worst_run(atoms)
+    except PatternTooCostly:
+        raise
+    except Exception as exc:
+        raise PatternTooCostly(_unanalysable(exc))
     if worst <= MAX_BACKTRACK_PATHS:
         return
 
@@ -503,6 +546,19 @@ def check_shape(pattern: str) -> None:
         "so one that backtracks like this wedges this server until it is "
         "killed, rather than merely running slowly. You can also search for a "
         "plain substring by leaving regex off." % found)
+
+
+def _unanalysable(exc: Exception) -> str:
+    """What to say when this gate could not run at all.
+
+    Said in one place because it is raised from two, and the reason is the
+    same both times: failing open would quietly remove the cheap half of the
+    protection the moment the standard library raised something unanticipated,
+    and the caller would never know it had.
+    """
+    return ("this server could not analyse that pattern (%s: %s), so it will "
+            "not run it either. Search for a plain substring by leaving regex "
+            "off." % (type(exc).__name__, exc))
 
 
 def _approx(paths: int) -> str:

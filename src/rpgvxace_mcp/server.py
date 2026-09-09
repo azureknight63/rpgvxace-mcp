@@ -29,6 +29,11 @@ from .tools import (  # noqa: F401
 # Imported for the side effect: each module's @tool decorators register its
 # tools in REGISTRY, which all_tools() then reads. Removing these as unused
 # imports empties the tool list.
+# `echo` quotes a caller's own string back in an error message, bounded by the
+# tools layer's MAX_ECHO_CHARS. Imported rather than reimplemented: this file
+# had its own copy under the same name and the two had drifted -- only the copy
+# here sliced a string before repr'ing it, which is the half that matters, and
+# the copy every tool calls is the one handed raw arguments.
 from .tools.registry import (
     Context,
     echo,
@@ -66,12 +71,6 @@ MAX_RESPONSE_CHARS = 4 * 1024 * 1024
 # both set to the same number, a result that just fit came back as "this
 # server is broken" instead of the recoverable "narrow your request".
 MAX_TOOL_RESULT_CHARS = MAX_RESPONSE_CHARS // 2
-
-# How much of a caller's own string is quoted back in an error message -- and
-# the function that applies it. Both come from the tools layer, because this
-# file had its own copy of each under the same names, and the two had drifted:
-# only the copy here sliced a string before repr'ing it, which is the half that
-# matters, and the copy every tool calls is the one handed raw arguments.
 
 # Methods a client may call before the initialize handshake. Everything else
 # waits, so protocol version negotiation cannot be skipped.

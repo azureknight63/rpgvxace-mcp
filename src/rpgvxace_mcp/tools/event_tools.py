@@ -341,7 +341,7 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     if unreadable:
         return {"map_id": map_id, "events": [], "events_note": unreadable}
     if events is None:
-        return {"map_id": map_id, "events": [], "total": 0}
+        return {"map_id": map_id, "events": [], "matching_events": 0}
 
     wanted = set(int_list(args, "event_ids", MAX_EVENT_IDS_PER_CALL,
                           minimum=1, maximum=MAX_EVENT_ID))
@@ -376,7 +376,13 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             "pages": pages,
         })
     result: dict[str, Any] = {
-        "map_id": map_id, "events": out, "total": len(out),
+        "map_id": map_id, "events": out,
+        # Named for what it counted, as db_list's `matching_entries` and
+        # map_list's `matching_maps` already are: `event_ids`, `name_contains`
+        # and `page` all filter this list, and "total" read as the number of
+        # events on the map -- so a filtered read looked like the whole of a
+        # much emptier map.
+        "matching_events": len(out),
         "note": "VX runs the LAST page whose conditions are satisfied, so a "
                 "later page with no conditions hides the pages before it."}
     if only_page is not None and not any(e["pages"] for e in out):
@@ -1088,7 +1094,9 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         "engine": ctx.project.profile.label,
         "layouts_are_this_engines": modelled,
         "commands": rows,
-        "total": len(rows),
+        # `search` filters these, so this is the number that matched and not
+        # the size of the table. Same rename, same reason as event_get above.
+        "matching_commands": len(rows),
         **({"engine_warning": borrowed} if borrowed else {}),
         "authoring": DSL_HELP,
         "indent_rule": "Commands inside a branch or loop sit one indent deeper. "

@@ -156,6 +156,13 @@ NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
 BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
 INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
 AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
+COUNTS = ("tests/test_tools.py::TestACountIsNamedForWhatItCounted::")
+DRYRUN = ("tests/test_tools.py::TestADryRunDoesNotReadAsDone::")
+SCOPECLAIM = ("tests/test_tools.py::TestAScopeIsClaimedOnlyOnceRead::")
+SUMMARY = ("tests/test_tools.py::TestMapGetBoundsItsEventSummary::")
+CHILD = ("tests/test_tools.py::TestTheMeasurementReachesItsChild::")
+REMEMBERS = ("tests/test_tools.py::TestWhatTheMeasurementRemembers::")
+SHAPECLOSED = ("tests/test_tools.py::TestTheShapeGateFailsClosedThroughout::")
 NAMES = ("tests/test_tools.py::TestEveryNameFromJsonIsChecked::")
 HIDDEN = ("tests/test_tools.py::TestAnInventedFieldCannotHideInAContainer::")
 WRITEPATH = ("tests/test_tools.py::TestEveryWalkOnAWritePathIsBounded::")
@@ -1046,9 +1053,16 @@ GUARDS = [
         "an empty command list is refused", EVENT_TOOLS,
         '    entries = opt_list(raw_op, "commands")\n    if not entries:',
         '    entries = opt_list(raw_op, "commands")\n    if False:',
-        [SHAPE + "test_an_empty_command_list_is_refused"],
-        "set_commands with no commands leaves the page holding a lone "
-        "blank command and reports it as a rewrite",
+        # Every op that takes `commands`, from both rounds that registered a
+        # guard on this line. Two guards on one anchor is invisible to
+        # `check_anchors`, which counts occurrences in the file rather than
+        # guards pointing at them -- so the test table in
+        # tests/test_prove_guards.py checks for it instead.
+        [SHAPE + "test_an_empty_command_list_is_refused",
+         EMPTYC + "test_set_page_refuses_it",
+         EMPTYC + "test_add_page_refuses_it",
+         EMPTYC + "test_the_page_still_holds_what_it_did"],
+        'commands: [] empties the page it was meant to rewrite and reports "replaced the command list" -- a deletion wearing the name of an edit',
     ),
     Guard(
         "findings stop being collected at the ceiling", ANALYSIS,
@@ -1071,11 +1085,18 @@ GUARDS = [
         'an inapplicable argument is refused', REGISTRY,
         '    inert = sorted(key for key in args if key not in allowed)',
         '    inert = []',
+        # Every test that turns on this one line, from both rounds that
+        # registered a guard against it: that the gate refuses a dropped
+        # argument, and that every op-selecting tool is wired into the gate.
+        # A guard is identified by the line it reverts, so two guards on one
+        # line is one revert reported twice.
         [OPARG + "test_event_update_will_not_quietly_drop_commands",
          OPARG + "test_db_delete_will_not_quietly_drop_a_patch",
          OPARG + "test_map_delete_will_not_quietly_drop_anything",
-         OPARG + "test_map_update_will_not_quietly_drop_a_reparent"],
-        'an argument the op does not read is dropped, and the reply reports the same success as if it had been applied',
+         OPARG + "test_map_update_will_not_quietly_drop_a_reparent",
+         GATES + "test_every_op_selecting_tool_is_in_the_table_list",
+         GATED + "test_map_tiles_refuses_the_other_ops_arguments"],
+        'an argument the op does not read is dropped and the reply reports the same success as if it had been applied -- and the gate was declared for every op-selecting tool while four of them were not wired into it',
     ),
     Guard(
         'a nested patch cannot invent a field', CONVERT,
@@ -1138,15 +1159,6 @@ GUARDS = [
         'every script body comes back as base64 of compressed Ruby, which no caller can use and which crowds out the rest of the response',
     ),
     Guard(
-        'an empty command list is refused', EVENT_TOOLS,
-        '    entries = opt_list(raw_op, "commands")\n    if not entries:',
-        '    entries = opt_list(raw_op, "commands")\n    if False:',
-        [EMPTYC + "test_set_page_refuses_it",
-         EMPTYC + "test_add_page_refuses_it",
-         EMPTYC + "test_the_page_still_holds_what_it_did"],
-        'commands: [] empties the page it was meant to rewrite and reports "replaced the command list"',
-    ),
-    Guard(
         'damaged pages are refused', EVENT_TOOLS,
         '        if not isinstance(pages, list):',
         '        if False:',
@@ -1154,11 +1166,20 @@ GUARDS = [
         'add_page reaches .append and delete_page reaches len() on whatever the file holds, so a damaged map crashes the call instead of being reported',
     ),
     Guard(
-        'a reference count says when it is a floor', DB_TOOLS,
-        '    more_than_shown = len(found) > REFERENCE_PREVIEW',
-        '    more_than_shown = False',
-        [REFCNT + "test_a_count_past_the_preview_says_at_least"],
-        'an entry referenced three hundred times is reported as referenced twenty-five times, and the caller believes it has seen them all',
+        'a reference count says when it is a floor', ANALYSIS,
+        '''    return ReferencePreview(found[:REFERENCE_PREVIEW],
+                            len(found) > REFERENCE_PREVIEW,
+                            budget.note(what))''',
+        '''    return ReferencePreview(found[:REFERENCE_PREVIEW],
+                            False,
+                            budget.note(what))''',
+        # Both callers' tests. This was two guards on the same line written
+        # twice in two files, which is why the line was worth merging: the
+        # "ask for one past the limit" half had been added to db_edit and not
+        # to map_edit, so the two guards were guarding code that had drifted.
+        [REFCNT + "test_a_count_past_the_preview_says_at_least",
+         MAPREFS + "test_a_count_past_the_preview_says_at_least"],
+        'a thing referenced three hundred times is reported as referenced twenty-five times, so a caller that fixes those twenty-five believes it is free -- and this used to be two copies of the line, only one of which asked for the extra hit that makes the floor detectable',
     ),
     Guard(
         'ids are refused where they do nothing', DB_TOOLS,
@@ -1277,26 +1298,11 @@ GUARDS = [
         'a caller asking whether one tile is used reads a twelve-row list, does not find it, and concludes it is unused',
     ),
     Guard(
-        "a map's reference count says when it is a floor", MAP_TOOLS,
-        '    more_than_shown = len(found) > REFERENCE_PREVIEW',
-        '    more_than_shown = False',
-        [MAPREFS + "test_a_count_past_the_preview_says_at_least"],
-        'a map referenced three hundred times is reported as referenced twenty-five times, so a caller that fixes those believes it is free',
-    ),
-    Guard(
         'a lookaround is refused by name', SAFETY,
         '            raise PatternTooCostly(\n                "that pattern uses a lookahead, lookbehind or conditional "',
         '            atoms.append(_Atom(MAX_BACKTRACK_PATHS + 1, _ANYTHING))\n            _unused = (\n                "that pattern uses a lookahead, lookbehind or conditional "',
         [LOOKAROUND + "test_a_lookaround_names_itself"],
         "a lookaround is refused with the budget's message, which describes a repeated group or a chain -- neither of which the pattern has, so the caller rephrases forever instead of dropping the lookaround",
-    ),
-    Guard(
-        'every op-selecting tool has a table', REGISTRY,
-        '    inert = sorted(key for key in args if key not in allowed)',
-        '    inert = []',
-        [GATES + "test_every_op_selecting_tool_is_in_the_table_list",
-         GATED + "test_map_tiles_refuses_the_other_ops_arguments"],
-        'the gate is declared and applied to some tools and not others, which is how four op-selecting tools kept dropping arguments after it existed',
     ),
     Guard(
         'the measurement bounds the work', SAFETY,
@@ -1559,6 +1565,102 @@ GUARDS = [
         [HIDDEN + "test_a_typo_inside_a_nested_list_is_refused"],
         'the list branch recursed only into elements that were themselves objects, so a list of lists went through unexamined',
     ),
+    Guard(
+        'the payload does not ride on a command line', SAFETY,
+        """                              timeout=PREFLIGHT_SECONDS, input=payload)""",
+        """                              timeout=PREFLIGHT_SECONDS)""",
+        [CHILD + "test_the_subjects_travel_on_stdin",
+         CHILD + "test_a_wide_kana_class_is_measured_not_refused"],
+        'base64 of ten 2000-character subjects is 27000 characters for ASCII and 83000 for Japanese, against a 32767 Windows limit, so every Japanese pattern with a moderate character class was refused as unsafe on a question the check never got to ask',
+    ),
+    Guard(
+        'a timing refusal is not remembered', SAFETY,
+        """    if verdict is not None:
+        return
+    while len(_PASSED) >= MAX_MEASURED_CACHED:""",
+        """    while len(_PASSED) >= MAX_MEASURED_CACHED:""",
+        [REMEMBERS + "test_a_refusal_is_not_remembered"],
+        'the only refusals this can produce are a timeout and a failure to spawn, both of which a loaded machine causes once and not again -- remembered, one such moment refuses a legitimate pattern for the life of the server',
+    ),
+    Guard(
+        'the measured cache has a ceiling', SAFETY,
+        """    while len(_PASSED) >= MAX_MEASURED_CACHED:
+        del _PASSED[next(iter(_PASSED))]""",
+        """    if False:
+        del _PASSED[next(iter(_PASSED))]""",
+        [REMEMBERS + "test_the_cache_has_a_ceiling"],
+        'a caller can supply endlessly many distinct patterns, and every one that passed was kept for the life of the process',
+    ),
+    Guard(
+        'the shape gate fails closed over its tree walk too', SAFETY,
+        """        atoms = _flatten(parsed)
+        worst, span = _worst_run(atoms)
+    except PatternTooCostly:
+        raise
+    except Exception as exc:
+        raise PatternTooCostly(_unanalysable(exc))""",
+        """        atoms = _flatten(parsed)
+        worst, span = _worst_run(atoms)
+    except PatternTooCostly:
+        raise""",
+        [SHAPECLOSED + "test_a_failure_flattening_the_tree_is_a_refusal",
+         SHAPECLOSED + "test_a_recursion_error_is_a_refusal"],
+        'the guard covered the parse and stopped one line before the two recursive walks over a caller-shaped tree, so a RecursionError reached the caller as an internal error rather than as this gate declining to run',
+    ),
+    Guard(
+        'a filtered count is not called a total', EVENT_TOOLS,
+        """        "matching_events": len(out),""",
+        """        "total": len(out),""",
+        [COUNTS + "test_a_filtered_event_read_names_its_count",
+         COUNTS + "test_the_count_follows_the_filter"],
+        '"total" on a reply filtered by event_ids, name_contains or page reads as the number of events on the map, so a filtered read looks like the whole of a much emptier map -- the rename db_list and map_list already carry',
+    ),
+    Guard(
+        'a dry run is not phrased as a confirmation', DB_TOOLS,
+        """    if not dry_run:
+        return {"table": table, "applied": applied, "warnings": warnings,
+                "write": write}""",
+        """    if True:
+        return {"table": table, "applied": applied, "warnings": warnings,
+                "write": write}""",
+        [DRYRUN + "test_a_preview_does_not_claim_to_have_applied_anything",
+         DRYRUN + "test_a_previewed_change_is_named_in_the_conditional"],
+        'a preview answered `applied: [{"changes": [...]}]`, every word past tense, with the one field saying otherwise nested a level down -- so a model read the op rows, concluded the change had landed, and did not retry it',
+    ),
+    Guard(
+        'the events scope is claimed only once it reads one', SEARCH_TOOLS,
+        """        if not read_something:
+            read_something = True
+            found.searching("events")""",
+        """        if False:
+            read_something = True
+            found.searching("events")""",
+        # Both directions. Reverting the guard stops the scope being claimed
+        # at all, which satisfies the negative test on its own -- so the test
+        # that a readable project *does* claim it is the one that decides.
+        [SCOPECLAIM + "test_an_unreadable_project_does_not_claim_the_events_scope",
+         SCOPECLAIM + "test_a_readable_project_still_claims_it"],
+        'iter_maps and _safe_entries both swallow a file that will not load, so a project whose maps, common events and troops are all unreadable yielded nothing and search still reported the scope as read -- the exact thing `searching` exists to prevent',
+    ),
+    Guard(
+        'a scope that read nothing says so', SEARCH_TOOLS,
+        """    if not read_something:
+        found.nothing_read("events", (""",
+        """    if False:
+        found.nothing_read("events", (""",
+        [SCOPECLAIM + "test_it_says_that_it_read_nothing_rather_than_going_quiet"],
+        'not claiming the scope is only half of it: the reply then just omits it, and a caller has to notice an absence rather than read a sentence',
+    ),
+    Guard(
+        'the event summary has a ceiling', MAP_TOOLS,
+        """        if rows >= MAX_EVENT_SUMMARY_ROWS:
+            return out, True""",
+        """        if False:
+            return out, True""",
+        [SUMMARY + "test_the_summary_stops_at_its_ceiling",
+         SUMMARY + "test_a_stopped_summary_says_so"],
+        'events times pages, both out of the file: the shared-object map is fifty events of fifty pages all one object, so 7 KB produced 2500 rows and nothing said why',
+    ),
 ]
 
 
@@ -1585,8 +1687,22 @@ def run_tests(tree: Path, tests: list[str]) -> subprocess.CompletedProcess | Non
         return None
 
 
-def prove(guard: Guard) -> tuple[bool, str]:
-    """Revert one guard in a scratch copy and require its tests to fail."""
+def prove(guard: Guard, run=None) -> tuple[bool, str]:
+    """Revert one guard in a scratch copy and require its tests to fail.
+
+    Failing with the guard reverted is only half of it: the tests have to pass
+    with the guard in place, or their failure says nothing about the guard.
+    This checked only the first half, so a test broken for an unrelated reason
+    made its guard report PROVEN -- which is precisely the false assurance
+    this whole script exists to prevent, in the script itself. Found when
+    `TestMapReferenceCountsDoNotUnderstate` broke on a constant that had moved
+    and its guard went on reporting PROVEN.
+
+    The baseline runs only when the reverted run failed, so the cost lands on
+    the guards that would otherwise be believed. ``run`` is injected by the
+    tests, which drive every verdict without copying a tree.
+    """
+    run = run or run_tests
     with tempfile.TemporaryDirectory(prefix="prove-guard-") as tmp:
         tree = Path(tmp) / "tree"
         shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns(
@@ -1604,16 +1720,38 @@ def prove(guard: Guard) -> tuple[bool, str]:
         target.write_text(source.replace(guard.present, guard.reverted, 1),
                           encoding="utf-8")
 
-        result = run_tests(tree, guard.tests)
+        result = run(tree, guard.tests)
+        if result is not None and result.returncode == 0:
+            # No baseline needed: tests that pass without the guard are
+            # checking something else whether or not they also pass with it.
+            return False, ("VACUOUS: the tests still pass with the guard "
+                           "reverted, so they are checking something else")
+
+        # The tests failed or hung. Put the guard back and make sure that was
+        # the guard's absence talking.
+        target.write_text(source, encoding="utf-8")
+        baseline = run(tree, guard.tests)
+        if baseline is None:
+            return False, ("BROKEN: these tests hang with the guard in place "
+                           "too, so their behaviour without it proves nothing. "
+                           "Fix the tests, then prove the guard.")
+        if baseline.returncode != 0:
+            return False, ("BROKEN: these tests fail with the guard in place "
+                           "too, so their failure without it proves nothing "
+                           "-- fix the tests first. Baseline said: %s"
+                           % (_first_failure(baseline) or "no detail"))
+
         if result is None:
             return True, ("hung for %ds with the guard reverted, which is the "
                           "failure it prevents" % TEST_TIMEOUT)
-        if result.returncode == 0:
-            return False, ("VACUOUS: the tests still pass with the guard "
-                           "reverted, so they are checking something else")
-        first = [line for line in result.stdout.splitlines()
-                 if line.startswith("E ") or " - " in line]
-        return True, (first[0].strip() if first else "failed as expected")
+        return True, (_first_failure(result) or "failed as expected")
+
+
+def _first_failure(result) -> str:
+    """The most useful line of a failed test run, for the verdict to quote."""
+    lines = [line for line in result.stdout.splitlines()
+             if line.startswith("E ") or " - " in line]
+    return lines[0].strip() if lines else ""
 
 
 def check_anchors(guards: list[Guard]) -> int:

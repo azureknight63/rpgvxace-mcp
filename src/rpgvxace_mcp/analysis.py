@@ -506,6 +506,58 @@ def _referenced_ids(code: Any, params: list[Any]) -> Iterator[tuple[str, int]]:
 REFERENCE_PREVIEW = 25
 
 
+class ReferencePreview:
+    """What still points at a thing about to be deleted, and how sure we are.
+
+    Three facts, because a delete needs all three and two of them used to be
+    derived separately in each caller:
+
+    * ``rows`` -- up to REFERENCE_PREVIEW hits, enough to see the shape of the
+      problem without turning a delete into a report.
+    * ``truncated`` -- whether there are more than those. Found by asking for
+      one past the limit, which db_edit did and map_edit did not, so a map
+      referenced three hundred times was reported as referenced twenty-five
+      and a caller who fixed those twenty-five believed the map was free.
+    * ``incomplete`` -- whether the walk ran out before finishing. `None` when
+      it finished. This is the one a caller acts on destructively: an empty
+      ``rows`` from an unfinished scan reads as "nothing points at it".
+    """
+
+    __slots__ = ("rows", "truncated", "incomplete")
+
+    def __init__(self, rows: list[dict[str, Any]], truncated: bool,
+                 incomplete: "str | None"):
+        self.rows = rows
+        self.truncated = truncated
+        self.incomplete = incomplete
+
+    @property
+    def counted(self) -> str:
+        """The count as a phrase, hedged when there are more than shown."""
+        return "%s%d" % ("at least " if self.truncated else "", len(self.rows))
+
+
+def reference_preview(project: Project, table: str, entry_id: int,
+                      what: str) -> ReferencePreview:
+    """Ask what points at ``entry_id``, bounded, with the answer's own limits.
+
+    ``what`` names the scan in the note a stopped walk produces, so the
+    caller's reply says which scan gave up.
+
+    One function because both delete paths need exactly this and each of its
+    steps has been got wrong in one copy and not the other. See
+    `find_references` for why the budget is not optional.
+    """
+    budget = CommandBudget()
+    # One past the preview, so a full page can be told from a page that
+    # happens to be exactly full.
+    found = find_references(project, table, entry_id, budget,
+                            limit=REFERENCE_PREVIEW + 1)
+    return ReferencePreview(found[:REFERENCE_PREVIEW],
+                            len(found) > REFERENCE_PREVIEW,
+                            budget.note(what))
+
+
 def find_references(project: Project, table: str, entry_id: int,
                     budget: CommandBudget,
                     limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
