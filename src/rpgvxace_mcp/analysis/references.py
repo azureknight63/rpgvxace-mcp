@@ -343,26 +343,14 @@ def find_references(project: Project, table: str, entry_id: int,
     Required rather than defaulted because there is no safe default here: a
     caller that forgets gets the unbounded walk back, and this is the one
     walk whose answer a caller acts on destructively.
+
+    The batch form with one id, not a second body. It was both -- the same
+    walk, the same isinstance skip, and the hit row built twice fifty lines
+    apart -- in the module whose own comment warns that "two copies of this
+    walk used to exist and had already drifted apart on whether a
+    non-integer parameter counted as a reference". The early exit is
+    identical: `wanted.discard` empties the set at `limit` and the walk
+    returns on the next command.
     """
-    if table not in REFERENCE_RULES:
-        return []
-    hits: list[dict[str, Any]] = []
-    for location, commands in iter_command_lists(project, None, budget):
-        for index, command in enumerate(commands):
-            if not isinstance(command, RubyObject):
-                continue
-            code = command.get("code", CODE_BLANK)
-            params = _seq(command.get("parameters"))
-            if not any(found == table and value == entry_id
-                       for found, value in _referenced_ids(code, params)):
-                continue
-            located = location.at(index)
-            hits.append({
-                "where": located.describe(),
-                "location": located.as_dict(),
-                "command": command_name(code),
-                "summary": summarize(command, project.codec),
-            })
-            if len(hits) >= limit:
-                return hits
-    return hits
+    return find_references_for(project, table, {entry_id}, budget,
+                               limit)[entry_id]

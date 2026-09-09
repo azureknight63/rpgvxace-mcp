@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from .rubytypes import (
+    ruby_children,
     RubyData,
     RubyExtended,
     RubyHash,
@@ -868,43 +869,36 @@ def _observe(value: Any, fields: dict[str, dict[str, int]], depth: int,
         return
     budget[0] -= 1
 
+    # The *tally* dispatches by kind, because which wrappers carry a class
+    # name and a set of field names is a different question from which hold
+    # other values. The descent below does not: `ruby_children` answers
+    # that, and this was the call site it was extracted to replace --
+    # `project.collect_strings` was converted and this one was not, so the
+    # two walks still disagreed (no `tuple` here, and a RubyString's ivar
+    # record is a container there and was not here).
+    children = ruby_children(value)
+    if children:
+        # The memo comes before the tally, not after: Marshal resolves a
+        # link to the same Python object, so a value reachable by many
+        # paths would otherwise be counted once per path -- which is what
+        # `test_shared_object_is_tallied_once` asks.
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+
     if isinstance(value, RubyObject):
-        if id(value) in seen:
-            return
-        seen.add(id(value))
         _tally(fields, value.cls, value.ivars)
-        for item in value.ivars.values():
-            _observe(item, fields, depth + 1, seen, budget)
-    elif isinstance(value, list):
-        if id(value) in seen:
-            return
-        seen.add(id(value))
-        for item in value:
-            _observe(item, fields, depth + 1, seen, budget)
-    elif isinstance(value, RubyHash):
-        if id(value) in seen:
-            return
-        seen.add(id(value))
-        for key, item in value.pairs:
-            _observe(key, fields, depth + 1, seen, budget)
-            _observe(item, fields, depth + 1, seen, budget)
     elif isinstance(value, RubyStruct):
         _tally(fields, value.cls, value.members)
-        for item in value.members.values():
-            _observe(item, fields, depth + 1, seen, budget)
     elif isinstance(value, (RubyUserMarshal, RubyData)):
         # These name a class but keep their state in one nested value.
         fields.setdefault(value.cls, {})
-        _observe(value.value, fields, depth + 1, seen, budget)
-    elif isinstance(value, (RubyUClass, RubyExtended)):
-        _observe(value.inner, fields, depth + 1, seen, budget)
-    elif isinstance(value, RubyIvars):
-        _observe(value.inner, fields, depth + 1, seen, budget)
-        for item in value.ivars.values():
-            _observe(item, fields, depth + 1, seen, budget)
-    elif isinstance(value, (RubyUserDef, RubySymbol)) and value.ivars:
-        for item in value.ivars.values():
-            _observe(item, fields, depth + 1, seen, budget)
+
+    # The wrapper kinds this used to dispatch on one by one -- RubyUClass,
+    # RubyExtended, RubyIvars, RubyUserDef, RubySymbol -- are all container
+    # kinds `ruby_children` already knows, so the descent is one loop.
+    for item in children:
+        _observe(item, fields, depth + 1, seen, budget)
 
 
 def _tally(fields: dict[str, dict[str, int]], cls: str,

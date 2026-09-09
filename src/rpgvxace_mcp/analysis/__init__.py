@@ -17,7 +17,6 @@ from .walk import (  # noqa: F401
     Location,
     MAX_WALK_STEPS,
     WalkBudget,
-    _brief,
     _db_at,
     _event_at,
     _int,

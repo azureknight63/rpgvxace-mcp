@@ -222,6 +222,7 @@ NAMES = "tests/test_guards_fields.py::TestEveryNameFromJsonIsChecked::"
 HIDDEN = "tests/test_guards_fields.py::TestAnInventedFieldCannotHideInAContainer::"
 WRITEPATH = "tests/test_guards_bounds.py::TestEveryWalkOnAWritePathIsBounded::"
 CEILING = "tests/test_guards_bounds.py::TestNoWalkCollectsPastTheCeiling::"
+CEILWALK = "tests/test_guards_bounds.py::TestTheCeilingStopsTheWalkingToo::"
 SUBJECTS = "tests/test_guards_patterns.py::TestEveryNamedCharacterIsMeasured::"
 SEARCHWORK = "tests/test_guards_bounds.py::TestSearchBoundsItsTotalWork::"
 FAILCLOSED = "tests/test_guards_patterns.py::TestTheMeasurementFailsClosed::"
@@ -427,13 +428,10 @@ GUARDS = [
     # -- C2: engine profiles, schema observation, response safety -------------
     Guard(
         "schema walk identity memo", SCHEMA,
-        """    elif isinstance(value, list):
-        if id(value) in seen:
+        """        if id(value) in seen:
             return
-        seen.add(id(value))
-        for item in value:""",
-        """    elif isinstance(value, list):
-        for item in value:""",
+        seen.add(id(value))""",
+        """        pass""",
         [OBS + "test_link_shared_graph_does_not_explode",
          OBS + "test_shared_object_is_tallied_once"],
         "Marshal links make the loaded value a graph, so a shared subtree is "
@@ -441,25 +439,11 @@ GUARDS = [
     ),
     Guard(
         "schema walk covers wrapper types", SCHEMA,
-        """    elif isinstance(value, RubyStruct):
-        _tally(fields, value.cls, value.members)
-        for item in value.members.values():
-            _observe(item, fields, depth + 1, seen, budget)
-    elif isinstance(value, (RubyUserMarshal, RubyData)):
-        # These name a class but keep their state in one nested value.
-        fields.setdefault(value.cls, {})
-        _observe(value.value, fields, depth + 1, seen, budget)
-    elif isinstance(value, (RubyUClass, RubyExtended)):
-        _observe(value.inner, fields, depth + 1, seen, budget)
-    elif isinstance(value, RubyIvars):
-        _observe(value.inner, fields, depth + 1, seen, budget)
-        for item in value.ivars.values():
-            _observe(item, fields, depth + 1, seen, budget)
-    elif isinstance(value, (RubyUserDef, RubySymbol)) and value.ivars:
-        for item in value.ivars.values():
-            _observe(item, fields, depth + 1, seen, budget)
-""",
-        "",
+        # The five per-wrapper branches this used to name became one loop
+        # over `ruby_children`, which is the function that answers which
+        # kinds hold other values -- so that is what the guard watches.
+        """    children = ruby_children(value)""",
+        """    children = value.ivars.values() if isinstance(value, RubyObject) else []""",
         [OBS + "test_wrapper_types_are_walked",
          OBS + "test_struct_members_are_tallied_under_the_struct"],
         "everything beneath a wrapper is missing from a report the tools "
@@ -1139,10 +1123,14 @@ GUARDS = [
                 break''',
         '''            if False:
                 break''',
-        [BOUND + "test_a_flood_of_findings_stops_at_the_ceiling"],
+        # The *walking*, asked of the budget. `_Findings.add` caps what
+        # is kept, so a test counting findings passes with this line
+        # reverted -- which is how this guard came back VACUOUS once
+        # `validate` began collecting into one collector.
+        [CEILWALK + "test_the_command_walk_stops_visiting_at_the_ceiling"],
         "the ceiling bounds only what is returned, so a page of broken "
-        "jumps builds a finding per command -- tens of thousands of them "
-        "-- in order to report ten",
+        "jumps reads on and charges the walk allowance for a finding per "
+        "command -- tens of thousands of them -- in order to report ten",
     ),
     Guard(
         'an inapplicable argument is refused', REGISTRY,
@@ -1546,28 +1534,11 @@ GUARDS = [
     ),
     Guard(
         'a delete asks what points at it under a budget', REFERENCES,
-        # Both walks: `find_references` answers one id and
-        # `find_references_for` answers a batch in one pass, and each takes
-        # the caller's allowance. Two anchors rather than one, because
-        # either walk left unbounded is the whole defect back.
-        ['''    hits: dict[int, list[dict[str, Any]]] = {i: [] for i in entry_ids}
-    if table not in REFERENCE_RULES or not entry_ids:
-        return hits
-    wanted = set(entry_ids)
-    for location, commands in iter_command_lists(project, None, budget):''',
-         '''    if table not in REFERENCE_RULES:
-        return []
-    hits: list[dict[str, Any]] = []
-    for location, commands in iter_command_lists(project, None, budget):'''],
-        ['''    hits: dict[int, list[dict[str, Any]]] = {i: [] for i in entry_ids}
-    if table not in REFERENCE_RULES or not entry_ids:
-        return hits
-    wanted = set(entry_ids)
-    for location, commands in iter_command_lists(project):''',
-         '''    if table not in REFERENCE_RULES:
-        return []
-    hits: list[dict[str, Any]] = []
-    for location, commands in iter_command_lists(project):'''],
+        # One walk now: `find_references` delegates to the batch form with
+        # a single id, so the two bodies that each had to take the
+        # allowance are one body that does.
+        '''    for location, commands in iter_command_lists(project, None, budget):''',
+        '''    for location, commands in iter_command_lists(project):''',
         [WRITEPATH + "test_deleting_an_entry_bounds_its_reference_scan",
          WRITEPATH + "test_deleting_a_map_bounds_its_reference_scan"],
         'find_references runs on both delete paths and returns early only when it finds hits, so "nothing points at it" is the answer that walks every command in the project -- five million visits from a 7 KB map, and the caller then deletes',
@@ -1610,8 +1581,8 @@ GUARDS = [
                 return findings.items''',
         '''            if False:
                 return findings''',
-        [CEILING + "test_the_page_walk_stops_collecting"],
-        'one event object shared across forty thousand slots produces a finding per slot',
+        [CEILWALK + "test_the_page_walk_stops_visiting_at_the_ceiling"],
+        'one event object shared across forty thousand slots keeps the walk charging for a finding per slot, long after the ceiling has stopped keeping them',
     ),
     Guard(
         'every ivars dict has its names checked', CONVERT,

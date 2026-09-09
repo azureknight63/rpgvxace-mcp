@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from typing import Any, Callable, Iterator
 
-from ..convert import TextCodec, decoded_text
+from ..convert import TextCodec, brief, decoded_text
 from ..rubytypes import _bare_name as bare_name, named
 from ..project import Project
 
@@ -26,18 +26,12 @@ class ToolError(ValueError):
 def echo(value: Any) -> str:
     """Quote a caller's value back at it, without quoting all of it.
 
-    A string is sliced *before* the repr, because the whole point is not to
-    materialise a value that may be megabytes -- and a caller's argument
-    reaches here straight off the wire. This function existed twice, here and
-    in server.py, and only the server's copy did that; the copy every tool
-    calls is the one that gets the raw arguments.
+    `convert.brief` with this layer's own cap. It was a fourth
+    implementation of that job, and `brief`'s docstring claimed the merge
+    that had not happened -- while this copy kept `repr` on a container,
+    which is the half that bounds the result and not the work.
     """
-    if isinstance(value, str) and len(value) > MAX_ECHO_CHARS:
-        return repr(value[:MAX_ECHO_CHARS]) + "... (%d characters)" % len(value)
-    shown = repr(value)
-    if len(shown) > MAX_ECHO_CHARS:
-        shown = shown[:MAX_ECHO_CHARS] + "... (%d characters)" % len(shown)
-    return shown
+    return brief(value, MAX_ECHO_CHARS)
 
 
 def decoded(ctx: "Context", value: Any) -> str:

@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Set as AbstractSet
 from typing import Any, NamedTuple
 
+from ..convert import brief
 from ..commands import (
     AUDIO_COMMAND_KINDS,
     CODE_BLANK,
@@ -51,7 +52,6 @@ from .references import (
 from .walk import (
     Location,
     WalkBudget,
-    _brief,
     _db_at,
     _event_at,
     _int,
@@ -449,7 +449,7 @@ def check_map_tree(project: Project, budget: "WalkBudget | None" = None,
                 ERROR, "bad_map_id",
                 "MapInfos has an entry keyed %s, which is not an id any map "
                 "file can have (they run 1 to %d). Remove that entry in the "
-                "editor." % (_brief(map_id), MAX_MAP_ID), None,
+                "editor." % (brief(map_id), MAX_MAP_ID), None,
                 "MapInfos keys"))
             continue
         if map_id not in on_disk:

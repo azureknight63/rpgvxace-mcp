@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from ..convert import brief, decoded_text
+from ..convert import brief, decoded_text  # noqa: F401
 from ..project import Project, ProjectError
 from ..rubytypes import RubyHash, RubyObject, as_int, as_list
 
@@ -117,17 +117,6 @@ def _event_at(map_id: int, event_id: int, event_name: str, page: int) -> Locatio
 # sites, because the short names read better inside a walk.
 _seq = as_list
 _int = as_int
-
-
-def _brief(value: Any) -> str:
-    """A value quoted into a message, sliced before it is repr'd.
-
-    A wrapper over `convert.brief`, and that is the fix: this capped the
-    result and not the work, so its one caller -- which passes a
-    MapInfos hash key straight out of an untrusted file -- repr'd a
-    crafted key whole and cut it afterwards.
-    """
-    return brief(value)
 
 
 def _text(project: Project, value: Any) -> str:

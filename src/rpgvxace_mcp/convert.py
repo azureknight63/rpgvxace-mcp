@@ -717,16 +717,18 @@ def apply_patch(target: Any, patch: dict[str, Any], codec: TextCodec,
                 "%s currently holds %s; replacing it with %s would produce a "
                 "file the editor rejects. Patch its fields instead, or pass an "
                 "object with a matching \"__class__\"."
-                % (field_path, _brief(existing, codec), _brief(converted, codec))
+                % (field_path, _change_line(existing, codec),
+           _change_line(converted, codec))
             )
         # The replacement's own field names, which nothing checked: the patch's
         # keys are checked by `refuse_unknown_fields` and a nested merge by
         # `_refuse_invented_fields`, and a value carrying `__class__` goes
         # through neither.
         refuse_invented_in_replacement(existing, converted, field_path)
-        before = _brief(existing, codec) if has_field else "<unset>"
+        before = _change_line(existing, codec) if has_field else "<unset>"
         target.set(lookup, converted)
-        changes.append("%s: %s -> %s" % (field_path, before, _brief(converted, codec)))
+        changes.append("%s: %s -> %s" % (field_path, before,
+                          _change_line(converted, codec)))
     return changes
 
 
@@ -1005,14 +1007,37 @@ def normalize_strings(value: Any, codec: TextCodec, depth: int = 0) -> Any:
     return value
 
 
-def _brief(value: Any, codec: TextCodec) -> str:
-    """A short, log-friendly rendering of a value."""
+# How much of a value one change line shows. Shorter than MAX_TEXT_CHARS
+# because a change line is a phrase inside a sentence, and `apply_patch`
+# builds one per changed field.
+MAX_CHANGE_LINE_CHARS = 40
+
+
+def _change_line(value: Any, codec: TextCodec) -> str:
+    """One value as it appears in a change line: "before -> after".
+
+    Named for where it goes, because it used to be a second `_brief` in a
+    file that has one -- same private name, different arity. And it had the
+    defect `brief`'s docstring says the consolidation fixed: it decoded the
+    *whole* string before cutting it to forty characters, and its `repr`
+    fallback had no cap at all. Its callers are `apply_patch`'s change
+    lines, where the value comes straight out of an untrusted file and the
+    joined result becomes the summary written to changes.jsonl.
+
+    The container renderings stay here rather than moving into `brief`:
+    "<Table 20x15x4>" is a fact about a change, and `brief` answers what a
+    value *is*.
+    """
     if isinstance(value, RubyString):
-        try:
-            text = value.data.decode(codec.name)
-        except UnicodeDecodeError:
-            text = "<binary>"
-        return '"%s"' % (text if len(text) <= 40 else text[:37] + "...")
+        # Through `decoded_text`, which slices the raw bytes before it
+        # decodes them, and then trimmed to a change line's length. The old
+        # code decoded the *whole* string and cut afterwards -- a cap on the
+        # result and not the work, on a value straight out of a file -- and
+        # `brief` alone would repr the bytes rather than read them.
+        text = decoded_text(codec, value)
+        if len(text) > MAX_CHANGE_LINE_CHARS:
+            text = text[:MAX_CHANGE_LINE_CHARS - 3] + "..."
+        return '"%s"' % text
     if isinstance(value, RubyObject):
         return "<%s>" % printable_text(value.cls)
     if isinstance(value, Table):
@@ -1021,4 +1046,4 @@ def _brief(value: Any, codec: TextCodec) -> str:
         return "<Hash %d entries>" % len(value)
     if isinstance(value, list):
         return "<Array %d items>" % len(value)
-    return repr(value)
+    return brief(value, MAX_CHANGE_LINE_CHARS)

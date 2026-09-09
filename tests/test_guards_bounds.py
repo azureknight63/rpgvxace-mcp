@@ -881,6 +881,10 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
         "MAX_STRING_SCAN_DEPTH": "how deep a file is scanned for strings",
         "MAX_TABLE_AXIS": "an RGSS Table axis, fixed by the format",
         # Cosmetic clamps inside a message or a rendered line.
+        "MAX_CHANGE_LINE_CHARS": "how much of a value one change line "
+                                 "shows; the line is a log entry and a "
+                                 "reply phrase, not something a caller "
+                                 "asks for",
         "MAX_ECHO_CHARS": "how much of a bad argument an error quotes back",
         "MAX_NAMES_LISTED": "how many field names a refusal lists",
         "MAX_IDS_LISTED": "how many ids a refusal lists",
@@ -2765,3 +2769,122 @@ class TestAWholeRunHasOneCeiling(ToolTest):
     def test_an_ordinary_project_does_not_claim_it_stopped(self):
         out = self.call("validate")
         self.assertNotIn("stopped_early", out)
+
+
+class TestTheCeilingStopsTheWalkingToo(ToolTest):
+    """`_Findings.add` caps what is kept; these lines cap what is visited.
+
+    Since `validate` began collecting into one `_Findings`, `add` refuses
+    past the ceiling on its own -- which is the property its docstring
+    claims ("a caller that forgets `room` still cannot exceed the
+    ceiling"). So a test that counts findings passes with a loop's
+    `findings.full` check reverted, and two guards on those checks came
+    back VACUOUS.
+
+    What the checks still buy is the *iterating*, and in this codebase that
+    is the cost: a crafted map's event count comes out of the file, so a
+    loop that keeps going after the ceiling keeps charging the walk
+    allowance for findings nobody will ever see. The budget is what knows,
+    so the budget is what these ask.
+    """
+
+    CEILING = 4
+    EVENTS = 3000
+
+    def setUp(self):
+        super().setUp()
+        from rpgvxace_mcp import analysis
+        from rpgvxace_mcp.analysis import lint
+        self.analysis = analysis
+        self.lint = lint
+        for module in (analysis, lint):
+            original = module.MAX_FINDINGS
+            self.addCleanup(setattr, module, "MAX_FINDINGS", original)
+            module.MAX_FINDINGS = self.CEILING
+
+    def craft_shared_events(self, pages):
+        """One event object across many slots, each page broken the same way."""
+        game_map = self.project.load_map(1)
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", pages)
+        events = RubyHash()
+        for event_id in range(1, self.EVENTS + 1):
+            events.set(event_id, event)
+        game_map.set("events", events)
+        path = self.project.path_for(self.project.map_file(1))
+        path.write_bytes(marshal_rb.dump(game_map))
+        self.assertLess(path.stat().st_size, 256 * 1024)
+        self.ctx = self.reopen()
+
+    def shadowing_pages(self):
+        """Two unconditional pages: the second shadows the first."""
+        pages = []
+        for _ in range(2):
+            page = RubyObject("RPG::Event::Page")
+            page.set("condition", RubyObject("RPG::Event::Page::Condition"))
+            page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
+            page.set("trigger", 0)
+            page.set("list", [])
+            pages.append(page)
+        return pages
+
+    def test_the_page_walk_stops_visiting_at_the_ceiling(self):
+        """`check_event_pages` returns rather than walking on for nothing."""
+        self.craft_shared_events(self.shadowing_pages())
+        budget = self.analysis.WalkBudget()
+        self.lint.check_event_pages(self.project, [1], budget)
+        # Four findings' worth of events, not three thousand: the ceiling
+        # is reached in the first few and the walk returns.
+        self.assertGreater(budget.remaining,
+                           self.analysis.MAX_WALK_STEPS - 200,
+                           "the page walk kept charging after the ceiling: "
+                           "%d of %d steps spent"
+                           % (self.analysis.MAX_WALK_STEPS - budget.remaining,
+                              self.analysis.MAX_WALK_STEPS))
+
+    def test_the_command_walk_stops_visiting_at_the_ceiling(self):
+        """`check_commands` breaks out rather than reading on for nothing.
+
+        Counted by rule calls, not by budget: `iter_command_lists` charges
+        per command *list*, so the inner loop's iterations are not in the
+        allowance and the break has no effect there. What it does affect is
+        how many commands are examined after the ceiling -- which is the
+        cost the comment on it describes.
+        """
+        page = RubyObject("RPG::Event::Page")
+        page.set("condition", RubyObject("RPG::Event::Page::Condition"))
+        page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
+        page.set("trigger", 0)
+        jump = RubyObject("RPG::EventCommand")
+        jump.set("code", 119)                 # Jump to Label, with no Label
+        jump.set("indent", 0)
+        jump.set("parameters", [self.project.codec.make_string("nowhere")])
+        page.set("list", [jump] * 500)
+        self.craft_shared_events([page])
+        looked = []
+        original = self.lint._check_jump
+
+        def counting(*args, **kwargs):
+            looked.append(1)
+            return original(*args, **kwargs)
+
+        self.lint._check_jump = counting
+        self.addCleanup(setattr, self.lint, "_check_jump", original)
+        self.lint.check_commands(self.project, [1],
+                                 self.lint._Tables(self.project),
+                                 self.analysis.WalkBudget())
+        # A handful past the ceiling, not 3000 x 500 of them.
+        self.assertLess(len(looked), 100,
+                        "the command walk examined %d commands to report %d "
+                        "findings" % (len(looked), self.CEILING))
+
+    def test_the_ceiling_is_still_what_bounds_the_findings(self):
+        """Both halves: what is kept, and what is visited."""
+        self.craft_shared_events(self.shadowing_pages())
+        found = self.lint.check_event_pages(self.project, [1],
+                                            self.analysis.WalkBudget())
+        self.assertLessEqual(len(found), self.CEILING)
