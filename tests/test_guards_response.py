@@ -42,6 +42,7 @@ from rpgvxace_mcp.tools import map_read_tools  # noqa: E402
 from tool_case import (  # noqa: E402
     SharedObjectMap,
     ToolTest,
+    ValidateTest,
 )
 
 
@@ -761,6 +762,66 @@ class TestAPathCannotOutscanItsFile(ToolTest):
     def test_an_ordinary_path_still_resolves(self):
         out = self.call("raw_data", op="get", map_id=1, path="events/1/name")
         self.assertIn("value", out)
+
+
+class TestASearchSaysWhatItDidNotRead(ValidateTest):
+    """A plain substring search reports a subject it truncated.
+
+    `_Matcher` exists because "a regex reads the first 2,000 characters and
+    a plain search reads all of it" was invisible, and its docstring says
+    so. The command scope then truncated the *text* before the matcher saw
+    it -- `value.data[:MAX_SUBJECT_CHARS * 4]` in `_command_texts` -- while
+    `clipped` is counted only `if not self.whole`. So for a plain search
+    the difference moved out of the matcher and became invisible again:
+    the needle past 8,000 bytes of one script line returns no hits, and the
+    reply says nothing about a subject it cut.
+
+    Both halves are checked here, because the reply being honest matters
+    whether or not this particular needle is found: either the hit comes
+    back, or the reply says a subject was clipped. Silence with neither is
+    the defect.
+    """
+
+    # Past `MAX_SUBJECT_CHARS * 4`, which is where `_command_texts` cuts.
+    FAR = 9000
+
+    def craft_a_long_line(self, needle):
+        """One comment line with `needle` past the byte cap."""
+        _, _, event = self.first_event(1)
+        page = event.get("pages")[0]
+        text = "z" * self.FAR + needle
+        page.set("list", [new_event_command(
+            108, 0, [self.project.codec.make_string(text)])])
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="a long line")
+        self.ctx = self.reopen()
+
+    def test_a_plain_search_is_honest_about_a_cut_subject(self):
+        self.craft_a_long_line("findme")
+        out = self.call("search", query="findme", scopes=["events"])
+        found = bool(out.get("hits"))
+        said = ("strings_clipped_note" in out
+                or out.get("may_have_more") is True)
+        self.assertTrue(
+            found or said,
+            "the needle is past the byte cap, no hit came back, and the "
+            "reply says nothing about a clipped subject: %s" % sorted(out))
+
+    def test_a_regex_search_still_says_it_clipped(self):
+        """The half that already worked, so this cannot pass by regressing it."""
+        self.craft_a_long_line("findme")
+        out = self.call("search", query="findme", regex=True,
+                        scopes=["events"])
+        self.assertTrue(
+            bool(out.get("hits")) or "strings_clipped_note" in out,
+            "a regex search neither found it nor said it clipped: %s"
+            % sorted(out))
+
+    def test_a_needle_inside_the_cap_is_still_found(self):
+        """So neither test above passes by the search finding nothing ever."""
+        self.craft_a_long_line("findme")
+        out = self.call("search", query="zzzz", scopes=["events"])
+        self.assertTrue(out["hits"], "the ordinary case stopped working")
 
 
 # Last in the file, deliberately. It used to sit mid-module,

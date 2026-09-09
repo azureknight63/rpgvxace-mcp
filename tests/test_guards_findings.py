@@ -647,6 +647,12 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
                              "which is this server's own table",
         "_check_shadowing": "loops over one event's pages, which the "
                             "caller of `check_event_pages` has charged for",
+        "_map_assets": "loops over two field pairs of one map -- a fixed "
+                       "list in this file, not a length out of the project "
+                       "-- and its caller charges per map",
+        "_page_graphics": "loops over one event's pages, which the caller "
+                          "of `check_event_pages` has already charged for, "
+                          "per page, before reaching this",
     }
 
     def modules(self):

@@ -18,10 +18,8 @@ from ..walk import (
     WalkBudget,
     _db_at,
     _int,
-    _map_at,
     _seq,
     _text,
-    iter_maps,
 )
 from .findings import (
     ERROR,
@@ -43,17 +41,6 @@ def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
     tileset_ids = tables.ids("tilesets")
     if tileset_ids is None:
         return findings.items
-
-    for map_id, game_map in iter_maps(project, map_ids):
-        if findings.full:
-            break
-        tileset_id = _int(game_map.get("tileset_id"))
-        if tileset_id is not None and tileset_id not in tileset_ids:
-            findings.add(_missing(
-                "missing_tileset",
-                "map %s uses tileset %s" % (map_id, tileset_id),
-                "Pick an existing tileset for the map, or add that tileset to "
-                "the database.", _map_at(map_id, "tileset_id")))
 
     # The sheet names are asset references, so they go through the same checker
     # as every other one: it is what knows about the RTP and about names that

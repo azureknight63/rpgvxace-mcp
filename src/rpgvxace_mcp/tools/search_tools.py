@@ -410,7 +410,7 @@ def _search_events(ctx: Context, found: _Hits,
                     found.add(location.at(index),
                               summarize(command, ctx.codec), _about(code))
                 continue
-            for text in _command_texts(ctx, command):
+            for text in _command_texts(ctx, command, matcher):
                 if matcher and matcher(text):
                     # Built here rather than above the branch: only these two
                     # read it, and above the branch it was one dict per
@@ -452,7 +452,7 @@ def _search_database(ctx: Context, found: _Hits) -> None:
             for field, value in item.ivars.items():
                 if not isinstance(value, RubyString):
                     continue
-                text = ctx.codec.decode(value.data)
+                text = subject_text(ctx, value, matcher)
                 if text and matcher and matcher(text):
                     found.add(Location("database", table=key,
                                        entry_id=entry_id,
@@ -628,7 +628,34 @@ class _Matcher:
             "pattern, or pass one scope at a time." % self.seconds)
 
 
-def _command_texts(ctx: Context, command: RubyObject) -> list[str]:
+def subject_text(ctx: Context, value: RubyString,
+                 matcher: "_Matcher | None" = None) -> str:
+    """One string from a file, cut to what a search will read.
+
+    Sliced *before* decoding, because the cap is meant to bound the work as
+    well as the result -- `convert.decoded_text`'s docstring states that
+    rule and `_search_database` was the one place that broke it, decoding a
+    whole ivar and then comparing 2,000 characters of it.
+
+    Reports the cut to the matcher, and this is the part that was a
+    correctness hole rather than a cost. `_Matcher` exists because "a regex
+    reads the first 2,000 characters and a plain search reads all of it"
+    was invisible; it counts `clipped` only when the pattern is a regex,
+    and the command scope had already truncated the text before the matcher
+    saw it. So for a plain search the difference moved out of the matcher
+    and became invisible again: a needle past 8,000 bytes of one script
+    line returned no hits and the reply said nothing about a subject it had
+    cut.
+    """
+    raw = value.data
+    text = ctx.codec.decode(raw[:MAX_SUBJECT_CHARS * 4])
+    if matcher is not None and len(raw) > MAX_SUBJECT_CHARS * 4:
+        matcher.clipped += 1
+    return text
+
+
+def _command_texts(ctx: Context, command: RubyObject,
+                   matcher: "_Matcher | None" = None) -> list[str]:
     """Every string one command carries, bounded before any of it is built.
 
     Sliced, because the whole list is materialised before the matcher sees
@@ -646,9 +673,9 @@ def _command_texts(ctx: Context, command: RubyObject) -> list[str]:
     out = []
     for value in as_list(command.get("parameters"))[:MAX_TEXTS_PER_COMMAND]:
         if isinstance(value, RubyString):
-            out.append(ctx.codec.decode(value.data[:MAX_SUBJECT_CHARS * 4]))
+            out.append(subject_text(ctx, value, matcher))
         elif isinstance(value, list):
-            out.extend(ctx.codec.decode(v.data[:MAX_SUBJECT_CHARS * 4])
+            out.extend(subject_text(ctx, v, matcher)
                        for v in value[:MAX_TEXTS_PER_COMMAND]
                        if isinstance(v, RubyString))
     return [t for t in out if t]

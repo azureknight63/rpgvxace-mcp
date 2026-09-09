@@ -572,7 +572,13 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
     LINT = {
         "findings": set(),
         "maps": {"findings"},
-        "pages": {"findings"},
+        # `assets` too, since `check_event_pages` does the map and
+        # page asset checks in the walk it already makes -- it has
+        # the map open, the events sorted, the event name decoded
+        # and each page in hand, which is every value
+        # `_check_map_assets` opened a second pass over the map set
+        # to get.
+        "pages": {"findings", "assets"},
         # `assets` as well, since `check_commands` does the command
         # asset checks in the loop it already runs -- the two rules
         # that need a command list read a strict subset of what

@@ -177,7 +177,8 @@ class _AssetChecker:
 def check_assets(project: Project, map_ids: list[int],
                  budget: "WalkBudget | None" = None,
                  checker: "_AssetChecker | None" = None,
-                 commands_done: bool = False) -> list[Finding]:
+                 commands_done: bool = False,
+                 pages_done: bool = False) -> list[Finding]:
     """Graphic and audio names, against the files present.
 
     Covers what an agent is most likely to break: map parallaxes and
@@ -198,7 +199,12 @@ def check_assets(project: Project, map_ids: list[int],
     ones this looks at".
     """
     checker = _AssetChecker(project) if checker is None else checker
-    _check_map_assets(project, checker, map_ids, budget)
+    if not pages_done:
+        # Only when nothing else walked the maps. With the events scope
+        # selected -- which the default run has -- `check_event_pages` does
+        # these checks in the walk it already makes, and this would be a
+        # second full pass over the map set.
+        _check_map_assets(project, checker, map_ids, budget)
     if not commands_done:
         # Only when nothing else walked them. With the events scope selected
         # -- which the default run has -- `check_commands` does these two
@@ -213,6 +219,12 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
                       map_ids: list[int],
                       budget: "WalkBudget | None" = None) -> None:
     """Map, event and page graphic and audio references.
+
+    The default run does not reach this: `check_event_pages` does these
+    checks inside the walk it already makes, and `_map_assets` and
+    `_page_graphics` in `pages` are the shared bodies. This is the path for
+    `validate scopes=["assets"]`, which has no such walk to join -- the
+    same arrangement `_check_command_assets` has.
 
     Takes the budget `_check_command_assets` has always taken. Without it the
     only bound here was the collector's finding ceiling, and a page whose

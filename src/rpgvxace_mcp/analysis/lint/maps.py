@@ -180,6 +180,14 @@ def check_maps(project: Project, map_ids: list[int], tables: _Tables,
     """
     findings = _Findings.given(collected)
     troop_ids = tables.ids("troops")
+    # `check_tilesets` used to open every map again to read one field from
+    # each. Its sheet-name walk is over the tilesets *table* and stays
+    # there; the per-map half is here, in the loop that already has the map
+    # open. None means the table could not be read, so the rule is skipped
+    # rather than answered wrongly -- the same distinction `_Tables.ids`
+    # exists to draw.
+    tileset_ids = (tables.ids("tilesets")
+                   if project.profile.has_tileset_database else None)
 
     for map_id in map_ids:
         if not findings.room:
@@ -210,7 +218,27 @@ def check_maps(project: Project, map_ids: list[int], tables: _Tables,
         # Bounded by the map's own fields rather than by anything from the
         # file, so `extend` is enough: it takes what fits.
         findings.extend(_check_map_dimensions(map_id, game_map))
+        if tileset_ids is not None:
+            findings.extend(_check_map_tileset(map_id, game_map, tileset_ids))
     return findings.items
+
+
+def _check_map_tileset(map_id: int, game_map: RubyObject,
+                       tileset_ids: "set[int]") -> list[Finding]:
+    """One rule: the tileset a map names is a tileset that exists.
+
+    One field of a map already open, so it belongs to the map walk. It was
+    the body of `check_tilesets`' own `iter_maps` loop -- a fifth full pass
+    over the map set to read `tileset_id` from each one.
+    """
+    tileset_id = _int(game_map.get("tileset_id"))
+    if tileset_id is None or tileset_id in tileset_ids:
+        return []
+    return [_missing(
+        "missing_tileset",
+        "map %s uses tileset %s" % (map_id, tileset_id),
+        "Pick an existing tileset for the map, or add that tileset to the "
+        "database.", _map_at(map_id, "tileset_id"))]
 
 
 def _check_encounters(project: Project, map_id: int, game_map: RubyObject,

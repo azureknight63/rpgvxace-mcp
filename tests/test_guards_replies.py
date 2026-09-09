@@ -815,11 +815,18 @@ class TestOneDecodeForTheWholeToolsLayer(unittest.TestCase):
 
     # Modules that decode for the *matcher* rather than for a reply, and
     # how many such calls each may make. A cap of 200 characters would mean
-    # searching only the first 200 of a script line, so these read the whole
-    # string -- and `_Hits.add` caps what actually reaches the response. A
-    # count rather than a bare exemption, so a new bare decode in the same
-    # module is still caught.
-    MATCHER_DECODES = {"search_tools.py": 3}
+    # searching only the first 200 of a script line, so these read more than
+    # a reply may carry -- and `_Hits.add` caps what actually reaches the
+    # response. A count rather than a bare exemption, so a new bare decode
+    # in the same module is still caught, and this test refuses an
+    # allowance larger than the calls behind it.
+    #
+    # One now, not three: `subject_text` is the single place that decides
+    # how much of a string a search reads, and the three call sites go
+    # through it. It also slices before decoding, which the database scope
+    # did not -- and reports the cut, which is what made a plain search
+    # silently miss a needle past 8,000 bytes.
+    MATCHER_DECODES = {"search_tools.py": 1}
 
     def test_no_tool_module_calls_the_codec_directly(self):
         """And an inline call is the way it was actually written.

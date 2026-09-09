@@ -105,12 +105,14 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
                    "than to a map)")
         check_commands(project, ids, tables, walk_budget, findings,
                        shared_checker)
-        check_event_pages(project, ids, walk_budget, findings)
+        check_event_pages(project, ids, walk_budget, findings,
+                          shared_checker)
     if "assets" in scopes and findings.room:
         ran.append("graphic and audio file references")
         findings.extend(check_assets(
             project, ids, walk_budget, shared_checker,
-            commands_done=shared_checker is not None))
+            commands_done=shared_checker is not None,
+            pages_done=shared_checker is not None))
     if "database" in scopes and findings.room:
         ran.append("database cross-references")
         check_database(project, tables, walk_budget, findings)
