@@ -60,7 +60,7 @@ class ProveTest(unittest.TestCase):
         self.guard = Guard(
             "a test fixture", guard_table.LINT_FINDINGS,
             "MAX_FINDINGS = 5000", "MAX_FINDINGS = 1",
-            ["tests/test_guards_bounds.py::TestNoWalkCollectsPastTheCeiling"],
+            ["tests/test_guards_findings.py::TestNoWalkCollectsPastTheCeiling"],
             "nothing -- this is a fixture",
         )
 
