@@ -171,9 +171,14 @@ def _report(project: Project, findings: "list[Finding]",
     tally = Counter(f.severity for f in findings)
     counts = {level: tally.get(level, 0) for level in SEVERITIES}
 
+    # The slice cannot cut: every producer is a `_Findings`, which stops
+    # at the ceiling, so the length reaches it and never passes it. Kept as
+    # belt to that brace -- a future caller that hands `_report` a plain
+    # list would otherwise report `stopped_early` and return more than the
+    # ceiling -- and the sort has already run, so what it would keep is the
+    # most severe.
     stopped = len(findings) >= MAX_FINDINGS
     if stopped:
-        # Most severe kept, since the sort has already run.
         findings = findings[:MAX_FINDINGS]
 
     report = {

@@ -346,6 +346,11 @@ class TestToolModulesAreLeaves(unittest.TestCase):
     project is walked) or `registry` (what a tool call looks like) -- all of
     which sit below `tools/` and are imported by every one of them. A fact
     kept in a leaf makes that leaf un-splittable and the graph unreadable.
+
+    Or in a module here that registers no tool of its own: `map_common` is
+    the one, and the test below permits it by asking whether a module
+    registers a tool rather than by naming it -- so the enforced rule is
+    one module wider than the three named above.
     """
 
     def folder(self):
@@ -376,7 +381,7 @@ class TestToolModulesAreLeaves(unittest.TestCase):
         """So a broken scan cannot make the rule below vacuously true."""
         names = {p.stem for p in self.tool_modules()}
         self.assertIn("event_tools", names)
-        # The three halves map_tools was split into. Named individually
+        # The three tool modules `map_tools` became, beside `map_common`,. Named individually
         # because the split is the thing this suite made possible.
         for half in ("map_read_tools", "map_edit_tools", "map_tile_tools"):
             self.assertIn(half, names)
@@ -516,12 +521,25 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
                    "database"},
     }
 
+    # And the package root, which three docstrings assert and nothing read:
+    # `paths.py:3` calls itself "the bottom of this module's layering",
+    # `backups.py` says it reads `paths`, and `project.py` reads both. Only
+    # the modules named here are constrained -- `marshal_rb`, `convert`,
+    # `rubytypes`, `schema` and `commands` sit beside them without an order
+    # this test can state, so they are excluded rather than pretended about.
+    ROOT_MODULES = {
+        "paths": set(),
+        "backups": {"paths"},
+        "project": {"paths", "backups"},
+    }
+
     def tables(self):
         """Each layering table with the directory it describes."""
-        root = (Path(__file__).resolve().parent.parent / "src"
-                / "rpgvxace_mcp" / "analysis")
-        return (("analysis", self.ANALYSIS, root),
-                ("lint", self.LINT, root / "lint"))
+        package = (Path(__file__).resolve().parent.parent / "src"
+                   / "rpgvxace_mcp")
+        return (("rpgvxace_mcp", self.ROOT_MODULES, package),
+                ("analysis", self.ANALYSIS, package / "analysis"),
+                ("lint", self.LINT, package / "analysis" / "lint"))
 
     def found(self, where):
         """Every module in a directory: a file, or a package with an init."""
@@ -588,6 +606,14 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         passes.
         """
         for label, table, where in self.tables():
+            if table is self.ROOT_MODULES:
+                # The root package holds modules with no stated order --
+                # see `ROOT_MODULES`. What is checked there is the other
+                # direction only: every name in the table is a real module.
+                missing = sorted(set(table) - set(self.found(where)))
+                self.assertEqual(missing, [], "named and not there: "
+                                              + ", ".join(missing))
+                continue
             with self.subTest(package=label):
                 self.assertEqual(sorted(self.found(where)), sorted(table))
 
@@ -725,6 +751,30 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         self.assertEqual(dangling, [],
                          "re-exported and defined nowhere below: "
                          + ", ".join(dangling))
+
+    def test_the_package_re_exports_all_of_the_linter(self):
+        """Two hand-written lists of one set, and they had drifted.
+
+        `analysis/__init__` and `lint/__init__` both name the linter's
+        exports, and eleven names were in the second and not the first --
+        every one of them private, so `test_every_public_name_is_re_exported`
+        above could not see it. The consequence was arbitrary:
+        `analysis._check_system` resolved and `analysis._check_autorun` did
+        not, for no reason a reader could find.
+        """
+        from rpgvxace_mcp import analysis
+        from rpgvxace_mcp.analysis import lint
+        modules = {"assets", "command_rules", "database", "findings",
+                   "maps", "pages", "report"}
+        exported = {name for name in vars(lint)
+                    if not name.startswith("__")} - modules - {"annotations"}
+        self.assertGreater(len(exported), 30, "read almost nothing")
+        missing = sorted(name for name in exported
+                         if not hasattr(analysis, name))
+        self.assertEqual(
+            missing, [],
+            "`lint` re-exports these and `analysis` does not, so which "
+            "spelling works is arbitrary: " + ", ".join(missing))
 
     def test_the_linter_is_reachable_by_the_name_it_had(self):
         """`from ..analysis import validate` survived becoming a package.

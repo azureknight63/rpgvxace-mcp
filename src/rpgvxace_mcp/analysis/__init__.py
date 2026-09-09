@@ -52,6 +52,13 @@ from .references import (  # noqa: F401
     reference_preview,
     reference_previews,
 )
+# Every name `lint` re-exports, and the same set: this list and the one
+# in `lint/__init__` were written by hand and had drifted eleven names
+# apart, all of them private -- so `analysis._check_system` resolved
+# and `analysis._check_autorun` did not, and the public-name test
+# could not see the difference. `test_schema.py` holds the two lists
+# equal now, which is why this is still written out rather than
+# derived: a reader can see what is here, and a test makes it right.
 from .lint import (  # noqa: F401
     CONTROL_RELEASING_CODES,
     DEFAULT_FINDING_LIMIT,
@@ -68,14 +75,25 @@ from .lint import (  # noqa: F401
     _Findings,
     _MapSizes,
     _Tables,
+    _check_autorun,
+    _check_command_assets,
     _check_database_assets,
     _check_encounters,
+    _check_indent,
+    _check_jump,
     _check_map_assets,
     _check_map_dimensions,
+    _check_references,
+    _check_shadowing,
     _check_start_position,
     _check_system,
+    _check_transfer,
+    _encounter_troop_id,
+    _is_unconditional,
     _missing,
     _parent_cycles,
+    _report,
+    _resolve_map_ids,
     check_assets,
     check_commands,
     check_database,

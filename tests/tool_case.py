@@ -24,6 +24,7 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from build_project import build  # noqa: E402
 
 from rpgvxace_mcp import marshal_rb  # noqa: E402
+from rpgvxace_mcp.schema import new_page  # noqa: E402
 from rpgvxace_mcp.project import (  # noqa: E402
     Project,
 )
@@ -185,6 +186,15 @@ class CraftedMap:
     # of it were the same number written twice.
     BUDGET_SECONDS = 10.0
 
+    # What this needs from the test case it is mixed into, written down for
+    # the same reason `BackupStore.NEEDS_FROM_PROJECT` is: a mixin that
+    # reads a name nobody defines fails when the method runs, and this one
+    # runs inside a timing assertion where the failure reads as a bound
+    # that did not hold. `WHAT` is the subclass's own, and names the map in
+    # a failure message.
+    NEEDS_FROM_HOST = ("WHAT", "call", "project", "reopen", "assertLess")
+    WHAT = "an uncrafted map"
+
     def craft_page_map(self, commands, pages, events, max_bytes, what,
                        condition=None):
         """Rewrite map 1 as `events` copies of one event of `pages` pages.
@@ -194,18 +204,15 @@ class CraftedMap:
         `commands` is the list every page carries; `condition` is the page's
         condition object, or None for a bare one.
         """
-        page = RubyObject("RPG::Event::Page")
-        page.set("condition",
-                 condition if condition is not None
-                 else RubyObject("RPG::Event::Page::Condition"))
-        # Empty, so the asset checker returns before it collects.
-        page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
-        for name, value in (("trigger", 0), ("priority_type", 0),
-                            ("move_type", 0), ("move_speed", 3),
-                            ("move_frequency", 3), ("walk_anime", True),
-                            ("step_anime", False), ("direction_fix", False),
-                            ("through", False)):
-            page.set(name, value)
+        # From `new_page`, which is the constructor the server itself
+        # uses, rather than nine of the thirteen fields written out here.
+        # This was the third copy of that field set after round 9 merged
+        # the two in `src` -- and the four it left out included
+        # `move_route`, which is the field whose absence from `_page_view`
+        # was the round-9 round-trip bug.
+        page = new_page()
+        if condition is not None:
+            page.set("condition", condition)
         page.set("list", commands)
 
         event = RubyObject("RPG::Event")

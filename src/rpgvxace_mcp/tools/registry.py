@@ -606,6 +606,20 @@ def check_op_args(op: str, args: dict[str, Any],
         % (op, where, "; ".join(details), ", ".join(sorted(allowed - {"op"}))))
 
 
+# What each declared type accepts, and how a refusal names it. One
+# table rather than four `elif` branches: a fifth declared type in
+# `schema` was enforced only if someone remembered to add a fifth
+# branch, and `TestADeclaredTypeIsChecked` reads this to know what
+# to try. INT is not here -- it delegates to `as_int`, which
+# refuses a bool and a non-integral float in words of its own.
+_DECLARED_TYPES = {
+    STR: (str, "a string"),
+    BOOL: (bool, "true or false"),
+    ARR: (list, "an array"),
+    OBJ: (dict, "an object"),
+}
+
+
 def _check_declared(key: str, value: Any, spec: dict[str, Any]) -> None:
     """Apply one property's declared bounds to the value given for it."""
     if value is None:
@@ -634,18 +648,15 @@ def _check_declared(key: str, value: Any, spec: dict[str, Any]) -> None:
                 "%s must be an integer, got %s. %s"
                 % (key, type(value).__name__, echo(value)))
         as_int(value, key, spec.get("minimum"), spec.get("maximum"))
-    elif declared == STR and not isinstance(value, str):
-        raise ToolError("%s must be a string, got %s. %s"
-                        % (key, type(value).__name__, echo(value)))
-    elif declared == BOOL and not isinstance(value, bool):
-        raise ToolError("%s must be true or false, got %s. %s"
-                        % (key, type(value).__name__, echo(value)))
-    elif declared == ARR and not isinstance(value, list):
-        raise ToolError("%s must be an array, got %s. %s"
-                        % (key, type(value).__name__, echo(value)))
-    elif declared == OBJ and not isinstance(value, dict):
-        raise ToolError("%s must be an object, got %s. %s"
-                        % (key, type(value).__name__, echo(value)))
+    elif declared in _DECLARED_TYPES:
+        # One table, not four `elif`s: this was the same
+        # run-of-branches-over-a-named-set shape that `_conditions` had, and
+        # a fifth declared type added to `schema` would have been enforced
+        # only if someone remembered to add a fifth branch here as well.
+        kind, said = _DECLARED_TYPES[declared]
+        if not isinstance(value, kind):
+            raise ToolError("%s must be %s, got %s. %s"
+                            % (key, said, type(value).__name__, echo(value)))
     # Deliberately no enum check here. `one_of` and `_table_arg` already
     # enforce those, and they can say which tables *this project* has and why
     # one is absent -- a generic list of every engine's tables is a worse

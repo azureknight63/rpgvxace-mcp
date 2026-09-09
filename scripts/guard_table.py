@@ -1,10 +1,15 @@
 """Every guard in this codebase: the edit that removes it, and its tests.
 
-Data, and append-only: one entry per fix, which is why it reached two
-thousand lines. `prove_guards.py` next door is the engine that reads it,
-and the two are read for entirely different reasons -- a verdict you do not
-believe sends you to the engine, and you had to scroll past all of this to
-reach it.
+The `Guard` record and every instance of it: append-only, one entry per
+fix, which is why it reached two thousand lines. `prove_guards.py` next
+door is the engine that reads them, and the two are read for entirely
+different reasons -- a verdict you do not believe sends you to the engine,
+and you had to scroll past all of this to reach it.
+
+`Guard` itself is here rather than there because it is the shape of the
+data, not part of the machine: it holds the fields and refuses a
+mismatched anchor pair at import time, and the engine imports it from
+here along with the list.
 
 The aliases are here rather than there because they are part of the data:
 `LINT` and `BOUNDED` mean nothing to the engine, which takes the strings
