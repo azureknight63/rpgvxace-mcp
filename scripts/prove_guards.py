@@ -1132,7 +1132,7 @@ GUARDS = [
         # Anchored with its own comment, because the bare line now appears in
         # every walk that appends inside a loop -- which is the point of the
         # round that added them, and made this anchor ambiguous.
-        '''            if len(findings) >= MAX_FINDINGS:
+        '''            if findings.full:
                 # The ceiling is a collection ceiling, so it is checked here
                 # rather than at the end: one page of a million Jump to Label
                 # commands with no matching Label is a million findings.
@@ -1606,8 +1606,8 @@ GUARDS = [
         '''            # Two findings per event at most, and the event count comes out of
             # the file: a crafted map that shares one event object across
             # forty thousand slots produced forty thousand findings here.
-            if len(findings) >= MAX_FINDINGS:
-                return findings''',
+            if findings.full:
+                return findings.items''',
         '''            if False:
                 return findings''',
         [CEILING + "test_the_page_walk_stops_collecting"],
@@ -1787,7 +1787,7 @@ GUARDS = [
     Guard(
         'the page rule walk takes an allowance', LINT,
         '''            if budget is not None and not budget.spend(1):
-                return findings
+                return findings.items
             if not isinstance(event, RubyObject):
                 continue
             pages = _seq(event.get("pages"))
