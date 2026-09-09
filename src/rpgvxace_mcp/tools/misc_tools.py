@@ -27,10 +27,6 @@ from ..schema import (
     TILE_ID_RANGES_NOTE,
 )
 from .registry import (
-    write_reply,
-    check_op_args,
-    str_list,
-    int_list,
     ARR,
     BOOL,
     Context,
@@ -39,17 +35,20 @@ from .registry import (
     REFRESH,
     STR,
     ToolError,
+    check_op_args,
+    int_list,
     need_int,
     need_str,
     one_of,
     opt_bool,
     opt_int_default,
-    opt_int,
     opt_str,
     prop,
     schema,
     scopes_arg,
+    str_list,
     tool,
+    write_reply,
 )
 
 

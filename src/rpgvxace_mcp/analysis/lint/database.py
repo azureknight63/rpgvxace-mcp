@@ -61,14 +61,12 @@ def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
     # differ only in case.
     checker = _AssetChecker(project)
     for entry_id, tileset in tables.rows_of("tilesets"):
-        # The bound that matters is `_AssetChecker`'s own, because this loop
+        # `checker.full` is the bound that matters, because this loop
         # appends there: the guard here used to test the map loop's
         # `findings`, which this loop never touches, so it could not fire.
-        # Kept to stop the iterating as well as the collecting -- a tileset
-        # carries nine sheet names and the row count comes out of the file --
-        # but it cannot change what this returns, so it has no entry in
-        # `prove_guards`. That is the honest description of a line whose
-        # reverted form passes every test.
+        # `findings.full` stops the iterating too -- a tileset carries nine
+        # sheet names and the row count comes out of the file -- but cannot
+        # change what this returns, so it carries no guard.
         if checker.full or findings.full:
             break
         if budget is not None and not budget.spend(1):
@@ -92,8 +90,8 @@ def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
                                      sheet))
     # Into the one collector rather than concatenated beside it:
     # returning two independently-bounded lists was this file's own example
-    # of "two ceilings of MAX_FINDINGS are a ceiling of twice that", from
-    # `_Findings`' docstring.
+    # of "two ceilings of MAX_FINDINGS are a ceiling of twice that", which
+    # is `_parent_cycles`' phrase in `maps.py`.
     findings.extend(checker.findings)
     return findings.items
 
@@ -147,7 +145,8 @@ def check_database(project: Project, tables: _Tables,
                 continue
             class_id = _int(actor.get("class_id"))
             if class_id is not None and class_id not in class_ids:
-                # The noun from `TABLE_NOUNS`, like the two loops below.
+                # The noun from `TABLE_NOUNS`, like the loop below it, the one
+    # above it, and `_check_references` in `command_rules`.
                 # Spelled by hand here while the table carried an entry for
                 # it, which is how a table with two live readers came to have
                 # entries nothing read.

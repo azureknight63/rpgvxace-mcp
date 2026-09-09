@@ -20,8 +20,10 @@ sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
 
 
-from rpgvxace_mcp import marshal_rb  # noqa: E402
-from rpgvxace_mcp import commands as command_module  # noqa: E402
+from rpgvxace_mcp import (  # noqa: E402
+    commands as command_module,
+    marshal_rb,
+)
 from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyHash,
     RubyObject,

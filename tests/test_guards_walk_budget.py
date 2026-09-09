@@ -18,7 +18,7 @@ sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
 
 
-from rpgvxace_mcp import marshal_rb  # noqa: E402
+from rpgvxace_mcp import convert, marshal_rb  # noqa: E402
 from rpgvxace_mcp.analysis import MAX_FINDINGS  # noqa: E402
 from rpgvxace_mcp.project import Project  # noqa: E402
 from rpgvxace_mcp.rubytypes import (  # noqa: E402
@@ -26,7 +26,6 @@ from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyObject,
     Table,
 )
-from rpgvxace_mcp import convert  # noqa: E402
 from rpgvxace_mcp.convert import ConversionError  # noqa: E402
 from rpgvxace_mcp.tools.registry import (  # noqa: E402
     Context,

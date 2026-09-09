@@ -13,9 +13,9 @@ import time
 from typing import Any
 
 from ..analysis import (
+    Location,
     MAX_WALK_STEPS,
     WalkBudget,
-    Location,
     iter_command_lists,
 )
 from ..commands import command_name, summarize
@@ -40,16 +40,16 @@ from .registry import (
     INT,
     STR,
     ToolError,
+    decoded,
     opt_bool,
-    opt_int_default,
     opt_int,
+    opt_int_default,
     opt_str,
+    partial,
     prop,
     schema,
-    partial,
     scopes_arg,
     tool,
-    decoded,
 )
 
 

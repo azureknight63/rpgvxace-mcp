@@ -39,10 +39,10 @@ from .tools import (  # noqa: F401
 # the copy every tool calls is the one handed raw arguments.
 from .tools.registry import (
     Context,
-    echo,
     REGISTRY,
     ToolError,
     all_tools,
+    echo,
 )
 
 

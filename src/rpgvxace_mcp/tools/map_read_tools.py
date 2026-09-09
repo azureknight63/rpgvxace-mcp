@@ -15,20 +15,20 @@ from ..schema import TILE_ID_RANGES, TRIGGER_NAMES, unreadable_events_note
 from .map_common import MAX_CELLS_PER_WALK, _check_budget
 from .registry import (
     BOOL,
-    partial,
     Context,
     INT,
     REFRESH,
     STR,
+    decoded,
     need_int,
     one_of,
     opt_bool,
-    opt_int_default,
     opt_int,
+    opt_int_default,
+    partial,
     prop,
     schema,
     tool,
-    decoded,
 )
 
 
@@ -53,6 +53,21 @@ MAX_MAP_ROWS = 500
 # How much tile data map_get includes. Named once, because the schema that
 # advertises it and the reader that enforces it are 40 lines apart.
 TILE_DETAIL = ("none", "counts")
+
+# How many rows one map_get summary may build -- event rows and page rows
+# together. Events times pages, and both numbers come out of the file: the
+# shared-object map is fifty events of fifty pages, all one object, so 7 KB
+# produced 2500 rows, and nothing in the reply said the list was long because
+# the file was crafted rather than because the map is big.
+#
+# "Together" is the correction. The first version of this counted only page
+# rows, because the counter sat inside the pages loop while the event row was
+# appended outside it -- so an event with an empty @pages cost nothing and
+# still produced a row, and a hash of a million links to one such event (four
+# bytes a pair on disk) built a million dicts. `MAX_TOOL_RESULT_CHARS` does
+# not save that: it is measured after the reply has been serialised, so it
+# bounds the response and not the work or the memory.
+MAX_EVENT_SUMMARY_ROWS = 2000
 
 
 def _map_names(ctx: Context) -> dict[int, str]:
@@ -257,7 +272,7 @@ def map_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 "this map holds its tile data as %s rather than a Table, so "
                 "there was nothing to count. Run validate to see what is "
                 "wrong with the file." % type(data).__name__)
-    if isinstance(data, Table):
+    else:
         result["tile_table"] = {
             "xsize": data.xsize, "ysize": data.ysize, "zsize": data.zsize,
             "layers": {str(z): ctx.project.profile.map_layers.get(
@@ -310,13 +325,10 @@ def _tile_counts(data: Table) -> dict[str, Any]:
     # docstring gives this same reason; this walk simply had not been changed
     # with it.
     #
-    # It produces byte-identical results, which is the point and also why it
-    # carries no entry in `prove_guards`: reverting it changes nothing a
-    # correctness test can see, and a timing test would be a race.
+    # Byte-identical results, so it carries no guard: reverting it changes
+    # nothing a correctness test can see and a timing test would be a race.
     # `TestATileTallyUsesTheBuffer.test_the_tally_matches_a_cell_by_cell_count`
-    # is what protects it -- it pins this form against the slow one, layer by
-    # layer -- and that is the honest description of a change with no
-    # observable behaviour of its own.
+    # pins this form against the slow one, layer by layer.
     out = {}
     plane = data.xsize * data.ysize
     buffer = data.data
@@ -342,21 +354,6 @@ def _tile_sheet(tile_id: int) -> str:
         if low <= tile_id <= high:
             return sheet
     return "unknown"
-
-# How many rows one map_get summary may build -- event rows and page rows
-# together. Events times pages, and both numbers come out of the file: the
-# shared-object map is fifty events of fifty pages, all one object, so 7 KB
-# produced 2500 rows, and nothing in the reply said the list was long because
-# the file was crafted rather than because the map is big.
-#
-# "Together" is the correction. The first version of this counted only page
-# rows, because the counter sat inside the pages loop while the event row was
-# appended outside it -- so an event with an empty @pages cost nothing and
-# still produced a row, and a hash of a million links to one such event (four
-# bytes a pair on disk) built a million dicts. `MAX_TOOL_RESULT_CHARS` does
-# not save that: it is measured after the reply has been serialised, so it
-# bounds the response and not the work or the memory.
-MAX_EVENT_SUMMARY_ROWS = 2000
 
 
 def _event_summaries(ctx: Context, game_map: RubyObject

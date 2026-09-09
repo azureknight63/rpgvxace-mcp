@@ -109,6 +109,11 @@ def _parent_cycles(infos: dict[Any, Any],
     Appends to the caller's collector when given one, for the same reason
     `_check_encounters` does: a list of its own is a second ceiling, and two
     ceilings of MAX_FINDINGS are a ceiling of twice that.
+
+    Returns that collector's whole contents -- everything in it, including
+    what other checks have put there -- and not this check's findings
+    alone. `check_map_tree` reads the collector it passed in; the return
+    value is for the tests, which pass none.
     """
     findings = _Findings() if findings is None else findings
     settled: dict[int, bool] = {}   # map id -> is its chain sound
@@ -210,8 +215,13 @@ def _check_encounters(project: Project, map_id: int, game_map: RubyObject,
 
     Appends to the caller's collector when given one, which is what makes the
     ceiling hold across maps: this used to bound a list of its own that
-    `check_maps` then discarded. The return value is kept for the tests and
-    for any caller that wants just this check.
+    `check_maps` then discarded.
+
+    What it returns is that collector's whole contents, not just this
+    check's findings -- so a caller reading the return value of two
+    checks in a row would see the first check's findings twice. `check_maps`
+    reads the collector; the return value is for the tests, which pass
+    none.
     """
     findings = _Findings() if findings is None else findings
     encounters = _seq(game_map.get("encounter_list"))

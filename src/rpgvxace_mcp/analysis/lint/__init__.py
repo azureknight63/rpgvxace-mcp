@@ -42,11 +42,11 @@ from . import (  # noqa: F401
 from .findings import (  # noqa: F401
     DEFAULT_FINDING_LIMIT,
     ERROR,
+    Finding,
     INFO,
     MAX_FINDINGS,
     SEVERITIES,
     WARNING,
-    Finding,
     _Findings,
     _Tables,
     _missing,

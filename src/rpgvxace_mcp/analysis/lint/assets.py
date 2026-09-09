@@ -1,8 +1,10 @@
 """Rules about files on disk, and the one checker that knows what is there.
 
-Four walks share one `_AssetChecker`, which is why the finding
-ceiling lives on it rather than at the call sites: the one site that
-carried the guard had written it against the wrong list.
+Three walks are here, and a fourth -- `check_tilesets` -- is in
+`database.py`, because a tileset's nine sheets are files on disk. All four
+share one `_AssetChecker`, and that is why the finding ceiling lives on the
+collector rather than at the call sites: the one site that carried the
+guard had written it against the wrong list.
 """
 
 from __future__ import annotations
@@ -244,7 +246,8 @@ def _check_command_assets(project: Project, checker: _AssetChecker,
 
 def _check_database_assets(project: Project, checker: _AssetChecker,
                            budget: "WalkBudget | None" = None) -> None:
-    # The fourth asset walk, and the one of the four with neither the
+    # The last asset walk in this file -- `check_tilesets` in
+    # `database.py` is the fourth -- and the one with neither the
     # budget its siblings take nor a `checker.full` test. `_AssetChecker`
     # returns before it counts anything for a name that is empty or
     # present, so the collector ceiling cannot stop this either -- an

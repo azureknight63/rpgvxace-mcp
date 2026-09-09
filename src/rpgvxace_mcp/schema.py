@@ -40,7 +40,6 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from .rubytypes import (
-    ruby_children,
     RubyData,
     RubyExtended,
     RubyHash,
@@ -54,6 +53,7 @@ from .rubytypes import (
     RubyUserMarshal,
     Table,
     _bare_name,
+    ruby_children,
 )
 
 

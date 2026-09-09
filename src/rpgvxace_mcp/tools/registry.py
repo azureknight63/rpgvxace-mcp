@@ -6,8 +6,8 @@ import contextlib
 from typing import Any, Callable, Iterator
 
 from ..convert import TextCodec, brief, decoded_text
-from ..rubytypes import _bare_name as bare_name, named
 from ..project import Project
+from ..rubytypes import _bare_name as bare_name, named
 
 # How much of a caller's own value is quoted back in an error. Without this, a
 # rejected multi-megabyte argument becomes a multi-megabyte error message.

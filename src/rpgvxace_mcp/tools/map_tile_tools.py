@@ -6,10 +6,10 @@ of the three subjects that file held.
 
 from __future__ import annotations
 
-from typing import Any
-from ..project import MAX_MAP_ID
 from array import array
+from typing import Any
 
+from ..project import MAX_MAP_ID
 from ..rubytypes import CELL_MASK, Table
 from .map_common import MAX_CELLS_PER_READ, _check_budget, _check_tile
 from .registry import (
@@ -24,8 +24,8 @@ from .registry import (
     need_int,
     one_of,
     opt_bool,
-    opt_int_default,
     opt_int,
+    opt_int_default,
     opt_list,
     prop,
     schema,

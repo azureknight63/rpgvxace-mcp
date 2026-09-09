@@ -21,12 +21,9 @@ from build_project import build  # noqa: E402
 
 from rpgvxace_mcp.commands import CommandError  # noqa: E402
 from rpgvxace_mcp import marshal_rb  # noqa: E402
-from rpgvxace_mcp.rubytypes import RubyHash, RubyObject  # noqa: E402
+from rpgvxace_mcp.rubytypes import RubyHash, RubyObject, Table  # noqa: E402
 from rpgvxace_mcp.project import (  # noqa: E402
     Project,
-)
-from rpgvxace_mcp.rubytypes import (  # noqa: E402
-    Table,
 )
 from rpgvxace_mcp.schema import (  # noqa: E402
     PROFILES,
@@ -814,6 +811,51 @@ class TestReadToolsDropNoArgumentsEither(ToolTest):
                 with self.assertRaises(ToolError) as caught:
                     self.call("event_get", common_event_id=1, **extra)
                 self.assertIn(sorted(extra)[0], str(caught.exception))
+
+    def test_the_remedy_fits_the_call_site(self):
+        """Three call sites shared one sentence, and it fitted one of them.
+
+        "Ask for one or the other" is the answer when a caller gave two
+        alternatives and can only have one -- `command_reference code=101
+        search="text"`. It is not the answer for `event_get
+        common_event_id=1 page=0`, where `event_ids`, `name_contains` and
+        `page` are not alternatives to anything: there is no other thing to
+        ask for instead, and the caller simply has to drop them.
+
+        A refusal whose remedy is wrong is worse than one with no remedy.
+        The model does what it says, is refused again, and has been told
+        twice that the fix is a choice it does not have.
+        """
+        with self.assertRaises(ToolError) as caught:
+            self.call("event_get", common_event_id=1, page=0)
+        message = str(caught.exception)
+        self.assertNotIn("one or the other", message)
+        self.assertIn("Drop", message)
+
+        with self.assertRaises(ToolError) as caught:
+            self.call("command_reference", code=101, search="text")
+        self.assertIn("one or the other", str(caught.exception),
+                      "the site the sentence did fit lost it")
+
+    def test_every_inert_refusal_names_its_own_remedy(self):
+        """Structural, so a fourth call site cannot inherit a wrong one."""
+        import ast
+        source = (Path(__file__).resolve().parent.parent / "src"
+                  / "rpgvxace_mcp" / "tools"
+                  / "event_tools.py").read_text(encoding="utf-8")
+        calls = [node for node in ast.walk(ast.parse(source))
+                 if isinstance(node, ast.Call)
+                 and getattr(node.func, "id", "") == "refuse_inert"]
+        self.assertGreaterEqual(len(calls), 3,
+                                "found no call sites, so this checked none")
+        for call in calls:
+            given = {kw.arg for kw in call.keywords}
+            with self.subTest(line=call.lineno):
+                self.assertIn(
+                    "remedy", given,
+                    "the call at line %d takes the default remedy, and there "
+                    "is no default that is right for every branch"
+                    % call.lineno)
 
     def test_a_common_event_read_still_works(self):
         out = self.call("event_get", common_event_id=1)

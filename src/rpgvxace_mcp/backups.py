@@ -28,10 +28,10 @@ from .paths import (
     BACKUP_DIR,
     BACKUP_STAMP_FORMAT,
     CHANGE_LOG,
+    ProjectError,
     _BACKUP_STAMP,
     _contained,
     _is_reparse_point,
-    ProjectError,
     safe_component,
 )
 

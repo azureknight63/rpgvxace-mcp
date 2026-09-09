@@ -37,9 +37,7 @@ from ..rubytypes import (
 # tool that validates while the escape hatch refused it.
 from ..schema import ALL_TABLE_KEYS, STRUCTURAL_MAP_FIELDS
 from .registry import (
-    write_reply,
     Context,
-    named,
     DRY_RUN,
     INT,
     OBJ,
@@ -47,6 +45,7 @@ from .registry import (
     STR,
     ToolError,
     check_op_args,
+    named,
     one_of,
     opt_bool,
     opt_int,
@@ -54,6 +53,7 @@ from .registry import (
     prop,
     schema,
     tool,
+    write_reply,
 )
 
 
@@ -300,7 +300,7 @@ def _resolve(value: Any, path: list[str], codec: TextCodec,
                                 % (trail, key, named(current.fields())))
             current = current.get(key)
         elif isinstance(current, list):
-            current = _index_list(current, key, trail)
+            current = _element_at(current, key, trail)
         elif isinstance(current, RubyHash):
             # Per pair, before the three scans this segment costs: the
             # length comes out of the file and the segment count from the
@@ -354,7 +354,13 @@ def _list_index(items: list[Any], key: str, trail: str) -> int:
     return index
 
 
-def _index_list(items: list[Any], key: str, trail: str) -> Any:
+def _element_at(items: list[Any], key: str, trail: str) -> Any:
+    """The element one path segment addresses.
+
+    Named for what it returns. It was `_index_list` next to `_list_index`,
+    which returns the index -- one letter apart, twenty lines apart, and
+    different kinds of thing.
+    """
     return items[_list_index(items, key, trail)]
 
 

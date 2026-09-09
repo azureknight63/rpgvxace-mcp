@@ -8,11 +8,11 @@ why they cannot be separated further: the two files have to move together.
 from __future__ import annotations
 
 from typing import Any
-from ..analysis import reference_preview
+
+from ..analysis import ReferencePreview, _int, reference_preview
 from ..convert import apply_patch, normalize_strings
 from ..project import MAX_MAP_ID, ProjectError
 from ..rubytypes import RubyHash, RubyObject, Table, rendered
-from ..analysis import ReferencePreview, _int
 from ..schema import STRUCTURAL_MAP_FIELDS, new_map_info, on_map
 from .map_common import _RESIZE_REMEDY, _check_budget
 from .registry import (
@@ -29,8 +29,8 @@ from .registry import (
     one_of,
     opt_bool,
     opt_dict,
-    opt_int_default,
     opt_int,
+    opt_int_default,
     opt_str,
     prop,
     refuse_fields,

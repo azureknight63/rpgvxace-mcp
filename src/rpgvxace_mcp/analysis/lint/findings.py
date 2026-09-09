@@ -1,8 +1,8 @@
 """What a finding is, how many there may be, and the tables to read.
 
 The bottom of this package. Every rule module reads this one, none
-of them reads another except along the two edges `report`'s docstring
-names, and nothing here reads a rule.
+of them reads another except along the two edges this package's
+`__init__` names, and nothing here reads a rule.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ class Finding:
 
 def _missing(rule: str, sentence: str, remedy: str,
              location: Location | None = None, checked: str = "") -> Finding:
-    """The commonest finding in this file: a reference with nothing behind it.
+    """The commonest finding in this package: a reference with nothing behind it.
 
     Phrased in one place, and always with a remedy -- a message that only says
     what is wrong leaves the model to guess what to do about it.

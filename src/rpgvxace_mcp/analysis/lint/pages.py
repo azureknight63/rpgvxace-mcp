@@ -7,6 +7,9 @@ from typing import Any
 
 from ...commands import (
     CODE_CALL_COMMON_EVENT,
+    CODE_ERASE_EVENT,
+    CODE_GAME_OVER,
+    CODE_RETURN_TO_TITLE,
     CODE_SCRIPT,
     CODE_SCRIPT_MORE,
     CODE_TRANSFER_PLAYER,
@@ -113,6 +116,19 @@ def _check_shadowing(map_id: int, event_id: int, name: str,
         "page conditions of every multi-page event")]
 
 
+# Commands that end an unconditional autorun page's grip on the player: moving
+# them to another map, erasing the event for this visit, or ending the game.
+CONTROL_RELEASING_CODES = frozenset({CODE_TRANSFER_PLAYER, CODE_ERASE_EVENT,
+                                     CODE_GAME_OVER, CODE_RETURN_TO_TITLE})
+
+
+# Commands that might release control somewhere this file cannot follow: a
+# common event that transfers, or a script calling reserve_transfer or goto. A
+# page containing one of these is left alone rather than reported.
+OPAQUE_ESCAPE_CODES = frozenset({CODE_CALL_COMMON_EVENT, CODE_SCRIPT,
+                                 CODE_SCRIPT_MORE})
+
+
 def _check_autorun(map_id: int, event_id: int, name: str,
                    pages: list[Any],
                    budget: "WalkBudget | None" = None) -> list[Finding]:
@@ -151,18 +167,6 @@ def _check_autorun(map_id: int, event_id: int, name: str,
         _event_at(map_id, event_id, name, len(pages) - 1),
         "the last page of every event, since that is the page that wins when "
         "its conditions match")]
-
-
-# Commands that end an unconditional autorun page's grip on the player: moving
-# them to another map, erasing the event for this visit, or ending the game.
-CONTROL_RELEASING_CODES = frozenset({CODE_TRANSFER_PLAYER, 214, 353, 354})
-
-
-# Commands that might release control somewhere this file cannot follow: a
-# common event that transfers, or a script calling reserve_transfer or goto. A
-# page containing one of these is left alone rather than reported.
-OPAQUE_ESCAPE_CODES = frozenset({CODE_CALL_COMMON_EVENT, CODE_SCRIPT,
-                                 CODE_SCRIPT_MORE})
 
 
 def _has_code(commands: list[Any], codes: AbstractSet[int]) -> bool:

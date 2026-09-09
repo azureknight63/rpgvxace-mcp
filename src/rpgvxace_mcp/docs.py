@@ -29,12 +29,12 @@ from .commands import (
 )
 from .project import CHANGE_LOG, WORK_DIR, Project
 from .schema import (
-    numbered,
     TILESET_FLAG_BITS,
-    TRIGGER_NAMES,
     TILESET_FLAG_BITS_NOTE,
     TILE_ID_RANGES,
     TILE_ID_RANGES_NOTE,
+    TRIGGER_NAMES,
+    numbered,
 )
 
 

@@ -16,14 +16,16 @@ sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
 
 
-from rpgvxace_mcp.tools.search_tools import MAX_SUBJECT_CHARS  # noqa: E402
+from rpgvxace_mcp.tools.search_tools import (  # noqa: E402
+    MAX_SUBJECT_CHARS,
+    _matcher,
+)
 from rpgvxace_mcp.tools import pattern_safety  # noqa: E402
 from rpgvxace_mcp.tools.pattern_safety import (  # noqa: E402
     PatternTooCostly,
     check_pattern,
     check_shape,
 )
-from rpgvxace_mcp.tools.search_tools import _matcher  # noqa: E402
 from rpgvxace_mcp.tools.registry import (  # noqa: E402
     ToolError,
 )

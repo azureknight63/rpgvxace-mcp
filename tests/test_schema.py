@@ -40,8 +40,8 @@ from rpgvxace_mcp.rubytypes import (  # noqa: E402
 )
 from rpgvxace_mcp.schema import (  # noqa: E402
     ACE_PROFILE,
-    VX_PROFILE,
     SchemaWalk,
+    VX_PROFILE,
     map_filename,
     observe_class_fields,
 )
@@ -738,6 +738,91 @@ class TestTheBackupMixinContractHolds(unittest.TestCase):
         idle = sorted(set(BackupStore.NEEDS_FROM_PROJECT) - self.reached())
         self.assertEqual(idle, [],
                          "declared and never reached: " + ", ".join(idle))
+
+
+class TestImportBlocksAreInOrder(unittest.TestCase):
+    """Names inside a multi-line import block are sorted, and named once.
+
+    Found by reading, in ten of twelve tool modules at once: `opt_int_default`
+    above `opt_int` in six of them, `decoded` below `tool` in four, and a
+    run of recently-added names pushed to the head of the block in five.
+    Every one of them is the same thing -- a name appended where the diff
+    was smallest rather than where a reader would look for it -- and the
+    cost is that a block of thirty names stops being scannable, so the
+    thirty-first gets appended too. `misc_tools` was importing a name
+    nothing had read since the module was split.
+
+    Two rules, no third-party linter: this project has no dependencies and
+    adding one to sort names would be a worse trade than a short test.
+
+    Plain `sorted()`, which is what the blocks already in order use:
+    `Location` < `MAX_WALK_STEPS` < `WalkBudget` < `_db_at` < `iter_maps`.
+    """
+
+    def modules(self):
+        root = Path(__file__).resolve().parent.parent
+        found = (sorted((root / "src").rglob("*.py"))
+                 + sorted((root / "tests").glob("*.py"))
+                 + sorted((root / "scripts").glob("*.py")))
+        self.assertGreater(len(found), 30, "scanned almost nothing")
+        return found
+
+    def blocks(self, path):
+        """Every `from X import (a, b, c)` written one name per line."""
+        import ast
+        import re
+        text = path.read_text(encoding="utf-8")
+        lines = text.split("\n")
+        for node in ast.parse(text).body:
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.end_lineno <= node.lineno:
+                continue
+            names = []
+            for line in lines[node.lineno:node.end_lineno - 1]:
+                match = re.fullmatch(r"    ([A-Za-z_][A-Za-z0-9_]*),", line)
+                if match is None:
+                    names = None
+                    break
+                names.append(match.group(1))
+            # A block with a comment or an `as` in it is left alone: the
+            # comment is there to group, which is a reason to be unsorted.
+            if names:
+                yield node.lineno, names
+
+    def test_every_multiline_import_block_is_sorted(self):
+        out = []
+        for path in self.modules():
+            for line, names in self.blocks(path):
+                if names != sorted(names):
+                    wrong = next(a for a, b in zip(names, sorted(names))
+                                 if a != b)
+                    out.append("%s:%d (%s)" % (path.name, line, wrong))
+        self.assertEqual(out, [], "these import blocks are not sorted: "
+                                  + ", ".join(out))
+
+    def test_a_module_is_imported_from_once(self):
+        """`from ..commands import (...)` and then `from ..commands import x`.
+
+        Two statements naming one module put the same names in two places to
+        look, and that is how the second one goes unread: `map_edit_tools`
+        had `reference_preview` on its own four lines above the block that
+        already imported two other names from `..analysis`.
+        """
+        import ast
+        out = []
+        for path in self.modules():
+            seen = {}
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in tree.body:
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                where = "." * node.level + (node.module or "")
+                if where in seen:
+                    out.append("%s:%d and :%d both import from %s"
+                               % (path.name, seen[where], node.lineno, where))
+                seen[where] = node.lineno
+        self.assertEqual(out, [], "; ".join(out))
 
 
 # Last in the file, deliberately. It used to sit mid-module,

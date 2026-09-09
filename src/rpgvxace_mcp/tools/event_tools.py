@@ -14,8 +14,8 @@ from ..commands import (
     compile_commands,
     move_route_steps,
     param_specs,
+    render_script,
 )
-from ..commands import render_script
 from ..convert import (
     TABLE_MODES,
     apply_patch,
@@ -29,43 +29,43 @@ from ..rubytypes import RubyHash, RubyObject, as_list
 from ..schema import (
     COMMON_EVENT_TRIGGER_NAMES,
     TRIGGER_NAMES,
-    on_map,
-    unreadable_events_note,
     new_event,
     new_event_command,
     new_page,
+    on_map,
+    unreadable_events_note,
 )
 from .registry import (
-    write_reply,
-    MAX_OPS,
-    check_op_args,
-    echo,
-    known_fields,
-    refuse_unknown_fields,
-    refuse_fields,
-    ops_arg,
-    StagedWrite,
-    int_list,
-    opt_dict,
     ARR,
     BOOL,
     Context,
     DRY_RUN,
     INT,
+    MAX_OPS,
     OBJ,
     REFRESH,
     STR,
+    StagedWrite,
     ToolError,
+    check_op_args,
+    decoded,
+    echo,
+    int_list,
+    known_fields,
     one_of,
+    ops_arg,
     opt_bool,
-    opt_int_default,
+    opt_dict,
     opt_int,
+    opt_int_default,
     opt_list,
     opt_str,
     prop,
+    refuse_fields,
+    refuse_unknown_fields,
     schema,
     tool,
-    decoded,
+    write_reply,
 )
 
 # The highest event id a map will hold. The editor numbers events from 1 and no
@@ -182,7 +182,7 @@ DSL_HELP = (
 
 
 def refuse_inert(args: dict[str, Any], names: "tuple[str, ...]",
-                 because: str) -> None:
+                 because: str, *, remedy: str) -> None:
     """Refuse an argument this branch does not read.
 
     `check_op_args` does this for a tool that selects with an `op`. These two
@@ -190,13 +190,22 @@ def refuse_inert(args: dict[str, Any], names: "tuple[str, ...]",
     -- so the gate does not reach them, and each dropped the arguments its
     branch has no use for. The rule is the same one and so is the reason: a
     dropped argument reports the same success as one that was applied.
+
+    `remedy` is per call site and has no default, because there is no
+    sentence that is true at all of them. This said "Ask for one or the
+    other" everywhere, which is the answer when a caller gave two
+    alternatives and may have one -- and is not the answer for `event_get
+    common_event_id=1 page=0`, where the three inert names are alternatives
+    to nothing and the caller simply has to drop them. A refusal whose
+    remedy is wrong is worse than one with none: the model does as it says,
+    is refused again, and has now been told twice that the fix is a choice
+    it does not have.
     """
     inert = sorted(name for name in names if args.get(name) is not None)
     if inert:
         raise ToolError(
             "%s does not read %s. %s"
-            % (because, " or ".join(echo(name) for name in inert),
-               "Ask for one or the other."))
+            % (because, " or ".join(echo(name) for name in inert), remedy))
 
 
 def _one_target(args: dict[str, Any], verb: str) -> "tuple[int | None, int | None]":
@@ -317,7 +326,8 @@ def _common_event_view(ctx: Context, args: dict[str, Any], common_id: int,
     refuse_inert(
         args, ("event_ids", "name_contains", "page"),
         "a common event has no pages and is addressed by its own id, so "
-        "reading one")
+        "reading one",
+        remedy="Drop them, or read a map's events with map_id instead.")
     common = ctx.project.get_entry("common_events", common_id, refresh)
     if common is None:
         raise ToolError("there is no common event %d" % common_id)
@@ -1152,7 +1162,8 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     if opt_bool(args, "move_commands"):
         refuse_inert(args, ("code", "search"),
                      "move_commands lists the move route codes, which are a "
-                     "separate set from the command codes, so it")
+                     "separate set from the command codes, so it",
+                     remedy="Drop them, or ask without move_commands.")
         # Below `modelled`, not above it: this branch used to return first and
         # so was the one reply that omitted the key the description promises
         # every reply carries. A move route's codes are borrowed for an
@@ -1172,7 +1183,8 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     code = opt_int(args, "code")
     if code is not None:
         refuse_inert(args, ("search",),
-                     "a lookup of one code answers for that code alone, so it")
+                     "a lookup of one code answers for that code alone, so it",
+                     remedy="Ask for one or the other.")
         entry: dict[str, Any] = {"code": code, "name": command_name(code)}
         # A list, because both notes can apply at once: a code this engine
         # does not dispatch AND whose layout is unrecorded used to lose the
