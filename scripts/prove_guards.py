@@ -161,6 +161,8 @@ NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
 BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
 INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
 AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
+CACHEBOUND = ("tests/test_tools.py::TestTheFileCacheIsBounded::")
+FOREIGN = ("tests/test_tools.py::TestAForeignBackupDirectoryIsSkipped::")
 ONCE = ("tests/test_tools.py::TestAMapEditResolvesEachArgumentOnce::")
 CRAFTED = ("tests/test_tools.py::TestACraftedNameIsBoundedInAReplyToo::")
 ASSETSTALE = ("tests/test_tools.py::TestAnAssetAddedMidSessionIsSeen::")
@@ -1900,6 +1902,28 @@ GUARDS = [
         [CRAFTED + "test_map_list_caps_a_crafted_name",
          CRAFTED + "test_map_list_sanitises_control_characters"],
         'four copies of this decode in the tools layer had neither the cap nor the sanitising that analysis._text has, and that docstring says why: a value out of a file this server did not write would otherwise be repeated whole into every message about it. Measured -- a 1,000,006-character map name carrying an ANSI escape went into map_list intact while the same name in a finding came back capped',
+    ),
+    Guard(
+        'the decoded-file cache has a total ceiling', PROJECT,
+        '        self._evict_over_budget()',
+        '        pass',
+        [CACHEBOUND + "test_the_cache_stays_within_its_ceiling"],
+        'MAX_DATA_FILE_BYTES bounds one file at 128 MB and nothing bounded the sum, while Marshal decodes at about 32 times its on-disk size for the shape a database table has -- measured, 1.61 MB of file becoming 52 MB held, with no eviction path but the named invalidations',
+    ),
+    Guard(
+        'a staged file is never evicted', REGISTRY,
+        '        self.project.pin(*filenames)',
+        '        pass',
+        [CACHEBOUND + "test_a_staged_file_is_never_evicted"],
+        'every editing tool mutates the value in the cache and then asks for it to be written, so evicting that entry in between writes the file as it was on disk and reports the edit as applied',
+    ),
+    Guard(
+        'a foreign backup directory is stepped over', PROJECT,
+        '            if stale.name in spared or _is_reparse_point(stale):',
+        '            if stale.name in spared or stale.is_symlink():',
+        [FOREIGN + "test_the_real_snapshots_are_still_pruned",
+         FOREIGN + "test_pruning_does_not_fail_because_of_it"],
+        "is_symlink() is False for an NTFS directory junction, so the filter that meant to step over a directory this server did not create stepped into one and _contained then failed the prune for the whole project. Not the data loss a review predicted -- rmtree refuses a junction on 3.11 and _contained raises before it -- but one foreign directory stopping the work, with a message about containment rather than about a directory that was never ours",
     ),
 ]
 

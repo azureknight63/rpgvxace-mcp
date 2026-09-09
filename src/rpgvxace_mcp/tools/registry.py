@@ -96,9 +96,16 @@ class Context:
         Reading is unaffected -- dropping the cache costs one re-parse.
         """
         keeper = StagedWrite(self.project, filenames)
+        # Pinned for the length of the block. The mutation these tools make
+        # lives in the project's cache until it is saved, and that cache
+        # evicts when it goes over budget -- dropping one of these entries in
+        # between would write the file as it was on disk and report the edit
+        # as applied.
+        self.project.pin(*filenames)
         try:
             yield keeper
         finally:
+            self.project.unpin(*filenames)
             for filename in filenames:
                 if filename not in keeper.written:
                     self.project.forget_file(filename)

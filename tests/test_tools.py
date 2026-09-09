@@ -5181,6 +5181,10 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
         # narrow the request, so there is nothing a caller cannot detect.
         "MAX_MESSAGE_CHARS": "one JSON-RPC request frame",
         "MAX_RESPONSE_CHARS": "one JSON-RPC response frame",
+        # Crossing this costs a re-parse and nothing else: no refusal, no
+        # truncation, nothing in a reply. A caller cannot detect it and has
+        # nothing to do about it, which is the test for "internal" here.
+        "MAX_CACHED_BYTES": "how much decoded file the cache keeps",
     }
 
     CEILING = re.compile(
@@ -6694,3 +6698,179 @@ class TestOneDecodeForTheWholeToolsLayer(unittest.TestCase):
 
         value = RubyString(("E" * 5000).encode("utf-8"))
         self.assertEqual(decoded(Holder(), value), _text(Holder(), value))
+
+
+class TestTheFileCacheIsBounded(ToolTest):
+    """The cache evicts, oldest first, and never drops a staged file."""
+
+    def setUp(self):
+        super().setUp()
+        from rpgvxace_mcp import project as project_module
+        self.module = project_module
+        original = project_module.MAX_CACHED_BYTES
+        self.addCleanup(setattr, project_module, "MAX_CACHED_BYTES", original)
+        # Small enough that the fixture's own files cross it.
+        project_module.MAX_CACHED_BYTES = 2048
+
+    def read_everything(self):
+        """Touch every data file, so the cache is asked to hold them all."""
+        for key in sorted(self.project.data_files):
+            try:
+                self.project.load_data(key)
+            except Exception:
+                pass
+        for map_id in sorted(self.project.map_ids_on_disk()):
+            self.project.load_map(map_id)
+
+    def cached_bytes(self):
+        return sum(entry.size for entry in self.project._cache.values())
+
+    def test_the_cache_stays_within_its_ceiling(self):
+        """Or holds exactly one file, which is the honest exception.
+
+        A file larger than the whole ceiling still has to be held to be
+        served, so the bound is "within the ceiling, or one entry" rather than
+        an absolute byte count. Anything looser would not be a bound.
+        """
+        self.read_everything()
+        held, count = self.cached_bytes(), len(self.project._cache)
+        self.assertTrue(
+            held <= self.module.MAX_CACHED_BYTES or count == 1,
+            "the cache holds %d bytes of source across %d files against a "
+            "ceiling of %d, and Marshal decodes at about 32 times that"
+            % (held, count, self.module.MAX_CACHED_BYTES))
+
+    def test_it_keeps_something(self):
+        """A cache that evicts everything is a cache that does nothing."""
+        self.read_everything()
+        self.assertTrue(self.project._cache,
+                        "eviction emptied the cache entirely")
+
+    def test_the_most_recent_read_survives(self):
+        """Oldest first, so the file a caller is working on stays."""
+        self.read_everything()
+        last = self.project.filename_for("items")
+        self.project.load_data("items")          # now the newest entry
+        self.assertIn(last, self.project._cache,
+                      "the file read most recently was evicted, so a caller "
+                      "working through one table re-parses it every call")
+
+    def test_a_staged_file_is_never_evicted(self):
+        """The hazard: eviction between the mutation and the write.
+
+        Every editing tool changes the value in the cache and then asks for it
+        to be saved. Dropping that entry in between would write the file as it
+        was on disk and report the edit as applied.
+        """
+        filename = self.project.filename_for("items")
+        with self.ctx.staged(filename) as write_landed:
+            entry = self.project.get_entry("items", 1)
+            entry.set("name", self.project.codec.make_string("Marked"))
+            # Enough other reads to push the budget well over.
+            self.read_everything()
+            self.assertIn(filename, self.project._cache,
+                          "the staged file was evicted mid-write")
+            write_landed.save(filename, tool="test", summary="marked")
+
+        self.assertEqual(
+            self.reopen().project.get_entry("items", 1).get("name").data,
+            b"Marked",
+            "the edit did not reach the disk, so eviction discarded it")
+
+    def test_an_ordinary_project_is_never_evicted_from(self):
+        """The ceiling is ten times the real project; it must not bite."""
+        self.module.MAX_CACHED_BYTES = 16 * 1024 * 1024
+        self.read_everything()
+        held = len(self.project._cache)
+        self.read_everything()
+        self.assertEqual(len(self.project._cache), held,
+                         "a fixture-sized project is being evicted from, so "
+                         "every call re-parses")
+
+
+class TestAForeignBackupDirectoryIsSkipped(ToolTest):
+    """Pruning steps over what it did not create, whatever kind of link it is.
+
+    Windows-only, because a directory junction is the case `is_symlink()`
+    misses and there is no portable way to make one.
+    """
+
+    def setUp(self):
+        super().setUp()
+        if sys.platform != "win32":
+            self.skipTest("a directory junction is a Windows construct")
+        self.project = Project(self.tmp / "project", backup_keep=1)
+        self.ctx = Context(self.project)
+
+    def plant_junction(self, name="20200101-000000"):
+        """A junction in the backups folder, named like one of our snapshots."""
+        import subprocess
+
+        target = self.tmp / "precious"
+        target.mkdir(exist_ok=True)
+        (target / "important.txt").write_text("keep me", encoding="utf-8")
+        root = self.project.backup_root()
+        root.mkdir(parents=True, exist_ok=True)
+        link = root / name
+        done = subprocess.run(["cmd", "/c", "mklink", "/J", str(link),
+                               str(target)], capture_output=True, text=True)
+        if done.returncode != 0:
+            self.skipTest("could not create a junction: %s"
+                          % (done.stderr or done.stdout).strip())
+        return link, target
+
+    def test_pruning_does_not_fail_because_of_it(self):
+        self.project.snapshot(label="one")
+        self.project.snapshot(label="two")
+        link, _ = self.plant_junction()
+        removed = self.project.prune_backups()
+        self.assertNotIn(link.name, removed,
+                         "a directory this server did not create was listed "
+                         "as removed")
+
+    def test_the_junction_is_left_alone(self):
+        self.project.snapshot(label="one")
+        link, target = self.plant_junction()
+        self.project.prune_backups()
+        self.assertTrue(link.exists(), "the junction itself was removed")
+        self.assertTrue((target / "important.txt").exists(),
+                        "the junction's target lost a file")
+
+    def stale_snapshot(self, stamp):
+        """A snapshot directory as a previous run would have left it.
+
+        Pruning is for earlier runs: this session's own directory is spared,
+        and two `snapshot()` calls in one session share it -- the module backs
+        a file up once per run.
+        """
+        folder = self.project.backup_root() / stamp
+        (folder / "Data").mkdir(parents=True, exist_ok=True)
+        (folder / "Data" / "Items.rvdata2").write_bytes(b"old")
+        return folder
+
+    def test_the_real_snapshots_are_still_pruned(self):
+        """Skipping the foreign one must not stop the work."""
+        self.project.snapshot(label="current")
+        older = self.stale_snapshot("20250101-000000-one")
+        self.stale_snapshot("20250102-000000-two")
+        self.plant_junction()
+
+        removed = self.project.prune_backups()
+        self.assertIn(older.name, removed,
+                      "a stale snapshot was not pruned, so one foreign "
+                      "directory stopped the whole operation: %s" % removed)
+        self.assertFalse(older.exists())
+
+    def test_the_tool_reports_it_plainly(self):
+        self.project.snapshot(label="one")
+        self.project.snapshot(label="two")
+        self.plant_junction()
+        out = self.call("backups", op="prune")
+        self.assertIn("removed", out)
+
+    def test_a_dry_run_says_the_same_thing(self):
+        self.project.snapshot(label="one")
+        self.project.snapshot(label="two")
+        link, _ = self.plant_junction()
+        would = self.project.prune_backups(dry_run=True)
+        self.assertNotIn(link.name, would)

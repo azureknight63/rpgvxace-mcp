@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 import zlib
 from collections import deque
@@ -103,6 +104,41 @@ _RESERVED_NAMES = frozenset(
 
 # A snapshot directory this server made: the stamp, and an optional label.
 _BACKUP_STAMP = re.compile(r"^\d{8}-\d{6}(-[A-Za-z0-9._-]+)?$")
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """Whether this is a symlink, a junction, or any other reparse point.
+
+    `Path.is_symlink()` is False for an NTFS directory junction -- which is
+    why `os.path.isjunction` had to be added in 3.12 -- so the prune filter
+    that meant to step over a directory it did not create stepped straight
+    into one.
+
+    What that actually did is worth recording, because it is not what a review
+    of this code predicted. The prediction was that `shutil.rmtree` would
+    recurse through the junction and delete the target's contents. Measured on
+    3.11: rmtree refuses ("Cannot call rmtree on a symbolic link") and the
+    target survives -- and it never gets that far anyway, because
+    `_contained` resolves the junction to its target, finds it outside the
+    backup root, and raises. So there was no data loss. What there was is one
+    foreign directory failing the prune for the whole project, with a message
+    about containment rather than about a directory that was never ours.
+
+    Three checks because no single one covers every version: `is_symlink` for
+    a real symlink, `os.path.isjunction` where it exists, and the reparse
+    attribute for 3.11 on Windows.
+    """
+    if path.is_symlink():
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None and isjunction(path):
+        return True
+    try:
+        attributes = os.lstat(path).st_file_attributes
+    except (AttributeError, OSError):
+        # Not Windows, or the entry went away between listing and asking.
+        return False
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 # Project files that identify an engine, most specific first. The modelled
 # engines come from their own profiles so this cannot drift; XP has no profile,
@@ -216,6 +252,28 @@ def _contained(path: Path, inside: Path, what: str) -> Path:
     return resolved
 
 
+# How much *source* the decoded-file cache may hold in total.
+#
+# MAX_DATA_FILE_BYTES bounds one file; nothing bounded the sum, and the cache
+# has no eviction path but the named invalidations. Marshal decodes well above
+# its on-disk size -- measured at 32.4x for the shape a database table really
+# has, 120,000 distinct small objects, where 1.61 MB of file became 52 MB
+# held.
+#
+# Counted in source bytes because measuring a decoded tree means walking it,
+# which is the cost this cache exists to avoid; the source size is exact,
+# free, and already on every entry.
+#
+# 16 MB is ten times the developer's entire real project (1.61 MB across 54
+# files), so it will not evict in practice, and it bounds the worst case at
+# roughly half a gigabyte rather than at nothing.
+#
+# One file may exceed it: a file larger than the whole ceiling still has to be
+# held to be served, so the guarantee is "within the ceiling, or one entry".
+# MAX_DATA_FILE_BYTES is what bounds that one.
+MAX_CACHED_BYTES = 16 * 1024 * 1024
+
+
 class CachedFile:
     """One data file as this server last saw it on disk.
 
@@ -242,7 +300,14 @@ class Project:
         self.root = Path(root).resolve()
         self.read_only = read_only
         self.backup_keep = backup_keep
+        # Insertion-ordered, and read order is maintained by `_touch`, so
+        # eviction can take the least recently used.
         self._cache: dict[str, CachedFile] = {}
+        # Files an open staged write is holding. Never evicted: every editing
+        # tool mutates the value in this cache and then asks for it to be
+        # written, so dropping the entry in between would save the file as it
+        # was on disk and report the edit as applied.
+        self._pinned: set[str] = set()
         self._assets: dict[str, frozenset[str]] = {}
         self._backed_up: set[str] = set()
         self._map_ids: list[int] | None = None
@@ -492,6 +557,7 @@ class Project:
 
     # -- loading --------------------------------------------------------------
     def load_file(self, filename: str, refresh: bool = False) -> Any:
+        self._touch(filename)
         cached = self._cache.get(filename)
         if cached is not None and not refresh:
             return cached.value
@@ -518,6 +584,9 @@ class Project:
         self._cache[filename] = CachedFile(
             value, stat.st_mtime_ns, stat.st_size, warnings,
             hashlib.blake2b(raw, digest_size=16).digest())
+        # After the new entry is in, so the file just asked for is the last
+        # thing eviction would consider rather than the first.
+        self._evict_over_budget()
         return value
 
     def load_data(self, key: str, refresh: bool = False) -> Any:
@@ -1028,7 +1097,7 @@ class Project:
                       reverse=True)
         removed = []
         for stale in dirs[self.backup_keep:]:
-            if stale.name in spared or stale.is_symlink():
+            if stale.name in spared or _is_reparse_point(stale):
                 continue
             _contained(stale, root, "backup %r" % stale.name)
             if not dry_run:
@@ -1111,6 +1180,36 @@ class Project:
         frozen = frozenset(names)
         self._assets[kind] = frozen
         return frozen
+
+    def pin(self, *filenames: str) -> None:
+        """Hold these files in the cache for the length of a staged write."""
+        self._pinned.update(filenames)
+
+    def unpin(self, *filenames: str) -> None:
+        self._pinned.difference_update(filenames)
+
+    def _touch(self, filename: str) -> None:
+        """Move one entry to the most-recently-used end."""
+        entry = self._cache.pop(filename, None)
+        if entry is not None:
+            self._cache[filename] = entry
+
+    def _evict_over_budget(self) -> None:
+        """Drop least-recently-used files until the cache fits its ceiling.
+
+        Never a pinned file, and never the last one: a cache that evicts
+        everything does nothing, and the entry just loaded is the one the
+        caller is about to use.
+        """
+        held = sum(entry.size for entry in self._cache.values())
+        if held <= MAX_CACHED_BYTES:
+            return
+        for filename in list(self._cache):
+            if held <= MAX_CACHED_BYTES or len(self._cache) <= 1:
+                return
+            if filename in self._pinned:
+                continue
+            held -= self._cache.pop(filename).size
 
     def forget_assets(self) -> None:
         """Drop the remembered asset listings, so the next check re-reads them."""
