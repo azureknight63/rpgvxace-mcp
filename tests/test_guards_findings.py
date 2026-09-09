@@ -21,6 +21,10 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from rpgvxace_mcp import marshal_rb  # noqa: E402
 from rpgvxace_mcp.analysis import MAX_FINDINGS  # noqa: E402
 from rpgvxace_mcp.project import Project  # noqa: E402
+from rpgvxace_mcp.schema import (  # noqa: E402
+    new_event,
+    new_event_command,
+)
 from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyHash,
     RubyObject,
@@ -208,11 +212,7 @@ class TestNoWalkCollectsPastTheCeiling(ToolTest):
                             ("through", False), ("list", [])):
             page.set(name, value)
 
-        event = RubyObject("RPG::Event")
-        event.set("id", 1)
-        event.set("name", self.project.codec.make_string("E"))
-        event.set("x", 0)
-        event.set("y", 0)
+        event = new_event(1, "E")
         event.set("pages", [page] * self.PAGES)
 
         events = RubyHash()
@@ -369,11 +369,9 @@ class TestNarrowingValidateActuallyNarrowsIt(ToolTest):
         width, height = small.get("width"), small.get("height")
         game_map = self.project.load_map(1)
         event = game_map.get("events").sorted_items()[0][1]
-        command = RubyObject("RPG::EventCommand")
-        command.set("code", 201)
-        command.set("indent", 0)
         # Well outside the target map, whatever size it is.
-        command.set("parameters", [0, target, width + 50, height + 50, 0, 0])
+        command = new_event_command(
+            201, 0, [0, target, width + 50, height + 50, 0, 0])
         event.get("pages")[0].set("list", [command])
         self.project.path_for(self.project.map_file(1)).write_bytes(
             marshal_rb.dump(game_map))
@@ -815,11 +813,7 @@ class TestTheCeilingStopsTheWalkingToo(ToolTest):
     def craft_shared_events(self, pages):
         """One event object across many slots, each page broken the same way."""
         game_map = self.project.load_map(1)
-        event = RubyObject("RPG::Event")
-        event.set("id", 1)
-        event.set("name", self.project.codec.make_string("E"))
-        event.set("x", 0)
-        event.set("y", 0)
+        event = new_event(1, "E")
         event.set("pages", pages)
         events = RubyHash()
         for event_id in range(1, self.EVENTS + 1):
@@ -869,10 +863,8 @@ class TestTheCeilingStopsTheWalkingToo(ToolTest):
         page.set("condition", RubyObject("RPG::Event::Page::Condition"))
         page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
         page.set("trigger", 0)
-        jump = RubyObject("RPG::EventCommand")
-        jump.set("code", 119)                 # Jump to Label, with no Label
-        jump.set("indent", 0)
-        jump.set("parameters", [self.project.codec.make_string("nowhere")])
+        # 119 is Jump to Label, and there is no Label.
+        jump = new_event_command(119, 0, [self.project.codec.make_string("nowhere")])
         page.set("list", [jump] * 500)
         self.craft_shared_events([page])
         looked = []
@@ -926,17 +918,9 @@ class TestAFindingNamesTheRightCommand(ValidateTest):
         page = event.get("pages")[0]
         commands = []
         for _ in range(3):
-            comment = RubyObject("RPG::EventCommand")
-            comment.set("code", 108)
-            comment.set("indent", 0)
-            comment.set("parameters", [self.project.codec.make_string("x")])
-            commands.append(comment)
+            commands.append(new_event_command(108, 0, [self.project.codec.make_string("x")]))
         commands.append(bad)
-        end = RubyObject("RPG::EventCommand")
-        end.set("code", 0)
-        end.set("indent", 0)
-        end.set("parameters", [])
-        commands.append(end)
+        commands.append(new_event_command())
         page.set("list", commands)
         self.project.save_file(self.project.map_file(1), tool="test",
                                summary="crafted")
@@ -948,11 +932,7 @@ class TestAFindingNamesTheRightCommand(ValidateTest):
         return rows[0]
 
     def command(self, code, parameters, indent=0):
-        command = RubyObject("RPG::EventCommand")
-        command.set("code", code)
-        command.set("indent", indent)
-        command.set("parameters", parameters)
-        return command
+        return new_event_command(code, indent, parameters)
 
     def test_a_missing_label_names_index_three(self):
         self.craft(self.command(

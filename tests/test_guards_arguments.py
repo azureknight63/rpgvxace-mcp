@@ -22,12 +22,13 @@ from build_project import build  # noqa: E402
 
 from rpgvxace_mcp.commands import CommandError  # noqa: E402
 from rpgvxace_mcp import marshal_rb  # noqa: E402
+from rpgvxace_mcp.schema import (  # noqa: E402
+    PROFILES,
+    new_event_command,
+)
 from rpgvxace_mcp.rubytypes import RubyHash, RubyObject, Table  # noqa: E402
 from rpgvxace_mcp.project import (  # noqa: E402
     Project,
-)
-from rpgvxace_mcp.schema import (  # noqa: E402
-    PROFILES,
 )
 from rpgvxace_mcp.tools.registry import (  # noqa: E402
     Context,
@@ -1632,6 +1633,14 @@ class TestAnArrayFieldThatIsNotAnArrayIsReadSafely(ToolTest):
         """Put `value` where a command's @parameters belongs."""
         game_map = self.project.load_map(1)
         page = game_map.get("events").get(1).get("pages")[0]
+        # By hand, not through `new_event_command`: that constructor does
+        # `list(parameters or [])`, which coerces the very thing this test
+        # crafts. A RubyHash where an Array belongs is the hostile shape
+        # under test, so it has to reach the file uncoerced.
+        # By hand, not through `new_event_command`: that constructor does
+        # `list(parameters or [])`, which coerces the very thing this test
+        # crafts. A RubyHash where an Array belongs is the hostile shape
+        # under test, so it has to reach the file uncoerced.
         command = RubyObject("RPG::EventCommand")
         command.set("code", 401)
         command.set("indent", 0)

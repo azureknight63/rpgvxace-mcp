@@ -2189,8 +2189,8 @@ GUARDS = [
     ),
     Guard(
         'a transfer destination refuses a coercible value', COMMANDS,
-        """            _needs_int(t["map_id"], "transfer.map_id"),""",
-        """            int(t["map_id"]),""",
+        """        _needs_int(t["map_id"], "transfer.map_id"),""",
+        """        int(t["map_id"]),""",
         [DSLIDS + "test_a_transfer_destination_map_is_not_coerced",
          DSLIDS + "test_every_id_in_the_compiler_goes_through_the_checker"],
         'a Transfer Player destination is what the command is, and int(2.9) is 2, so a wrong-typed coordinate moved the player one tile from where the caller said and the reply reported success',

@@ -25,6 +25,10 @@ from rpgvxace_mcp import (  # noqa: E402
     commands as command_module,
     marshal_rb,
 )
+from rpgvxace_mcp.schema import (  # noqa: E402
+    new_event,
+    new_event_command,
+)
 from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyHash,
     RubyObject,
@@ -470,10 +474,7 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
     LONG = 400_000
 
     def command(self, code, parameters):
-        cmd = RubyObject("RPG::EventCommand")
-        cmd.set("code", code)
-        cmd.set("indent", 0)
-        cmd.set("parameters", parameters)
+        cmd = new_event_command(code, 0, parameters)
         return cmd
 
     def line_for(self, code, parameters):
@@ -542,11 +543,7 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
         page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
         page.set("trigger", 0)
         page.set("list", [self.command(401, [huge])])
-        event = RubyObject("RPG::Event")
-        event.set("id", 1)
-        event.set("name", self.project.codec.make_string("E"))
-        event.set("x", 0)
-        event.set("y", 0)
+        event = new_event(1, "E")
         event.set("pages", [page])
         events = RubyHash()
         events.set(1, event)

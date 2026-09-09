@@ -24,7 +24,11 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from build_project import build  # noqa: E402
 
 from rpgvxace_mcp import marshal_rb  # noqa: E402
-from rpgvxace_mcp.schema import new_page  # noqa: E402
+from rpgvxace_mcp.schema import (  # noqa: E402
+    new_event,
+    new_event_command,
+    new_page,
+)
 from rpgvxace_mcp.project import (  # noqa: E402
     Project,
 )
@@ -222,11 +226,7 @@ class CraftedMap:
             page.set("condition", condition)
         page.set("list", commands)
 
-        event = RubyObject("RPG::Event")
-        event.set("id", 1)
-        event.set("name", self.project.codec.make_string("E"))
-        event.set("x", 0)
-        event.set("y", 0)
+        event = new_event(1, "E")
         event.set("pages", [page] * pages)
 
         hash_of_events = RubyHash()
@@ -265,10 +265,8 @@ class SharedObjectMap(CraftedMap):
 
     def craft_shared_map(self):
         """Every command, page and event one shared object."""
-        command = RubyObject("RPG::EventCommand")
-        command.set("code", 108)
-        command.set("indent", 0)
-        command.set("parameters", [self.project.codec.make_string("x")])
+        command = new_event_command(108, 0,
+                                    [self.project.codec.make_string("x")])
         self.craft_page_map([command] * self.LIST_LEN, self.PAGES,
                             self.EVENTS, 64 * 1024, self.WHAT)
 

@@ -28,6 +28,7 @@ from rpgvxace_mcp.analysis import (  # noqa: E402
 from rpgvxace_mcp.project import (  # noqa: E402
     Project,
 )
+from rpgvxace_mcp.schema import new_event  # noqa: E402
 from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyHash,
     RubyObject,
@@ -934,11 +935,7 @@ class TestATruncatedSummarySaysSoOnEveryPath(ToolTest):
         page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
         page.set("trigger", 0)
         page.set("list", [])
-        event = RubyObject("RPG::Event")
-        event.set("id", 1)
-        event.set("name", self.project.codec.make_string("E"))
-        event.set("x", 0)
-        event.set("y", 0)
+        event = new_event(1, "E")
         event.set("pages", [page] * count)
         events = RubyHash()
         events.set(1, event)

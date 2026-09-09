@@ -14,7 +14,7 @@ need one of them, read a working example out of the project first
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from .convert import TextCodec, decoded_text
 from .rubytypes import RubyObject, RubyString, as_list, rendered
@@ -286,6 +286,18 @@ CODE_COMMENT = 108
 # and twice for the game. Named because the autorun rule reads them
 # as a set beside CODE_TRANSFER_PLAYER, and three bare integers in
 # that set were the only members a reader had to look up.
+# The codes `compile_commands` emits. Named because the compiler's
+# dispatch table spelled seven of them as bare integers beside six
+# that had names, in the same chain -- and a module that names some
+# of its codes and not others is one where the next one gets a name
+# only if the author happens to look up.
+CODE_EXIT_EVENT = 115
+CODE_LOOP = 112
+CODE_BREAK_LOOP = 113
+CODE_REPEAT_ABOVE = 413
+CODE_CONTROL_SWITCHES = 121
+CODE_CONTROL_SELF_SWITCH = 123
+CODE_WAIT = 230
 CODE_ERASE_EVENT = 214
 CODE_GAME_OVER = 353
 CODE_RETURN_TO_TITLE = 354
@@ -439,7 +451,7 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
         return 'When "%s"' % _text(p(1, ""), codec)
     if code == 111:
         return "%s: %s" % (name, describe_condition(params, codec))
-    if code == 121:
+    if code == CODE_CONTROL_SWITCHES:
         target = _id_range(p(0, 0), p(1, 0), "switch", "switches")
         return "%s: %s = %s" % (name, target, SWITCH_OPERATIONS.get(p(2), p(2)))
     if code == 122:
@@ -456,7 +468,7 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
             # label the parameter as though the layout were confirmed.
             value = "operand kind %s: %s" % (kind, _value(p(4), codec))
         return "%s: %s %s %s" % (name, target, VARIABLE_OPERATIONS.get(p(2), "?"), value)
-    if code == 123:
+    if code == CODE_CONTROL_SELF_SWITCH:
         return "%s: %s = %s" % (name, _text(p(0, ""), codec),
                                 SWITCH_OPERATIONS.get(p(1), p(1)))
     if code == CODE_CALL_COMMON_EVENT:
@@ -465,7 +477,7 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
         return "%s: map %s at (%s, %s)" % (name, p(1), p(2), p(3))
     if code == 205:
         return "%s: %s" % (name, _character(p(0)))
-    if code == 230:
+    if code == CODE_WAIT:
         return "%s: %s frames" % (name, p(0))
     if code in AUDIO_COMMAND_KINDS:
         audio = p(0)
@@ -624,86 +636,9 @@ def _cmd(code: int, indent: int, params: list[Any] | None = None) -> RubyObject:
 
 def _compile_entry(entry: dict[str, Any], enc: TextCodec, indent: int,
                    depth: int = 0) -> list[RubyObject]:
-    if "raw" in entry:
-        raw = _needs_object(entry["raw"], "raw")
-        if "code" not in raw:
-            raise CommandError('a "raw" entry needs a "code"')
-        code = _needs_int(raw["code"], "raw.code")
-        given = raw.get("indent", indent)
-        raw_indent = _needs_int(given, "raw.indent")
-        if not 0 <= raw_indent <= MAX_AUTHORED_INDENT:
-            raise CommandError(
-                "raw.indent must be between 0 and %d, got %d"
-                % (MAX_AUTHORED_INDENT, raw_indent))
-        params = raw.get("parameters", [])
-        if not isinstance(params, list):
-            raise CommandError("raw.parameters must be an array, got %r" % (params,))
-        return [_cmd(code, raw_indent, [_literal(v, enc) for v in params])]
-
-    if "text" in entry:
-        return _compile_text(entry, enc, indent)
-
-    if "comment" in entry:
-        return _multiline(108, 408, str(entry["comment"]), enc, indent)
-
-    if "script" in entry:
-        return _multiline(355, 655, str(entry["script"]), enc, indent)
-
-    if "switch" in entry:
-        state = _switch_state(entry)
-        switch_id = _needs_int(entry["switch"], "switch")
-        end = _needs_int(entry.get("switch_end", switch_id), "switch_end")
-        return [_cmd(121, indent, [switch_id, end, state])]
-
-    if "self_switch" in entry:
-        state = _switch_state(entry)
-        return [_cmd(123, indent, [enc.make_string(str(entry["self_switch"])), state])]
-
-    if "variable" in entry:
-        return _compile_variable(entry, indent)
-
-    if "wait" in entry:
-        return [_cmd(230, indent, [_needs_int(entry["wait"], "wait")])]
-
-    if "common_event" in entry:
-        return [_cmd(117, indent,
-                     [_needs_int(entry["common_event"], "common_event")])]
-
-    for key, code in (("label", CODE_LABEL),
-                      ("jump", CODE_JUMP_TO_LABEL)):
+    for key, compile_one in _COMPILERS.items():
         if key in entry:
-            return [_cmd(code, indent, [enc.make_string(str(entry[key]))])]
-
-    if "transfer" in entry:
-        t = _needs_object(entry["transfer"], "transfer")
-        # `_needs_int` for all six, not just the ones that read as ids: a
-        # Transfer Player destination is what this command *is*, and
-        # `int(2.9)` is 2 -- so a wrong-typed y moved the player one tile
-        # from where the caller said and the reply reported success.
-        return [_cmd(201, indent, [
-            _needs_int(t.get("designation", 0), "transfer.designation"),
-            _needs_int(t["map_id"], "transfer.map_id"),
-            _needs_int(t["x"], "transfer.x"),
-            _needs_int(t["y"], "transfer.y"),
-            _needs_int(t.get("direction", 0), "transfer.direction"),
-            _needs_int(t.get("fade", 0), "transfer.fade"),
-        ])]
-
-    if "exit" in entry:
-        return [_cmd(115, indent, [])]
-
-    if "if" in entry:
-        return _compile_if(entry, enc, indent, depth)
-
-    if "loop" in entry:
-        body = compile_commands(entry["loop"], enc, indent + 1, depth + 1)
-        return [_cmd(112, indent, []), *body, _cmd(413, indent, [])]
-
-    if "break_loop" in entry:
-        return [_cmd(113, indent, [])]
-
-    if "choices" in entry:
-        return _compile_choices(entry, enc, indent, depth)
+            return compile_one(entry, enc, indent, depth)
 
     raise CommandError(
         "unrecognised command entry with keys %s; supported keys are %s, or use "
@@ -712,11 +647,122 @@ def _compile_entry(entry: dict[str, Any], enc: TextCodec, indent: int,
     )
 
 
-SUPPORTED_KEYS = {
-    "raw", "text", "comment", "script", "switch", "self_switch", "variable",
-    "wait", "common_event", "label", "jump", "transfer", "exit", "if", "loop",
-    "break_loop", "choices",
+def _compile_raw(entry: dict[str, Any], enc: TextCodec, indent: int,
+                 depth: int) -> list[RubyObject]:
+    """Any command at all, by code and parameters.
+
+    The escape hatch, and first in the table: an entry carrying `raw`
+    alongside anything else means the caller wanted the code they named.
+    """
+    raw = _needs_object(entry["raw"], "raw")
+    if "code" not in raw:
+        raise CommandError('a "raw" entry needs a "code"')
+    code = _needs_int(raw["code"], "raw.code")
+    given = raw.get("indent", indent)
+    raw_indent = _needs_int(given, "raw.indent")
+    if not 0 <= raw_indent <= MAX_AUTHORED_INDENT:
+        raise CommandError(
+            "raw.indent must be between 0 and %d, got %d"
+            % (MAX_AUTHORED_INDENT, raw_indent))
+    params = raw.get("parameters", [])
+    if not isinstance(params, list):
+        raise CommandError("raw.parameters must be an array, got %r" % (params,))
+    return [_cmd(code, raw_indent, [_literal(v, enc) for v in params])]
+
+
+def _compile_switch(entry: dict[str, Any], enc: TextCodec, indent: int,
+                    depth: int) -> list[RubyObject]:
+    """Control Switches, over one switch or a range of them."""
+    state = _switch_state(entry)
+    switch_id = _needs_int(entry["switch"], "switch")
+    end = _needs_int(entry.get("switch_end", switch_id), "switch_end")
+    return [_cmd(CODE_CONTROL_SWITCHES, indent, [switch_id, end, state])]
+
+
+def _compile_self_switch(entry: dict[str, Any], enc: TextCodec, indent: int,
+                         depth: int) -> list[RubyObject]:
+    """Control Self Switch: A, B, C or D on this event."""
+    state = _switch_state(entry)
+    return [_cmd(CODE_CONTROL_SELF_SWITCH, indent,
+                 [enc.make_string(str(entry["self_switch"])), state])]
+
+
+def _compile_loop(entry: dict[str, Any], enc: TextCodec, indent: int,
+                  depth: int) -> list[RubyObject]:
+    """A loop, and the Repeat Above that closes it."""
+    body = compile_commands(entry["loop"], enc, indent + 1, depth + 1)
+    return [_cmd(CODE_LOOP, indent, []), *body,
+            _cmd(CODE_REPEAT_ABOVE, indent, [])]
+
+
+def _compile_transfer(entry: dict[str, Any], enc: TextCodec, indent: int,
+                      depth: int) -> list[RubyObject]:
+    """Transfer Player, with every parameter checked as an integer."""
+    t = _needs_object(entry["transfer"], "transfer")
+    # `_needs_int` for all six, not just the ones that read as ids: a
+    # Transfer Player destination is what this command *is*, and
+    # `int(2.9)` is 2 -- so a wrong-typed y moved the player one tile
+    # from where the caller said and the reply reported success.
+    return [_cmd(CODE_TRANSFER_PLAYER, indent, [
+        _needs_int(t.get("designation", 0), "transfer.designation"),
+        _needs_int(t["map_id"], "transfer.map_id"),
+        _needs_int(t["x"], "transfer.x"),
+        _needs_int(t["y"], "transfer.y"),
+        _needs_int(t.get("direction", 0), "transfer.direction"),
+        _needs_int(t.get("fade", 0), "transfer.fade"),
+    ])]
+
+
+# Every entry key the DSL accepts, and what compiles it. One table rather
+# than a chain of seventeen `if "key" in entry` tests with the same
+# seventeen literals written again as a set below it: nothing held the two
+# equal, so a branch added without the set under-reported what works, and a
+# set entry added without the branch advertised a key that raises
+# "unrecognised". Neither was caught.
+#
+# The order is the dispatch order, which the chain expressed by position and
+# this expresses by being read top to bottom. It matters for an entry
+# carrying two keys: `raw` is first because a caller who names a code wanted
+# that code.
+#
+# Every value takes the same four arguments and ignores what it does not
+# need, so the table can be walked without asking which shape each has.
+_COMPILERS: "dict[str, Callable[..., list[RubyObject]]]" = {
+    "raw": _compile_raw,
+    "text": lambda entry, enc, indent, depth: _compile_text(
+        entry, enc, indent),
+    "comment": lambda entry, enc, indent, depth: _multiline(
+        CODE_COMMENT, CODE_COMMENT_LINE, str(entry["comment"]), enc, indent),
+    "script": lambda entry, enc, indent, depth: _multiline(
+        CODE_SCRIPT, CODE_SCRIPT_MORE, str(entry["script"]), enc, indent),
+    "switch": _compile_switch,
+    "self_switch": _compile_self_switch,
+    "variable": lambda entry, enc, indent, depth: _compile_variable(
+        entry, indent),
+    "wait": lambda entry, enc, indent, depth: [
+        _cmd(CODE_WAIT, indent, [_needs_int(entry["wait"], "wait")])],
+    "common_event": lambda entry, enc, indent, depth: [
+        _cmd(CODE_CALL_COMMON_EVENT, indent,
+             [_needs_int(entry["common_event"], "common_event")])],
+    "label": lambda entry, enc, indent, depth: [
+        _cmd(CODE_LABEL, indent, [enc.make_string(str(entry["label"]))])],
+    "jump": lambda entry, enc, indent, depth: [
+        _cmd(CODE_JUMP_TO_LABEL, indent,
+             [enc.make_string(str(entry["jump"]))])],
+    "transfer": _compile_transfer,
+    "exit": lambda entry, enc, indent, depth: [
+        _cmd(CODE_EXIT_EVENT, indent, [])],
+    "if": lambda entry, enc, indent, depth: _compile_if(
+        entry, enc, indent, depth),
+    "loop": _compile_loop,
+    "break_loop": lambda entry, enc, indent, depth: [
+        _cmd(CODE_BREAK_LOOP, indent, [])],
+    "choices": lambda entry, enc, indent, depth: _compile_choices(
+        entry, enc, indent, depth),
 }
+
+# Derived, so it cannot disagree with what is dispatched.
+SUPPORTED_KEYS = frozenset(_COMPILERS)
 
 
 def _multiline(first_code: int, continuation_code: int, text: str,

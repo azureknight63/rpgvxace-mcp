@@ -1160,3 +1160,84 @@ class TestRealProject(unittest.TestCase):
     def test_validate_runs(self):
         result = self.call("validate")
         self.assertIn("counts", result)
+
+
+class TestTheCompilerTableAndItsHelpAgree(unittest.TestCase):
+    """Every key the DSL compiles is a key the DSL documents, and vice versa.
+
+    `_compile_entry` dispatched seventeen keys as a chain of `if "key" in
+    entry` tests, and `SUPPORTED_KEYS` was the same seventeen string
+    literals written again with nothing holding them equal -- so a branch
+    added without the set under-reported what works, and a set entry added
+    without a branch advertised a key that raises "unrecognised". The set
+    is `frozenset(_COMPILERS)` now, so that pair cannot disagree.
+
+    What can still disagree is `DSL_HELP`, which is the text two tools serve
+    to the model as the answer to "how do I write a command list". A key
+    that compiles and is not in it is a feature no caller is told about; a
+    form described in it that does not compile is worse, because a caller
+    writes it and is refused.
+    """
+
+    def keys(self):
+        from rpgvxace_mcp.commands import SUPPORTED_KEYS, _COMPILERS
+        self.assertEqual(set(SUPPORTED_KEYS), set(_COMPILERS),
+                         "the advertised set is no longer derived")
+        self.assertGreater(len(_COMPILERS), 10, "read almost nothing")
+        return sorted(_COMPILERS)
+
+    def test_every_compiled_key_is_documented(self):
+        from rpgvxace_mcp.commands import DSL_HELP
+        missing = [key for key in self.keys()
+                   if '"%s"' % key not in DSL_HELP]
+        self.assertEqual(
+            missing, [],
+            "these compile and `DSL_HELP` does not mention them, so no "
+            "caller is told they work: " + ", ".join(missing))
+
+    def test_every_compiler_actually_compiles_its_key(self):
+        """So a table entry cannot be a name with nothing behind it.
+
+        The minimal entry for each key, compiled. What matters is that
+        every value in the table is reached and returns commands -- a
+        `None` or a misspelled function name in there would raise, and the
+        chain this replaced could not have such an entry at all.
+        """
+        from rpgvxace_mcp.commands import compile_commands
+        from rpgvxace_mcp.convert import TextCodec
+        codec = TextCodec("utf-8")
+        smallest = {
+            "raw": {"raw": {"code": 108, "parameters": []}},
+            "text": {"text": "hello"},
+            "comment": {"comment": "note"},
+            "script": {"script": "p 1"},
+            "switch": {"switch": 1, "value": "on"},
+            "self_switch": {"self_switch": "A", "value": "on"},
+            "variable": {"variable": 1, "op": "set", "value": 1},
+            "wait": {"wait": 30},
+            "common_event": {"common_event": 1},
+            "label": {"label": "top"},
+            "jump": {"jump": "top"},
+            "transfer": {"transfer": {"map_id": 1, "x": 1, "y": 1}},
+            "exit": {"exit": True},
+            "if": {"if": {"switch": 1, "is": "on"}, "then": []},
+            "loop": {"loop": []},
+            "break_loop": {"break_loop": True},
+            "choices": {"choices": ["a", "b"], "branches": [[], []]},
+        }
+        self.assertEqual(sorted(smallest), self.keys(),
+                         "this table and the compiler table disagree, so "
+                         "one of the two is not the vocabulary")
+        for key in self.keys():
+            with self.subTest(key=key):
+                out = compile_commands([smallest[key]], codec)
+                self.assertTrue(out, "%s compiled to nothing" % key)
+
+    def test_an_unknown_key_names_what_is_supported(self):
+        from rpgvxace_mcp.commands import CommandError, compile_commands
+        from rpgvxace_mcp.convert import TextCodec
+        with self.assertRaises(CommandError) as caught:
+            compile_commands([{"nosuchform": 1}], TextCodec("utf-8"))
+        message = str(caught.exception)
+        for key in ("text", "choices", "transfer"):
+            self.assertIn(key, message)

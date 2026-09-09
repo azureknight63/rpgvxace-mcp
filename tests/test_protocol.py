@@ -192,7 +192,11 @@ class TestToolsOverProtocol(ProtocolTest):
         response = self.call_tool("db_list", {"table": "nope"})
         result = response["result"]
         self.assertTrue(result["isError"])
-        self.assertIn("unknown table", result["content"][0]["text"])
+        # "unknown data table": `db_get` refuses through
+        # `profile.data_file` now, which is the one place that message
+        # is written.
+        self.assertIn("unknown data table",
+                      result["content"][0]["text"])
 
     def test_stale_file_error_tells_the_model_what_to_do(self):
         self.tool_payload("db_list", {"table": "items"})

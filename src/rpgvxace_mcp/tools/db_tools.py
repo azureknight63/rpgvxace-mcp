@@ -152,18 +152,20 @@ def _table_arg(ctx: Context, args: dict[str, Any],
     the two answers was usable.
     """
     table = need_str(args, "table")
-    entry = ctx.project.data_files.get(table)
-    if entry is None:
-        if table in ALL_TABLE_KEYS:
-            # A table this *engine* does not have, which is a different fact
-            # from a name nobody recognises -- and the only one of the two a
-            # caller can do something about.
-            raise ToolError(
-                "%s has no %s table. %s"
-                % (ctx.project.profile.label, table,
-                   ctx.project.profile.absence_hint(table)))
-        raise ToolError("unknown table %r; this project has %s"
-                        % (table, ", ".join(sorted(ctx.project.data_files))))
+    # Through `profile.data_file`, which already draws the distinction this
+    # branch drew: a table this *engine* does not have is a different fact
+    # from a name nobody recognises, and only the first is something a
+    # caller can act on. This was a second copy of both messages, and they
+    # had already diverged -- "unknown table" here against "unknown data
+    # table" there, with a different separator -- so the answer a caller got
+    # depended on which of two functions happened to reject the name.
+    #
+    # `project.filename_for` shows the same three lines: the only real
+    # difference between the two layers is the exception type.
+    try:
+        entry = ctx.project.profile.data_file(table)
+    except KeyError as exc:
+        raise ToolError(exc.args[0]) from exc
     if entry.container == SCRIPTS:
         # Named apart from the generic one-object case: raw_data refuses the
         # scripts table outright, so offering raw_data as the remedy here

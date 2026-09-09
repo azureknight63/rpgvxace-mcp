@@ -28,6 +28,14 @@ from rpgvxace_mcp.docs import (  # noqa: E402
     data_format_reference,
 )
 from rpgvxace_mcp.project import Project  # noqa: E402
+from rpgvxace_mcp.schema import (  # noqa: E402
+    ACE_PROFILE,
+    SchemaWalk,
+    VX_PROFILE,
+    map_filename,
+    new_event_command,
+    observe_class_fields,
+)
 from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyData,
     RubyExtended,
@@ -38,13 +46,6 @@ from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyUClass,
     RubyUserMarshal,
     printable_text,
-)
-from rpgvxace_mcp.schema import (  # noqa: E402
-    ACE_PROFILE,
-    SchemaWalk,
-    VX_PROFILE,
-    map_filename,
-    observe_class_fields,
 )
 from rpgvxace_mcp.tools import (  # noqa: E402,F401
     db_tools,
@@ -1166,6 +1167,136 @@ class TestTheMainBlockIsLast(unittest.TestCase):
             wrong, [],
             "running these files directly skips what is below the "
             "`unittest.main()` call: " + "; ".join(wrong))
+
+
+class TestNoSuiteRewritesAFieldList(unittest.TestCase):
+    """A crafted object does not spell out a class's field list again.
+
+    `schema` holds `new_event_command`, `new_page`, `new_condition`,
+    `new_event` and the rest; `src` uses them and
+    `tests/fixtures/build_project.py` uses them at twenty call sites. The
+    guard suites built the same objects by hand, and `tool_case`'s crafted
+    page wrote out nine of the thirteen `RPG::Event::Page` fields -- with
+    `move_route` among the four it omitted, which is the field whose
+    absence from `_page_view` was the round-9 round-trip bug. A fourth copy
+    of a field list, in the suite that tests field lists.
+
+    What this refuses is that: a site setting five or more fields of one
+    class is writing the list again and should call the constructor. It
+    does *not* refuse building an object by hand, and that distinction is
+    the whole point -- these suites craft deliberately *incomplete*
+    objects, which is their subject. `new_page()` fills all thirteen
+    fields, so substituting it into a test about a damaged page would
+    quietly repair the damage. A rule that counted constructor calls would
+    have demanded exactly that, which is why this counts fields.
+    """
+
+    # A site may set up to four fields of one class before it is rewriting
+    # the list. Four because the largest legitimate case is an event's
+    # id/name/x/y, where the fifth field would be `pages`, and a test that
+    # sets pages as well is building a whole event.
+    MOST_FIELDS_BY_HAND = 4
+
+    def suites(self):
+        root = Path(__file__).resolve().parent
+        found = sorted(root.rglob("*.py"))
+        self.assertGreater(len(found), 5, "found almost no suites")
+        return found
+
+    def constructed(self):
+        """The classes `schema` has a constructor for, read from `schema`.
+
+        Derived, not listed: `RPG::Map::Encounter`, `RPG::Tileset` and
+        `RPG::Troop` have no constructor, so a suite building one by hand
+        is doing the only thing available and this rule must not claim
+        otherwise.
+
+        Read from the tree rather than from `ast.unparse` text: unparse
+        renormalises string quotes, so a regex looking for a double-quoted
+        class name matched nothing -- which the count below caught.
+        """
+        import ast
+        source = (Path(__file__).resolve().parent.parent / "src"
+                  / "rpgvxace_mcp" / "schema.py").read_text(encoding="utf-8")
+        found = set()
+        for node in ast.parse(source).body:
+            if not (isinstance(node, ast.FunctionDef)
+                    and node.name.startswith("new_")):
+                continue
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and getattr(inner.func, "id", "") == "RubyObject"
+                        and inner.args
+                        and isinstance(inner.args[0], ast.Constant)
+                        and isinstance(inner.args[0].value, str)):
+                    found.add(inner.args[0].value)
+        self.assertGreater(len(found), 5, "read almost no constructors")
+        return found
+
+    def hand_built(self, path):
+        """Each `x = RubyObject("RPG::...")` and how many fields it is set.
+
+        A field belongs to the nearest preceding construction of the same
+        local name, which is how these are written throughout: build, then
+        set, then use.
+        """
+        import ast
+        import re
+        text = path.read_text(encoding="utf-8")
+        del ast
+        out = []
+        built = re.compile(
+            r"^\s*(\w+) = RubyObject\(\"(RPG::[\w:]+)\"\)")
+        for index, line in enumerate(text.split("\n")):
+            found = built.match(line)
+            if found is None:
+                continue
+            name, cls = found.group(1), found.group(2)
+            fields = set()
+            for after in text.split("\n")[index + 1:]:
+                setter = re.match(
+                    r"^\s*%s\.set\(\"(\w+)\"" % re.escape(name), after)
+                if setter is not None:
+                    fields.add(setter.group(1))
+                    continue
+                if after.strip() and ("%s." % name) not in after:
+                    if re.match(r"^\s*\w+ = ", after) or not after.startswith(" "):
+                        break
+            out.append((index + 1, cls, fields))
+        return out
+
+    def test_no_site_sets_five_or_more_fields_of_one_class(self):
+        covered = self.constructed()
+        wide = []
+        for path in self.suites():
+            for line, cls, fields in self.hand_built(path):
+                if cls not in covered:
+                    continue
+                if len(fields) > self.MOST_FIELDS_BY_HAND:
+                    wide.append("%s:%d builds %s with %d fields by hand"
+                                % (path.name, line, cls, len(fields)))
+        self.assertEqual(
+            wide, [],
+            "`schema` has a constructor for these and the field list is "
+            "written out again here: " + "; ".join(wide))
+
+    def test_the_scan_sees_the_hand_built_objects(self):
+        """So the assertion above cannot pass by reading nothing."""
+        total = sum(len(self.hand_built(path)) for path in self.suites())
+        self.assertGreater(total, 10,
+                           "found %d hand-built objects, so this checked "
+                           "almost nothing" % total)
+
+    def test_the_constructors_it_names_exist(self):
+        """So the argument above is about real functions."""
+        from rpgvxace_mcp import schema
+        for name in ("new_event_command", "new_page", "new_event",
+                     "new_map_info", "new_move_command", "new_condition",
+                     "new_graphic"):
+            with self.subTest(constructor=name):
+                self.assertTrue(callable(getattr(schema, name, None)), name)
+
+
 # Last in the file, deliberately. It used to sit mid-module,
 # and module statements run in order -- so `python tests/test_schema.py`
 # called `unittest.main()` (which exits) before the classes below

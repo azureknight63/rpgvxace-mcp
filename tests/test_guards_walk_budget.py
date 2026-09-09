@@ -22,6 +22,10 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from rpgvxace_mcp import convert, marshal_rb  # noqa: E402
 from rpgvxace_mcp.analysis import MAX_FINDINGS  # noqa: E402
 from rpgvxace_mcp.project import Project  # noqa: E402
+from rpgvxace_mcp.schema import (  # noqa: E402
+    new_event,
+    new_event_command,
+)
 from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyHash,
     RubyObject,
@@ -442,10 +446,8 @@ class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
     def test_reading_a_common_event_is_bounded(self):
         """One shared command repeated past the ceiling, in a common event."""
         common = self.project.get_entry("common_events", 1)
-        command = RubyObject("RPG::EventCommand")
-        command.set("code", 108)
-        command.set("indent", 0)
-        command.set("parameters", [self.project.codec.make_string("x")])
+        command = new_event_command(108, 0,
+                                    [self.project.codec.make_string("x")])
         # Above MAX_WALK_STEPS, so a budget must stop it.
         common.set("list", [command] * 250_000)
         self.project.save_file(self.project.filename_for("common_events"),
@@ -468,10 +470,8 @@ class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
     def test_a_bounded_common_event_still_reports_its_real_length(self):
         """Stopping the render must not misreport how long the list is."""
         common = self.project.get_entry("common_events", 1)
-        command = RubyObject("RPG::EventCommand")
-        command.set("code", 108)
-        command.set("indent", 0)
-        command.set("parameters", [self.project.codec.make_string("x")])
+        command = new_event_command(108, 0,
+                                    [self.project.codec.make_string("x")])
         common.set("list", [command] * 250_000)
         self.project.save_file(self.project.filename_for("common_events"),
                                tool="test", summary="one shared command")
@@ -684,11 +684,7 @@ class TestEveryWalkSpendsItsAllowance(ToolTest):
         return events
 
     def event_with_pages(self, pages):
-        event = RubyObject("RPG::Event")
-        event.set("id", 1)
-        event.set("name", self.project.codec.make_string("E"))
-        event.set("x", 0)
-        event.set("y", 0)
+        event = new_event(1, "E")
         event.set("pages", pages)
         return event
 
@@ -823,11 +819,7 @@ class TestAnEventWithNoPagesStillCostsARow(ToolTest):
     """
 
     def craft(self):
-        event = RubyObject("RPG::Event")
-        event.set("id", 1)
-        event.set("name", self.project.codec.make_string("E"))
-        event.set("x", 0)
-        event.set("y", 0)
+        event = new_event(1, "E")
         event.set("pages", [])                     # no pages at all
         events = RubyHash()
         for event_id in range(1, map_read_tools.MAX_EVENT_SUMMARY_ROWS * 3):
@@ -874,11 +866,7 @@ class TestASkippedPageSlotIsStillCountedForReading(ToolTest):
 
     def craft(self, pages):
         game_map = self.project.load_map(1)
-        event = RubyObject("RPG::Event")
-        event.set("id", 1)
-        event.set("name", self.project.codec.make_string("E"))
-        event.set("x", 0)
-        event.set("y", 0)
+        event = new_event(1, "E")
         event.set("pages", pages)
         events = RubyHash()
         for event_id in range(1, self.EVENTS + 1):
@@ -1077,10 +1065,8 @@ class TestOneBatchGetsOneReferenceWalk(ToolTest):
                  {"op": "delete", "id": 2}])["would_apply"]}
 
         game_map = self.project.load_map(1)
-        command = RubyObject("RPG::EventCommand")
-        command.set("code", 126)          # Change Items
-        command.set("indent", 0)
-        command.set("parameters", [2, 0, 0, 1])
+        # 126 is Change Items.
+        command = new_event_command(126, 0, [2, 0, 0, 1])
         page = game_map.get("events").get(1).get("pages")[0]
         page.set("list", list(page.get("list")) [:-1] + [command]
                  + [list(page.get("list"))[-1]])
@@ -1249,10 +1235,7 @@ class TestOneCommandCannotOutrunTheDeadline(ToolTest):
     def craft(self, links, size):
         game_map = self.project.load_map(1)
         text = self.project.codec.make_string("z" * size)
-        command = RubyObject("RPG::EventCommand")
-        command.set("code", 401)
-        command.set("indent", 0)
-        command.set("parameters", [text] * links)
+        command = new_event_command(401, 0, [text] * links)
         page = game_map.get("events").get(1).get("pages")[0]
         page.set("list", [command] + list(page.get("list")))
         path = self.project.path_for(self.project.map_file(1))
@@ -1276,11 +1259,8 @@ class TestOneCommandCannotOutrunTheDeadline(ToolTest):
     def test_a_hit_is_sanitised(self):
         """Text out of a file, into a reply a terminal renders."""
         game_map = self.project.load_map(1)
-        command = RubyObject("RPG::EventCommand")
-        command.set("code", 401)
-        command.set("indent", 0)
-        command.set("parameters", [self.project.codec.make_string(
-            "find" + chr(27) + "[31m")])
+        command = new_event_command(
+            401, 0, [self.project.codec.make_string("find" + chr(27) + "[31m")])
         page = game_map.get("events").get(1).get("pages")[0]
         page.set("list", [command] + list(page.get("list")))
         self.project.path_for(self.project.map_file(1)).write_bytes(
@@ -1362,15 +1342,10 @@ class TestTheMergedWalkStillFindsBothKinds(ValidateTest):
     def craft_a_missing_face_and_a_bad_jump(self):
         _, _, event = self.first_event(1)
         page = event.get("pages")[0]
-        text = RubyObject("RPG::EventCommand")
-        text.set("code", 101)                 # Show Text: face graphic
-        text.set("indent", 0)
-        text.set("parameters",
-                 [self.project.codec.make_string("NoSuchFace"), 0, 0, 2])
-        jump = RubyObject("RPG::EventCommand")
-        jump.set("code", 119)                 # Jump to Label, with no Label
-        jump.set("indent", 0)
-        jump.set("parameters", [self.project.codec.make_string("nowhere")])
+        # 101 is Show Text, whose first parameter is the face graphic.
+        text = new_event_command(101, 0, [self.project.codec.make_string("NoSuchFace"), 0, 0, 2])
+        # 119 is Jump to Label, and there is no Label.
+        jump = new_event_command(119, 0, [self.project.codec.make_string("nowhere")])
         page.set("list", [text, jump])
         self.project.save_file(self.project.map_file(1), tool="test",
                                summary="crafted")
@@ -1421,10 +1396,8 @@ class TestALocationIsBuiltWhenItIsReported(ValidateTest):
         """One page of commands that break no rule at all."""
         _, _, event = self.first_event(1)
         page = event.get("pages")[0]
-        comment = RubyObject("RPG::EventCommand")
-        comment.set("code", 108)               # Comment: names nothing
-        comment.set("indent", 0)
-        comment.set("parameters", [self.project.codec.make_string("x")])
+        # 108 is Comment, which names nothing.
+        comment = new_event_command(108, 0, [self.project.codec.make_string("x")])
         page.set("list", [comment] * self.COMMANDS)
         self.project.save_file(self.project.map_file(1), tool="test",
                                summary="a clean page")
@@ -1457,10 +1430,8 @@ class TestALocationIsBuiltWhenItIsReported(ValidateTest):
         """The point of the location, on the page that has one."""
         _, _, event = self.first_event(1)
         page = event.get("pages")[0]
-        jump = RubyObject("RPG::EventCommand")
-        jump.set("code", 119)                  # Jump to Label, with no Label
-        jump.set("indent", 0)
-        jump.set("parameters", [self.project.codec.make_string("nowhere")])
+        # 119 is Jump to Label, and there is no Label.
+        jump = new_event_command(119, 0, [self.project.codec.make_string("nowhere")])
         page.set("list", [jump])
         self.project.save_file(self.project.map_file(1), tool="test",
                                summary="a bad jump")
