@@ -267,7 +267,10 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
     "before editing anything unusual.",
     schema({
         "map_id": prop(INT, "Read events from this map."),
-        "common_event_id": prop(INT, "Read this common event instead of a map's events."),
+        "common_event_id": prop(INT, "Read this common event instead of a "
+                                     "map's events. Pass exactly one of "
+                                     "map_id or common_event_id.",
+                                minimum=1),
         "event_ids": prop(ARR, "Only these event ids; at most %d per call, "
                                "each 1 to %d."
                                % (MAX_EVENT_IDS_PER_CALL, MAX_EVENT_ID),

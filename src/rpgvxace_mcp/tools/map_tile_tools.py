@@ -206,8 +206,12 @@ def _cells_from_rows(ctx: Context, args: dict[str, Any],
                        "0-15), and on VX Ace 3 region ids (0-63). Default 0. "
                        "map_get reports the layers a given map has.",
                   minimum=0),
-        "rows": prop(ARR, "For write: rows of tile ids, top row first. Must match "
-                          "the rectangle.", items={"type": ARR, "items": {"type": INT}}),
+        "rows": prop(ARR, "For write: rows of tile ids, top row first. "
+                          "width and height are NOT inferred from it -- "
+                          "they default to the rest of the map, so send "
+                          "both alongside rows: len(rows) must equal "
+                          "height, and every row must be width long.",
+                     items={"type": ARR, "items": {"type": INT}}),
         "tile_id": prop(INT, "For fill: the tile id to write into every cell. "
                              "Layers 0 and 1 take 0-65535, layer 2 takes 0-15, "
                              "and layer 3 takes 0-63.", minimum=0),

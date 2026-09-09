@@ -99,10 +99,12 @@ SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
     "and the Ruby scripts. Every hit says exactly where it lives so you can go "
     "straight to it with event_get or db_get (or the scripts tool, for a "
     "script hit). The reply also says which scopes were actually read, which "
-    "of them could not be read at all, and -- as \"may_have_more\" -- whether "
-    "the scan stopped on reaching the limit rather than running out of "
-    "project. That last one is not the same as validate's \"truncated\": this "
-    "scan stops at the limit and so never drops a hit it found, while "
+    "of them could not be read at all. \"may_have_more\" is true when the page "
+    "filled *or* when any part of the project was not read or not reached -- "
+    "\"scopes_not_read\", \"could_not_read\", \"command_walk_stopped\" and "
+    "\"text_scan_stopped\" say which, so read those before raising limit and "
+    "asking again. It is not the same as validate's \"findings_truncated\": "
+    "this scan stops at the limit and so never drops a hit it found, while "
     "validate collects first and then cuts. A search also gives up after "
     "%g seconds of matching, and after %s commands walked, saying so as "
     "\"text_scan_stopped\" or \"command_walk_stopped\". Either one means the "
@@ -236,10 +238,14 @@ class _Hits:
     def full(self) -> bool:
         """The caller's limit is reached. Distinct from `done` on purpose.
 
-        `may_have_more` means "there are hits past this page", which is what a
-        full page implies and a spent deadline does not -- that one gets its
-        own note, because "I stopped early" and "here is a full page" are
-        different things to tell a caller.
+        A full page sets `may_have_more` here, and `reply` sets it again
+        for every other reason the answer is partial: an unread scope, a
+        spent deadline, an exhausted walk. Each of those also gets a note of
+        its own, because "I stopped early" and "here is a full page" are
+        different things to tell a caller -- but both mean there may be more.
+
+        This docstring used to say a spent deadline "does not" set the flag,
+        which was the opposite of what `reply` does three screens down.
         """
         return len(self.rows) >= self.limit
 

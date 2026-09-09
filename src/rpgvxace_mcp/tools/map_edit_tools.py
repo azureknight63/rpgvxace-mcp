@@ -73,7 +73,8 @@ MAP_OP_ARGS = {
     "the tiles that still fit.",
     schema({
         "op": prop(STR, "What to do.", enum=list(MAP_OP_ARGS)),
-        "map_id": prop(INT, "Which map. Omit for create to take the next free id."),
+        "map_id": prop(INT, "Which map. Omit for create to take the next "
+                            "free id.", minimum=1, maximum=MAX_MAP_ID),
         "name": prop(STR, "Map name in the tree. Used by create, or to rename."),
         "parent_id": prop(INT, "Parent map id for create (0 for the tree root)."),
         "width": prop(INT, "Width in tiles, for create and resize. Default "

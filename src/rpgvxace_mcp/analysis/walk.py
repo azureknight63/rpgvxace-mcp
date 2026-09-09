@@ -222,7 +222,8 @@ class WalkBudget:
         if not self.exhausted:
             return None
         return ("this project's events, pages and commands together number "
-                "more than the %d %s visits in one call, so the walk stopped "
+                "more than the %d visits allowed for %s in one call, so "
+                "the walk stopped "
                 "early and this answer is incomplete. That happens when a "
                 "file shares objects by reference far more than the editor "
                 "does -- run validate, and narrow the request (fewer maps, or "

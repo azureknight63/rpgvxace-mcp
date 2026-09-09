@@ -134,15 +134,22 @@ class Tool:
         check_args(self.schema, args)
         reply = self.handler(ctx, args)
         op = args.get("op")
-        if (isinstance(reply, dict) and isinstance(op, str)
-                and "op" not in reply):
-            # Rebuilt rather than assigned into, so `op` is first: a reply is
-            # read in order, and which branch answered comes before what it
-            # answered. `dry_run` is the one thing that comes before it, for
-            # the same reason `write_reply` puts it first.
-            lead = {"dry_run": True} if reply.get("dry_run") else {}
+        if isinstance(reply, dict) and isinstance(op, str):
+            # Rebuilt rather than assigned into, and *whether or not* the
+            # handler already set `op`: five of `map_edit`'s reply sites set
+            # it themselves and put it second or third, so the guarantee
+            # this docstring makes did not hold for the tool with the most
+            # branches. Placing it here means no handler can get it wrong.
+            #
+            # `dry_run` keeps its own value rather than being assumed True:
+            # stripping the key unconditionally would drop an explicit
+            # False, which is a silent drop in the one function whose job is
+            # to normalise a reply's shape.
+            lead = ({"dry_run": reply["dry_run"]} if "dry_run" in reply
+                    else {})
             return {**lead, "op": op,
-                    **{k: v for k, v in reply.items() if k != "dry_run"}}
+                    **{k: v for k, v in reply.items()
+                       if k not in ("dry_run", "op")}}
         return reply
 
     def definition(self) -> dict[str, Any]:

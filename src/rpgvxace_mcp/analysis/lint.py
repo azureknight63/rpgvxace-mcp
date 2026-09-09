@@ -218,7 +218,14 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
     ordered most severe first and truncated to ``limit``.
     """
     limit = max(1, _int(limit) or DEFAULT_FINDING_LIMIT)
-    findings: list[Finding] = []
+    # One collector for the whole run, handed to every check. Each check
+    # used to return a list of its own and this concatenated seven of them
+    # -- eight, counting the second list `check_tilesets` returned -- so
+    # `MAX_FINDINGS`, whose comment says it bounds "findings collected, not
+    # just findings returned", bounded each list separately and a
+    # whole-project run could collect about eight times it. `_report` then
+    # said "collection stopped at 5000 findings" when it had not.
+    findings = _Findings()
     ran: list[str] = []
     # One loader for the whole run: several checks want the same tables,
     # and a file that will not load should be reported once, not once per
@@ -227,7 +234,7 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
 
     ids, absent = _resolve_map_ids(project, map_ids)
     for map_id in absent:
-        findings.append(Finding(
+        findings.add(Finding(
             WARNING, "no_such_map",
             "map %s was asked for but there is no map file with that id, so "
             "nothing about it was checked" % map_id, _map_at(map_id)))
@@ -243,31 +250,31 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
     walk_budget = WalkBudget()
     if "maps" in scopes:
         ran.append("map tree, map properties and encounters")
-        findings += check_map_tree(project, walk_budget)
-        findings += check_maps(project, ids, tables, walk_budget)
-        findings += check_tilesets(project, ids, tables, walk_budget)
-    if "events" in scopes and len(findings) < MAX_FINDINGS:
+        check_map_tree(project, walk_budget, findings)
+        check_maps(project, ids, tables, walk_budget, findings)
+        check_tilesets(project, ids, tables, walk_budget, findings)
+    if "events" in scopes and findings.room:
         ran.append("event command structure and references (plus every common "
                    "event and troop page, which belong to the project rather "
                    "than to a map)")
-        findings += check_commands(project, ids, tables, walk_budget)
-        findings += check_event_pages(project, ids, walk_budget)
-    if "assets" in scopes and len(findings) < MAX_FINDINGS:
+        check_commands(project, ids, tables, walk_budget, findings)
+        check_event_pages(project, ids, walk_budget, findings)
+    if "assets" in scopes and findings.room:
         ran.append("graphic and audio file references")
-        findings += check_assets(project, ids, walk_budget)
-    if "database" in scopes and len(findings) < MAX_FINDINGS:
+        findings.extend(check_assets(project, ids, walk_budget))
+    if "database" in scopes and findings.room:
         ran.append("database cross-references")
-        findings += check_database(project, tables, walk_budget)
+        check_database(project, tables, walk_budget, findings)
 
     # Last, so it covers every table any check actually asked for.
-    findings += tables.findings()
+    findings.extend(tables.findings())
 
     # Counted before anything is dropped, and sorted before it: truncating by
     # arrival order first meant five thousand warnings from one check could
     # push out the errors from a later one, and `counts` would then report zero
     # errors while errors existed. A count the model cannot trust is worse than
     # no count.
-    return _report(project, findings, ids if walked_maps else [], ran,
+    return _report(project, findings.items, ids if walked_maps else [], ran,
                    walk_budget, limit)
 
 
@@ -319,10 +326,15 @@ def _report(project: Project, findings: "list[Finding]",
         "maps_examined": len(examined),
         "counts": counts,
         "findings": [f.as_dict() for f in findings[:limit]],
-        "truncated": len(findings) > limit,
-        "note": "Rules only cover event command parameters whose layout is "
-                "confirmed for both VX Ace and VX; commands outside that set "
-                "are not checked.",
+        # `findings_truncated` and `rules_note`, not a bare `truncated` and
+        # `note`. The three suffixes each take a subject, and a caller that
+        # learned `events_truncated` from map_get and `references_truncated`
+        # from db_edit had to learn a third, subject-less form here -- which
+        # the suffix test could not see, because it matches on the suffix.
+        "findings_truncated": len(findings) > limit,
+        "rules_note": "Rules only cover event command parameters whose layout "
+                      "is confirmed for both VX Ace and VX; commands outside "
+                      "that set are not checked.",
     }
     # Named apart from `stopped` above, which means "MAX_FINDINGS was hit".
     # Two different facts -- the walk ran out, versus the findings did -- and
@@ -389,9 +401,23 @@ class _Findings:
                 return
             self.items.append(finding)
 
+    @classmethod
+    def given(cls, findings: "_Findings | None") -> "_Findings":
+        """The caller's collector, or a fresh one when it did not pass one.
 
-def check_map_tree(project: Project,
-                   budget: "WalkBudget | None" = None) -> list[Finding]:
+        Every `check_*` takes one now, so that one `validate` run has one
+        ceiling. They used to return a list each and `validate`
+        concatenated seven of them -- eight, counting the second list
+        `check_tilesets` returned -- so the ceiling that says it bounds
+        "findings collected" bounded each list separately and the run
+        collected up to eight times it. The standalone return value is
+        kept for the tests and for a caller that wants one check.
+        """
+        return cls() if findings is None else findings
+
+
+def check_map_tree(project: Project, budget: "WalkBudget | None" = None,
+                   collected: "_Findings | None" = None) -> list[Finding]:
     """The editor's map tree against the files on disk.
 
     Collects into one `_Findings` across all three of its passes. Each pass
@@ -400,7 +426,7 @@ def check_map_tree(project: Project,
     fourth time a ceiling here was written against the wrong list, after
     `_AssetChecker`'s four callers, `check_tilesets`, and `check_maps`.
     """
-    findings = _Findings()
+    findings = _Findings.given(collected)
     try:
         infos = dict(project.entries("map_infos"))
     except (ProjectError, ValueError, OSError, TypeError) as exc:
@@ -515,7 +541,8 @@ def _parent_cycles(infos: dict[Any, Any],
 
 
 def check_maps(project: Project, map_ids: list[int], tables: _Tables,
-               budget: "WalkBudget | None" = None) -> list[Finding]:
+               budget: "WalkBudget | None" = None,
+               collected: "_Findings | None" = None) -> list[Finding]:
     """Per-map properties: readability, encounters and the tile table.
 
     Collects into a `_Findings`, so the ceiling holds across maps as well as
@@ -524,7 +551,7 @@ def check_maps(project: Project, map_ids: list[int], tables: _Tables,
     describe nothing: two maps against a ceiling of four collected eight, and
     the map count comes out of the project rather than from anything here.
     """
-    findings = _Findings()
+    findings = _Findings.given(collected)
     troop_ids = tables.ids("troops")
 
     for map_id in map_ids:
@@ -644,21 +671,22 @@ def _encounter_troop_id(entry: Any) -> int | None:
 
 
 def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
-                   budget: "WalkBudget | None" = None) -> list[Finding]:
+                   budget: "WalkBudget | None" = None,
+                   collected: "_Findings | None" = None) -> list[Finding]:
     """VX Ace only: every map names a tileset, and tilesets name graphics."""
     if not project.profile.has_tileset_database:
         return []
-    findings: list[Finding] = []
+    findings = _Findings.given(collected)
     tileset_ids = tables.ids("tilesets")
     if tileset_ids is None:
-        return findings
+        return findings.items
 
     for map_id, game_map in iter_maps(project, map_ids):
-        if len(findings) >= MAX_FINDINGS:
+        if findings.full:
             break
         tileset_id = _int(game_map.get("tileset_id"))
         if tileset_id is not None and tileset_id not in tileset_ids:
-            findings.append(_missing(
+            findings.add(_missing(
                 "missing_tileset",
                 "map %s uses tileset %s" % (map_id, tileset_id),
                 "Pick an existing tileset for the map, or add that tileset to "
@@ -677,7 +705,7 @@ def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
         # but it cannot change what this returns, so it has no entry in
         # `prove_guards`. That is the honest description of a line whose
         # reverted form passes every test.
-        if checker.full or len(findings) >= MAX_FINDINGS:
+        if checker.full or findings.full:
             break
         if budget is not None and not budget.spend(1):
             break
@@ -698,17 +726,23 @@ def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
                           context="%s %s (%s) sheet %s"
                                   % (TABLE_NOUNS["tilesets"], entry_id, name,
                                      sheet))
-    return findings + checker.findings
+    # Into the one collector rather than concatenated beside it:
+    # returning two independently-bounded lists was this file's own example
+    # of "two ceilings of MAX_FINDINGS are a ceiling of twice that", from
+    # `_Findings`' docstring.
+    findings.extend(checker.findings)
+    return findings.items
 
 
 def check_commands(project: Project, map_ids: list[int], tables: _Tables,
-                   budget: "WalkBudget | None" = None) -> list[Finding]:
+                   budget: "WalkBudget | None" = None,
+                   collected: "_Findings | None" = None) -> list[Finding]:
     """Every event command list: structure, and the ids the commands name.
 
     ``budget`` is shared with the asset walk, so one validate call spends one
     allowance across both -- see :class:`WalkBudget`.
     """
-    findings = []
+    findings = _Findings.given(collected)
     # A table absent from this mapping is one that could not be read, so
     # the rules comparing ids against it are skipped rather than answered
     # wrongly.
@@ -729,7 +763,7 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
     check_parameters = project.command_layouts_modelled
 
     for location, commands in iter_command_lists(project, map_ids, budget):
-        if len(findings) >= MAX_FINDINGS:
+        if findings.full:
             break
         # One per command list, because both are facts about the list rather
         # than about a command: the labels it declares, and the indent the
@@ -737,7 +771,7 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
         labels: "set[str] | None" = None
         indent_previous = 0
         for index, command in enumerate(commands):
-            if len(findings) >= MAX_FINDINGS:
+            if findings.full:
                 # The ceiling is a collection ceiling, so it is checked here
                 # rather than at the end: one page of a million Jump to Label
                 # commands with no matching Label is a million findings.
@@ -748,22 +782,24 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
             params = _seq(command.get("parameters"))
             here = location.at(index)
 
-            findings += _check_indent(index, command, indent_previous, here)
+            findings.extend(_check_indent(index, command,
+                                          indent_previous, here))
             indent_previous = _int(command.get("indent")) or 0
 
             if not check_parameters:
                 continue
-            findings += _check_references(code, params, existing, on_disk,
-                                          map_sizes, here)
+            findings.extend(_check_references(code, params, existing,
+                                              on_disk, map_sizes, here))
             if code == CODE_JUMP_TO_LABEL and params:
                 if labels is None:
                     # Built on first use: most pages have no labels at all,
                     # and this is a second pass over the whole command list.
                     labels = _labels_in(project, commands)
-                findings += _check_jump(project, params, labels, here)
+                findings.extend(_check_jump(project, params, labels,
+                                            here))
 
-        findings += check_list_terminator(location, commands)
-    return findings
+        findings.extend(check_list_terminator(location, commands))
+    return findings.items
 
 
 def _check_indent(index: int, command: RubyObject, previous: int,
@@ -928,7 +964,8 @@ def check_list_terminator(location: Location, commands: list[Any]) -> list[Findi
 
 
 def check_event_pages(project: Project, map_ids: list[int],
-                      budget: "WalkBudget | None" = None) -> list[Finding]:
+                      budget: "WalkBudget | None" = None,
+                      collected: "_Findings | None" = None) -> list[Finding]:
     """Page-level rules: pages a later page hides, and autoruns that never end.
 
     Both turn on the same engine fact: RPG Maker runs the *last* page whose
@@ -936,7 +973,7 @@ def check_event_pages(project: Project, map_ids: list[int],
     page before it, and it is the final page being an unconditional Autorun
     that traps the player.
     """
-    findings: list[Finding] = []
+    findings = _Findings.given(collected)
     for map_id, game_map in iter_maps(project, map_ids):
         events = game_map.get("events")
         if not isinstance(events, RubyHash):
@@ -945,25 +982,26 @@ def check_event_pages(project: Project, map_ids: list[int],
             # Two findings per event at most, and the event count comes out of
             # the file: a crafted map that shares one event object across
             # forty thousand slots produced forty thousand findings here.
-            if len(findings) >= MAX_FINDINGS:
-                return findings
+            if findings.full:
+                return findings.items
             # And a ceiling on findings cannot bound a walk that finds
             # nothing: this rule collects only for an *unconditional* page, so
             # one condition flag set on a crafted page made it walk every page
             # of every event for free. This walk does not go through
             # `iter_command_lists`, so it needs its own charge.
             if budget is not None and not budget.spend(1):
-                return findings
+                return findings.items
             if not isinstance(event, RubyObject):
                 continue
             pages = _seq(event.get("pages"))
             if budget is not None and not budget.spend(len(pages)):
-                return findings
+                return findings.items
             name = _text(project, event.get("name"))
-            findings += _check_shadowing(map_id, event_id, name, pages)
-            findings += _check_autorun(map_id, event_id, name, pages,
-                                       budget)
-    return findings
+            findings.extend(_check_shadowing(map_id, event_id, name,
+                                             pages))
+            findings.extend(_check_autorun(map_id, event_id, name, pages,
+                                           budget))
+    return findings.items
 
 
 def _is_unconditional(page: Any) -> bool:
@@ -1316,17 +1354,20 @@ NESTED_DB_REFERENCES = (
 
 
 def check_database(project: Project, tables: _Tables,
-                   budget: "WalkBudget | None" = None) -> list[Finding]:
+                   budget: "WalkBudget | None" = None,
+                   collected: "_Findings | None" = None) -> list[Finding]:
     """Ids one database table holds for another.
 
     Each check walks one table's rows, so the ceiling is tested between them
     rather than inside each loop: that bounds the whole function to one
     table's overshoot without a guard in every one of a dozen loops.
     """
-    findings: list[Finding] = []
+    findings = _Findings.given(collected)
 
+    # `findings.room` is the ceiling; this closure was the fourth spelling
+    # of it in one file.
     def room() -> bool:
-        return len(findings) < MAX_FINDINGS
+        return findings.room
 
     class_ids = tables.ids("classes")
     if class_ids is not None and room():
@@ -1342,7 +1383,7 @@ def check_database(project: Project, tables: _Tables,
                 # it, which is how a table with two live readers came to have
                 # entries nothing read.
                 noun = TABLE_NOUNS["classes"]
-                findings.append(_missing(
+                findings.add(_missing(
                     "missing_%s" % noun,
                     "actor %s has class_id %s" % (entry_id, class_id),
                     "Set class_id to a %s in the Classes table, or add that "
@@ -1376,15 +1417,15 @@ def check_database(project: Project, tables: _Tables,
                     continue
                 value = _int(child.get(ref.child_field))
                 if value is not None and value not in target_ids:
-                    findings.append(_missing(
+                    findings.add(_missing(
                         "missing_%s" % noun,
                         ref.sentence % (entry_id, value),
                         "Point it at an existing %s, or add that %s."
                         % (noun, noun),
                         _db_at(ref.owner, entry_id, ref.field)))
 
-    findings += _check_system(project, tables.ids("actors"), budget)
-    return findings
+    findings.extend(_check_system(project, tables.ids("actors"), budget))
+    return findings.items
 
 
 def _check_system(project: Project, actor_ids: "set[int] | None",

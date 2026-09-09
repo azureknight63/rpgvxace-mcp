@@ -222,8 +222,15 @@ def _schema_report(ctx: Context, refresh: bool) -> dict[str, Any]:
                              "than to a map, so they are always "
                              "included. At most %d." % MAX_MAP_IDS,
                         items={"type": INT}, maxItems=MAX_MAP_IDS),
-        "limit": prop(INT, "Maximum findings to return (default %d)."
-                      % DEFAULT_FINDING_LIMIT, minimum=1, maximum=MAX_FINDINGS),
+        "limit": prop(INT, "Maximum findings to return (default %d). "
+                           "Collection itself stops at %s findings whatever "
+                           "this says, reported as \"stopped_early\"; "
+                           "\"findings_truncated\" says the returned list was "
+                           "cut to this limit; \"command_walk_stopped\" means "
+                           "a clean result is not an answer."
+                      % (DEFAULT_FINDING_LIMIT,
+                         "{:,}".format(MAX_FINDINGS)),
+                      minimum=1, maximum=MAX_FINDINGS),
         # Named here rather than shared as REFRESH, because for this tool it
         # means one thing more than it does elsewhere: it also forgets the
         # remembered asset listings, which is the only way a graphic added

@@ -114,7 +114,9 @@ MAX_PATH_SEGMENTS = MAX_JSON_DEPTH
                    enum=list(RAW_OP_ARGS)),
         "table": prop(STR, "A data table name, e.g. system, actors, map_infos.",
                       enum=ALL_TABLE_KEYS),
-        "map_id": prop(INT, "A map to address instead of a table."),
+        "map_id": prop(INT, "A map to address instead of a table. Pass "
+                            "exactly one of table or map_id.",
+                       minimum=1, maximum=MAX_MAP_ID),
         "path": prop(STR, "Slash-separated path from the top of the file, "
                           "e.g. \"events/1/pages/0/list/3/parameters/0\". "
                           "Empty for the whole file. An array segment is an "

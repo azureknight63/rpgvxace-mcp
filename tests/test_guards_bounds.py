@@ -820,7 +820,7 @@ class TestNoWalkCollectsPastTheCeiling(ToolTest):
         analysis.MAX_FINDINGS = 5000
         out = self.call("validate")
         self.assertNotIn("findings_ceiling_reached", out)
-        self.assertFalse(out["truncated"])
+        self.assertFalse(out["findings_truncated"])
 
 
 class TestMapGetBoundsItsEventSummary(SharedObjectMap, ToolTest):
@@ -1070,7 +1070,7 @@ class TestAnEmptyPageStillCostsSomething(EmptyPageMap, ToolTest):
     def test_validate_events_stops_and_says_so(self):
         self.craft_empty_page_map()
         out = self.assert_bounded("validate", map_ids=[1], scopes=["events"])
-        self.assertTrue(out.get("truncated") or "command_walk_stopped" in out,
+        self.assertTrue(out.get("findings_truncated") or "command_walk_stopped" in out,
                         "validate gave a clean bill from a walk that never "
                         "finished: %s" % sorted(out))
 
@@ -2699,3 +2699,69 @@ class TestAPathCannotOutscanItsFile(ToolTest):
     def test_an_ordinary_path_still_resolves(self):
         out = self.call("raw_data", op="get", map_id=1, path="events/1/name")
         self.assertIn("value", out)
+
+
+class TestAWholeRunHasOneCeiling(ToolTest):
+    """`MAX_FINDINGS` bounds a run, not each check's own list.
+
+    Its comment says it bounds "findings collected, not just findings
+    returned", and `_Findings`' docstring says "two ceilings of
+    MAX_FINDINGS are a ceiling of twice that" -- and `validate`
+    concatenated seven separately-bounded lists, plus the second one
+    `check_tilesets` returned, so a whole-project run could collect about
+    eight times it. `_report` then reported `stopped_early` as "collection
+    stopped at 5000 findings" when it had not.
+
+    Nothing saw the sum: `TestNoWalkCollectsPastTheCeiling` tests each walk
+    alone and `TestCollectionIsBounded` runs one scope. This runs every
+    scope at once and asks the collector.
+    """
+
+    CEILING = 6
+
+    def setUp(self):
+        super().setUp()
+        from rpgvxace_mcp import analysis
+        from rpgvxace_mcp.analysis import lint
+        for module in (analysis, lint):
+            original = module.MAX_FINDINGS
+            self.addCleanup(setattr, module, "MAX_FINDINGS", original)
+            module.MAX_FINDINGS = self.CEILING
+
+    def break_everything(self):
+        """Enough wrong, in enough scopes, to pass a small ceiling in each."""
+        infos = self.project.load_data("map_infos")
+        for map_id in range(50, 90):
+            info = RubyObject("RPG::MapInfo")
+            info.set("name", self.project.codec.make_string("M%d" % map_id))
+            info.set("parent_id", 0)
+            info.set("order", map_id)
+            infos.set(map_id, info)
+        self.project.save_file(self.project.filename_for("map_infos"),
+                               tool="test", summary="tree entries with no files")
+        system = self.project.load_data("system")
+        system.set("party_members", list(range(900, 940)))
+        self.project.save_file(self.project.filename_for("system"),
+                               tool="test", summary="absent actors")
+        self.ctx = self.reopen()
+
+    def test_a_whole_run_collects_no_more_than_the_ceiling(self):
+        from rpgvxace_mcp.analysis import lint
+        self.break_everything()
+        out = self.call("validate", limit=lint.MAX_FINDINGS)
+        self.assertLessEqual(
+            out["counts"]["error"] + out["counts"]["warning"]
+            + out["counts"]["info"], self.CEILING,
+            "a run over every scope counted %s against a ceiling of %d"
+            % (out["counts"], self.CEILING))
+
+    def test_it_says_that_collection_stopped(self):
+        """The claim `stopped_early` makes has to be the one that is true."""
+        self.break_everything()
+        out = self.call("validate")
+        self.assertIn("stopped_early", out)
+        self.assertIn(str(self.CEILING), out["stopped_early"])
+
+    def test_an_ordinary_project_does_not_claim_it_stopped(self):
+        out = self.call("validate")
+        self.assertNotIn("stopped_early", out)
