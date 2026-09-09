@@ -5,7 +5,12 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from ..analysis import REFERENCE_PREVIEW, REFERENCE_RULES, find_references
+from ..analysis import (
+    REFERENCE_PREVIEW,
+    REFERENCE_RULES,
+    CommandBudget,
+    find_references,
+)
 from ..convert import TABLE_MODES, apply_patch, new_walk, to_json
 from ..project import ProjectError
 from ..rubytypes import RubyObject, RubyString
@@ -587,8 +592,15 @@ def _op_delete(request: _DbRequest, raw_op: dict[str, Any],
     # happens to be exactly full: `len(references)` was reported as the total,
     # so an entry referenced three hundred times was said to be referenced
     # twenty-five times, and a caller could believe it had seen them all.
-    found = (find_references(ctx.project, table, entry_id,
+    #
+    # The scan is bounded, and a scan that stopped early is a third state
+    # beside "found some" and "found none": the walk is only self-limiting
+    # when there are hits to find, so "nothing points at it" is exactly the
+    # answer that costs a full traversal. See `find_references`.
+    scan = CommandBudget()
+    found = (find_references(ctx.project, table, entry_id, scan,
                              limit=REFERENCE_PREVIEW + 1) if scanned else [])
+    incomplete = scan.note("a delete's reference scan") if scanned else None
     more_than_shown = len(found) > REFERENCE_PREVIEW
     references = found[:REFERENCE_PREVIEW]
     if kind == ARRAY:
@@ -611,14 +623,30 @@ def _op_delete(request: _DbRequest, raw_op: dict[str, Any],
             "no reference scan exists for %s, so this deletion was not checked "
             "against anything that might point at entry %d. Run validate "
             "afterwards." % (table, entry_id))
-    return {"op": "delete", "id": entry_id,
-            "references_checked": scanned,
-            # In the reply as well as in the warning: a model reading the
-            # number rather than the sentence took the preview limit for a
-            # total.
-            "references_truncated": more_than_shown,
-            "references_found": len(references) if scanned else None,
-            "references": references}
+    if incomplete:
+        # Said as a warning as well as a field, because the field is a
+        # sentence a caller can skip and this changes what the zero means.
+        request.warnings.append(
+            "the reference scan for entry %d did not finish, so the %d "
+            "reference(s) reported are the ones found before it stopped and "
+            "not the whole story: %s"
+            % (entry_id, len(references), incomplete))
+    reply = {"op": "delete", "id": entry_id,
+             # Not a plain boolean any more: a scan that started and stopped
+             # is neither "checked" nor "no scan exists".
+             "references_checked": scanned and not incomplete,
+             # In the reply as well as in the warning: a model reading the
+             # number rather than the sentence took the preview limit for a
+             # total.
+             "references_truncated": more_than_shown,
+             "references_found": len(references) if scanned else None,
+             "references": references}
+    if incomplete:
+        # Only when it happened. A key that is present and null is one more
+        # thing for a caller to interpret, and every other note in this file
+        # appears the same way.
+        reply["references_scan_stopped"] = incomplete
+    return reply
 
 
 _DB_OPS = {"update": _op_update, "create": _op_create, "delete": _op_delete}

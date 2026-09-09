@@ -3954,19 +3954,12 @@ class TestRefusalsAreBounded(ToolTest):
         self.assertLess(len(shown), registry.MAX_ECHO_CHARS + 60)
 
 
-class TestSharedChildrenCannotAmplifyAWalk(ToolTest):
-    """A file whose objects share children must not buy an unbounded walk.
+class SharedObjectMap:
+    """Builds a map whose objects share children, for the walk-bound tests.
 
-    Ruby Marshal has object links and this codec supports them, so a few
-    kilobytes can describe a structure that *renders* as millions of nodes:
-    one command, a list of two thousand links to it, fifty links to that page,
-    fifty links to that event. Measured before the fix, from a 7.4 KB map:
-    event_get 36s, search 20s, validate 13s -- on a single-threaded stdio
-    server, with no way for the user to interrupt any of them.
-
-    `marshal_rb` bounds nesting depth and never object count, and the walk
-    budget `_Walk` applies to one JSON conversion does not reach the command
-    walk at all.
+    A mixin rather than a base class: two suites need this map and only this
+    map, and a second copy of the builder would be a second thing to keep in
+    step with the RPG::Event::Page field list.
     """
 
     # Small enough to build quickly, large enough that an unbounded walk is
@@ -3974,7 +3967,7 @@ class TestSharedChildrenCannotAmplifyAWalk(ToolTest):
     LIST_LEN, PAGES, EVENTS = 2000, 50, 50
 
     # Far below the 13-36 seconds measured without a bound, and far above what
-    # any of the three costs with one.
+    # any of the bounded walks costs.
     BUDGET_SECONDS = 10.0
 
     def craft_shared_map(self):
@@ -4020,8 +4013,25 @@ class TestSharedChildrenCannotAmplifyAWalk(ToolTest):
         out = self.call(tool_name, **arguments)
         elapsed = time.perf_counter() - start
         self.assertLess(elapsed, self.BUDGET_SECONDS,
-                        "%s took %.1fs on a 7 KB crafted map" % (tool_name, elapsed))
+                        "%s took %.1fs on a 7 KB crafted map"
+                        % (tool_name, elapsed))
         return out
+
+
+class TestSharedChildrenCannotAmplifyAWalk(SharedObjectMap, ToolTest):
+    """A file whose objects share children must not buy an unbounded walk.
+
+    Ruby Marshal has object links and this codec supports them, so a few
+    kilobytes can describe a structure that *renders* as millions of nodes:
+    one command, a list of two thousand links to it, fifty links to that page,
+    fifty links to that event. Measured before the fix, from a 7.4 KB map:
+    event_get 36s, search 20s, validate 13s -- on a single-threaded stdio
+    server, with no way for the user to interrupt any of them.
+
+    `marshal_rb` bounds nesting depth and never object count, and the walk
+    budget `_Walk` applies to one JSON conversion does not reach the command
+    walk at all.
+    """
 
     def test_event_get_stops_and_says_so(self):
         self.craft_shared_map()
@@ -4286,3 +4296,408 @@ class TestSearchBoundsItsTotalWork(ToolTest):
         out = self.call("search", query="Potion")
         self.assertNotIn("text_scan_stopped", out)
         self.assertTrue(out["hits"], "the fixture project has a Potion")
+
+
+class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
+    """`CommandBudget` says it is the only thing between a crafted file and a
+    walk the user must kill the server to escape. Three walks never got one.
+
+    `find_references` is the worst of them, because it is reached from
+    `db_edit op="delete"` and `map_edit op="delete"` -- a *write* path. It
+    stops as soon as it has `limit` hits, so it is bounded exactly when the
+    answer is "yes, lots"; when the answer is "nothing points at it" it has
+    walked every command in the project to find that out. On the crafted map
+    that is five million visits, and the reply then says
+    `references_found: 0` with `references_checked: true`, which reads as
+    "safe to delete".
+
+    `event_get`'s common-event branch never took a budget either, and built a
+    fresh conversion budget per command -- the exact defect `to_json`'s
+    docstring describes as fixed.
+    """
+
+    def test_deleting_an_entry_bounds_its_reference_scan(self):
+        self.craft_shared_map()
+        out = self.assert_bounded("db_edit", table="items", dry_run=True,
+                                  ops=[{"op": "delete", "id": 1}])
+        self.assertTrue(
+            "stopped" in str(out) or "incomplete" in str(out),
+            "a scan that never finished reports nothing points at the entry: "
+            "%s" % out)
+
+    def test_a_bounded_scan_does_not_claim_the_entry_is_free(self):
+        """The claim, not just the timing: `references_checked` must not lie.
+
+        Zero references and `references_checked: true` together mean "nothing
+        points at this, delete it". A scan that stopped early can produce that
+        pair honestly for neither reason, so it must report as a third state.
+        """
+        self.craft_shared_map()
+        out = self.assert_bounded("db_edit", table="items", dry_run=True,
+                                  ops=[{"op": "delete", "id": 1}])
+        row = out["applied"][0]
+        self.assertTrue(row.get("references_scan_stopped"),
+                        "the reply does not say the scan stopped: %s" % row)
+        self.assertFalse(
+            row["references_checked"],
+            "a scan that stopped early is reported as a completed check, so "
+            "%d reference(s) reads as all of them"
+            % row.get("references_found", 0))
+        self.assertTrue(
+            any("did not finish" in warning for warning in out["warnings"]),
+            "nothing in the warnings says the check was incomplete: %s"
+            % out["warnings"])
+
+    def test_deleting_a_map_bounds_its_reference_scan(self):
+        self.craft_shared_map()
+        out = self.assert_bounded("map_edit", op="delete", map_id=3,
+                                  dry_run=True)
+        self.assertIn("incoming_transfers", out)
+        self.assertTrue(
+            "stopped" in str(out) or "incomplete" in str(out),
+            "a map delete whose transfer scan never finished says the map is "
+            "unreferenced: %s" % out)
+
+    def test_reading_a_common_event_is_bounded(self):
+        """One shared command repeated past the ceiling, in a common event."""
+        common = self.project.get_entry("common_events", 1)
+        command = RubyObject("RPG::EventCommand")
+        command.set("code", 108)
+        command.set("indent", 0)
+        command.set("parameters", [self.project.codec.make_string("x")])
+        # Above MAX_COMMANDS_WALKED, so a budget must stop it.
+        common.set("list", [command] * 250_000)
+        self.project.save_file(self.project.filename_for("common_events"),
+                               tool="test", summary="one shared command")
+        self.ctx = self.reopen()
+
+        out = self.assert_bounded("event_get", common_event_id=1,
+                                  include_raw=True)
+        self.assertIn("command_walk_stopped", out)
+
+    def test_a_bounded_common_event_still_reports_its_real_length(self):
+        """Stopping the render must not misreport how long the list is."""
+        common = self.project.get_entry("common_events", 1)
+        command = RubyObject("RPG::EventCommand")
+        command.set("code", 108)
+        command.set("indent", 0)
+        command.set("parameters", [self.project.codec.make_string("x")])
+        common.set("list", [command] * 250_000)
+        self.project.save_file(self.project.filename_for("common_events"),
+                               tool="test", summary="one shared command")
+        self.ctx = self.reopen()
+
+        out = self.assert_bounded("event_get", common_event_id=1)
+        self.assertEqual(out["command_count"], 250_000)
+        self.assertIn("command_walk_stopped", out)
+
+    def test_an_ordinary_common_event_is_unaffected(self):
+        out = self.call("event_get", common_event_id=1, include_raw=True)
+        self.assertNotIn("command_walk_stopped", out)
+        self.assertIn("commands", out)
+
+    def test_an_ordinary_delete_still_reports_its_references(self):
+        out = self.call("db_edit", table="items", dry_run=True,
+                        ops=[{"op": "delete", "id": 1}])
+        self.assertNotIn("stopped", str(out))
+
+
+class TestNoWalkCollectsPastTheCeiling(ToolTest):
+    """Every walk that appends inside a loop stops at MAX_FINDINGS.
+
+    MAX_FINDINGS' comment claims it is enforced "in every walk that appends
+    inside a loop". It was not: `_check_map_assets` and `_check_database_assets`
+    had no guard, `check_tilesets` guarded `findings` while its loop appended to
+    `checker.findings` -- so that break could never fire -- and
+    `check_event_pages` and `_check_encounters` had none either.
+
+    `validate` slices the report to MAX_FINDINGS and checks it between scopes,
+    which is why none of this shows up in a reply: the cost is the collecting,
+    and one crafted map can produce a finding per event page.
+    """
+
+    # Small, so the ceiling is reached without building a huge map. It is read
+    # as a module attribute at each guard, so patching it exercises the real
+    # branch.
+    CEILING = 4
+
+    # Enough broken references to pass any small ceiling several times over.
+    EVENTS, PAGES = 40, 40
+
+    def setUp(self):
+        super().setUp()
+        from rpgvxace_mcp import analysis
+        self.analysis = analysis
+        for module in (analysis,):
+            original = module.MAX_FINDINGS
+            self.addCleanup(setattr, module, "MAX_FINDINGS", original)
+            module.MAX_FINDINGS = self.CEILING
+
+    def craft_broken_map(self):
+        """Map 1, where every event page names a graphic that is not there.
+
+        One page object shared by every slot, so the file stays small and the
+        finding count is EVENTS x PAGES.
+        """
+        game_map = self.project.load_map(1)
+        graphic = RubyObject("RPG::Event::Page::Graphic")
+        graphic.set("character_name",
+                    self.project.codec.make_string("no-such-sheet"))
+        graphic.set("character_index", 0)
+
+        page = RubyObject("RPG::Event::Page")
+        page.set("condition", RubyObject("RPG::Event::Page::Condition"))
+        page.set("graphic", graphic)
+        for name, value in (("trigger", 0), ("priority_type", 0),
+                            ("move_type", 0), ("move_speed", 3),
+                            ("move_frequency", 3), ("walk_anime", True),
+                            ("step_anime", False), ("direction_fix", False),
+                            ("through", False), ("list", [])):
+            page.set(name, value)
+
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", [page] * self.PAGES)
+
+        events = RubyHash()
+        for event_id in range(1, self.EVENTS + 1):
+            events.set(event_id, event)
+        game_map.set("events", events)
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.project = Project(self.tmp / "project")
+        self.ctx = Context(self.project)
+
+    def test_the_asset_walk_stops_collecting(self):
+        self.craft_broken_map()
+        found = self.analysis.check_assets(self.project, [1])
+        self.assertLessEqual(len(found), self.CEILING,
+                             "the asset walk collected %d findings past a "
+                             "ceiling of %d" % (len(found), self.CEILING))
+
+    def test_the_asset_checker_itself_stops_collecting(self):
+        """The bound belongs to the collector, not to each of its callers.
+
+        Four walks share this object, and the one guard that existed was
+        written against the wrong list. A collector that refuses past its
+        ceiling cannot be got wrong by a fifth caller.
+        """
+        checker = self.analysis._AssetChecker(self.project)
+        location = self.analysis._map_at(1, "parallax_name")
+        for _ in range(self.CEILING * 5):
+            checker.check("no-such-parallax", "parallaxes", location)
+        self.assertLessEqual(len(checker.findings), self.CEILING)
+        self.assertTrue(checker.full)
+
+    def test_the_page_walk_stops_collecting(self):
+        """Shadowed pages: one finding per event, and EVENTS is from the file."""
+        self.craft_broken_map()
+        found = self.analysis.check_event_pages(self.project, [1])
+        self.assertLessEqual(len(found), self.CEILING,
+                             "the page walk collected %d findings past a "
+                             "ceiling of %d" % (len(found), self.CEILING))
+
+    def test_the_tileset_walk_stops_collecting(self):
+        """Its guard was on `findings` while the loop appended to the checker."""
+        tables = self.analysis._Tables(self.project)
+        broken = []
+        for entry_id, tileset in tables.rows_of("tilesets"):
+            if isinstance(tileset, RubyObject):
+                tileset.set("tileset_names",
+                            [self.project.codec.make_string("no-such-sheet")
+                             for _ in range(20)])
+                broken.append(entry_id)
+        if not broken:
+            self.skipTest("no tilesets in this engine's fixture")
+        found = self.analysis.check_tilesets(self.project, [1], tables)
+        self.assertLessEqual(len(found), self.CEILING,
+                             "the tileset walk collected %d findings past a "
+                             "ceiling of %d" % (len(found), self.CEILING))
+
+    def test_an_ordinary_project_still_reports_everything(self):
+        """The ceiling must not clip a real project's findings."""
+        from rpgvxace_mcp import analysis
+        analysis.MAX_FINDINGS = 5000
+        out = self.call("validate")
+        self.assertNotIn("findings_ceiling_reached", out)
+        self.assertFalse(out["truncated"])
+
+
+class TestEveryNameFromJsonIsChecked(ToolTest):
+    """A class or field name reaching the file must be one Ruby would accept.
+
+    `check_ivar_name` and `check_class_name` say a name outside their shape
+    "produces a file the editor cannot open". Both were called on exactly one
+    of the fourteen forms `_dict_from_json` accepts -- the plain object -- so
+    every other form wrote whatever it was given: a struct name, a wrapped
+    class name, an extended module list, and the __ivars__ dicts on the string
+    forms.
+    """
+
+    # A name Ruby cannot resolve, and one Ruby cannot parse as an ivar.
+    BAD_CLASS = "not a class!"
+    BAD_IVAR = "not an ivar!"
+
+    def convert(self, value):
+        return convert.from_json(value, self.project.codec)
+
+    def refuses(self, value, what):
+        with self.assertRaises(ConversionError, msg=what) as caught:
+            self.convert(value)
+        return str(caught.exception)
+
+    def test_a_plain_object_is_still_checked(self):
+        """The one form that was already checked, so a fix cannot lose it."""
+        self.refuses({"__class__": self.BAD_CLASS}, "plain object class")
+        self.refuses({"__class__": "RPG::Item", self.BAD_IVAR: 1},
+                     "plain object field")
+
+    def test_a_struct_name_is_checked(self):
+        self.refuses({"__struct__": self.BAD_CLASS, "members": {}},
+                     "struct name")
+
+    def test_a_struct_member_name_is_checked(self):
+        self.refuses({"__struct__": "Foo", "members": {self.BAD_IVAR: 1}},
+                     "struct member")
+
+    def test_a_class_ref_is_checked(self):
+        self.refuses({"__class_ref__": self.BAD_CLASS}, "class ref")
+
+    def test_a_uclass_name_is_checked(self):
+        self.refuses({"__uclass__": self.BAD_CLASS, "inner": []},
+                     "uclass name")
+
+    def test_an_extended_module_name_is_checked(self):
+        self.refuses({"__extended__": [self.BAD_CLASS], "inner": 1},
+                     "extended module")
+
+    def test_a_data_class_name_is_checked(self):
+        self.refuses({"__data__": self.BAD_CLASS, "value": 1}, "data class")
+
+    def test_a_strings_ivars_are_checked(self):
+        self.refuses({"__string__": "hi", "__ivars__": {self.BAD_IVAR: 1}},
+                     "string ivars")
+
+    def test_a_byte_strings_ivars_are_checked(self):
+        self.refuses({"__bytes_base64__": "aGk=",
+                      "__ivars__": {self.BAD_IVAR: 1}},
+                     "byte string ivars")
+
+    def test_an_ivar_wrappers_names_are_checked(self):
+        self.refuses({"__ivar_wrapper__": 1, "__ivars__": {self.BAD_IVAR: 1}},
+                     "ivar wrapper")
+
+    def test_every_good_form_still_converts(self):
+        """The check must not refuse what the reader itself produces.
+
+        Each of these is a shape `to_json` emits, so refusing one would break
+        reading a project and writing it back unchanged.
+        """
+        for value in (
+                {"__struct__": "Foo", "members": {"bar": 1}},
+                {"__class_ref__": "RPG::Item"},
+                {"__class_ref__": "Comparable", "kind": "module"},
+                {"__uclass__": "MyArray", "inner": []},
+                {"__extended__": ["Comparable"], "inner": 1},
+                {"__data__": "MyData", "value": 1},
+                {"__string__": "hi", "__ivars__": {"@encoding": 1}},
+                {"__string__": "hi", "__ivars__": {"plain": 1}},
+                {"__bytes_base64__": "aGk=", "__ivars__": {"@e": 1}},
+                {"__ivar_wrapper__": 1, "__ivars__": {"@a": 2}},
+                {"__class__": "RPG::Item", "name": "x"},
+        ):
+            with self.subTest(value=value):
+                self.assertIsNotNone(self.convert(value))
+
+    def test_the_real_project_still_round_trips_through_json(self):
+        """The strongest form of the previous test: real editor output."""
+        raw = self.project.load_data("items")
+        rendered = convert.to_json(raw, self.project.codec, "full",
+                                   convert.new_walk())
+        self.assertIsNotNone(self.convert(rendered))
+
+
+class TestAnInventedFieldCannotHideInAContainer(ToolTest):
+    """The check reaches objects and lists. The format has hashes too.
+
+    `refuse_invented_in_replacement`'s docstring says a wholesale replacement
+    is "compared against the value being replaced", with the only stated
+    escape being that there is nothing to compare against. A RubyHash was a
+    second, unstated escape: the walk recursed into RubyObject fields and into
+    list elements that were RubyObjects, and returned silently for everything
+    else. A map's `events` is a RubyHash keyed by event id, so
+    `{"1": {"__class__": "RPG::Event", "naem": ...}}` went to disk unexamined
+    -- and a list holding lists was skipped the same way.
+    """
+
+    def refuse(self, existing, replacement):
+        return convert.refuse_invented_in_replacement(
+            existing, replacement, "the value")
+
+    def event_like(self, **fields):
+        """An RPG::Event with the fields given, as the editor writes them."""
+        obj = RubyObject("RPG::Event")
+        for name, value in fields.items():
+            obj.set(name, value)
+        return obj
+
+    def test_a_typo_inside_a_hash_value_is_refused(self):
+        existing = RubyHash([(1, self.event_like(id=1, name="A", x=0, y=0))])
+        replacement = RubyHash([(1, self.event_like(id=1, naem="A", x=0, y=0))])
+        with self.assertRaises(ConversionError) as caught:
+            self.refuse(existing, replacement)
+        self.assertIn("naem", str(caught.exception))
+
+    def test_a_correct_hash_value_is_allowed(self):
+        existing = RubyHash([(1, self.event_like(id=1, name="A", x=0, y=0))])
+        replacement = RubyHash([(1, self.event_like(id=1, name="B", x=1, y=0))])
+        self.assertIsNone(self.refuse(existing, replacement))
+
+    def test_a_hash_key_with_no_twin_is_not_judged(self):
+        """The stated escape still applies: no authority, no refusal."""
+        existing = RubyHash([(1, self.event_like(id=1, name="A"))])
+        replacement = RubyHash([(7, self.event_like(id=7, naem="A"))])
+        self.assertIsNone(self.refuse(existing, replacement))
+
+    def test_a_typo_inside_a_nested_list_is_refused(self):
+        existing = [[self.event_like(id=1, name="A")]]
+        replacement = [[self.event_like(id=1, naem="A")]]
+        with self.assertRaises(ConversionError) as caught:
+            self.refuse(existing, replacement)
+        self.assertIn("naem", str(caught.exception))
+
+    def test_a_typo_inside_a_hash_inside_a_list_is_refused(self):
+        existing = [RubyHash([(1, self.event_like(id=1, name="A"))])]
+        replacement = [RubyHash([(1, self.event_like(id=1, naem="A"))])]
+        with self.assertRaises(ConversionError) as caught:
+            self.refuse(existing, replacement)
+        self.assertIn("naem", str(caught.exception))
+
+    def test_the_one_reachable_hash_is_closed_by_a_narrower_guard(self):
+        """Why this is a latent gap and not a live hole, recorded as a test.
+
+        The format has two hash locations: a map's `events` and the MapInfos
+        file. raw_data refuses to replace `events` at all, for a reason that
+        has nothing to do with invented fields -- the rest of the map has to
+        agree with it -- and no patch path reaches MapInfos whole. So the hash
+        branch above was covered by coincidence rather than by the rule its
+        docstring states. If that narrower refusal is ever relaxed, this test
+        fails and says which other layer has to hold.
+        """
+        broken = {"__hash__": [[1, {"__class__": "RPG::Event", "naem": "x"}]]}
+        with self.assertRaises(ToolError) as caught:
+            self.call("raw_data", op="set", map_id=1, path="events",
+                      value={"value": broken}, dry_run=True)
+        self.assertIn("cannot be replaced through raw_data",
+                      str(caught.exception))
+
+    def test_the_depth_limit_still_holds(self):
+        """A deep structure must stop, not recurse until the stack goes."""
+        existing = replacement = None
+        for _ in range(convert.MAX_JSON_DEPTH + 50):
+            existing = RubyHash([(1, existing)])
+            replacement = RubyHash([(1, replacement)])
+        self.assertIsNone(self.refuse(existing, replacement))

@@ -156,6 +156,10 @@ NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
 BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
 INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
 AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
+NAMES = ("tests/test_tools.py::TestEveryNameFromJsonIsChecked::")
+HIDDEN = ("tests/test_tools.py::TestAnInventedFieldCannotHideInAContainer::")
+WRITEPATH = ("tests/test_tools.py::TestEveryWalkOnAWritePathIsBounded::")
+CEILING = ("tests/test_tools.py::TestNoWalkCollectsPastTheCeiling::")
 SUBJECTS = ("tests/test_tools.py::TestEveryNamedCharacterIsMeasured::")
 SEARCHWORK = ("tests/test_tools.py::TestSearchBoundsItsTotalWork::")
 FAILCLOSED = "tests/test_tools.py::TestTheMeasurementFailsClosed::"
@@ -1048,8 +1052,16 @@ GUARDS = [
     ),
     Guard(
         "findings stop being collected at the ceiling", ANALYSIS,
-        '            if len(findings) >= MAX_FINDINGS:',
-        '            if False:',
+        # Anchored with its own comment, because the bare line now appears in
+        # every walk that appends inside a loop -- which is the point of the
+        # round that added them, and made this anchor ambiguous.
+        '''            if len(findings) >= MAX_FINDINGS:
+                # The ceiling is a collection ceiling, so it is checked here
+                # rather than at the end: one page of a million Jump to Label
+                # commands with no matching Label is a million findings.
+                break''',
+        '''            if False:
+                break''',
         [BOUND + "test_a_flood_of_findings_stops_at_the_ceiling"],
         "the ceiling bounds only what is returned, so a page of broken "
         "jumps builds a finding per command -- tens of thousands of them "
@@ -1452,6 +1464,100 @@ GUARDS = [
         '''        return self.full''',
         [SEARCHWORK + "test_a_search_that_gave_up_does_not_claim_the_later_scopes"],
         'the text test answers False for the rest of the project while every scope still loads and decodes all of it, so the deadline bounds the matching and nothing bounds the walk',
+    ),
+    Guard(
+        'a delete asks what points at it under a budget', ANALYSIS,
+        '    for location, commands in iter_command_lists(project, None, budget):',
+        '    for location, commands in iter_command_lists(project):',
+        [WRITEPATH + "test_deleting_an_entry_bounds_its_reference_scan",
+         WRITEPATH + "test_deleting_a_map_bounds_its_reference_scan"],
+        'find_references runs on both delete paths and returns early only when it finds hits, so "nothing points at it" is the answer that walks every command in the project -- five million visits from a 7 KB map, and the caller then deletes',
+    ),
+    Guard(
+        'a delete whose scan stopped does not read as checked', DB_TOOLS,
+        '             "references_checked": scanned and not incomplete,',
+        '             "references_checked": scanned,',
+        [WRITEPATH + "test_a_bounded_scan_does_not_claim_the_entry_is_free"],
+        'zero references plus references_checked:true means "safe to delete", and a scan that stopped early produces that pair for neither reason',
+    ),
+    Guard(
+        'one common event cannot render without a budget', EVENT_TOOLS,
+        '        shown = commands[:command_budget.take(len(commands))]',
+        '        shown = commands',
+        [WRITEPATH + "test_reading_a_common_event_is_bounded",
+         WRITEPATH + "test_a_bounded_common_event_still_reports_its_real_length"],
+        'a common event whose @list is 250,000 links to one command is a few kilobytes on disk and renders a thirty-megabyte reply',
+    ),
+    Guard(
+        'the asset collector refuses past its ceiling', ANALYSIS,
+        '''    def check(self, name: Any, kind: str, location: Location,
+              rule: str = "missing_graphic", context: str = "") -> None:
+        if self.full:
+            return''',
+        '''    def check(self, name: Any, kind: str, location: Location,
+              rule: str = "missing_graphic", context: str = "") -> None:
+        if False:
+            return''',
+        [CEILING + "test_the_asset_checker_itself_stops_collecting",
+         CEILING + "test_the_asset_walk_stops_collecting"],
+        'four walks share one collector and none of them bounded it -- one crafted map produced 1600 findings against a ceiling of 4',
+    ),
+    Guard(
+        'the event page walk stops at the ceiling', ANALYSIS,
+        '''            # Two findings per event at most, and the event count comes out of
+            # the file: a crafted map that shares one event object across
+            # forty thousand slots produced forty thousand findings here.
+            if len(findings) >= MAX_FINDINGS:
+                return findings''',
+        '''            if False:
+                return findings''',
+        [CEILING + "test_the_page_walk_stops_collecting"],
+        'one event object shared across forty thousand slots produces a finding per slot',
+    ),
+    Guard(
+        'every ivars dict has its names checked', CONVERT,
+        '    return {check_ivar_name(name): from_json(item, codec)',
+        '    return {name: from_json(item, codec)',
+        [NAMES + "test_a_strings_ivars_are_checked",
+         NAMES + "test_a_byte_strings_ivars_are_checked",
+         NAMES + "test_an_ivar_wrappers_names_are_checked"],
+        'the two string forms and the ivar wrapper wrote whatever field name they were given straight into the Marshal stream, which check_ivar_name exists to stop',
+    ),
+    Guard(
+        'a struct names its class and its members legally', CONVERT,
+        '        return RubyStruct(check_class_name(value["__struct__"]),',
+        '        return RubyStruct(value["__struct__"],',
+        [NAMES + "test_a_struct_name_is_checked"],
+        'a struct name from caller JSON reached the file unchecked',
+    ),
+    Guard(
+        'a wrapped class name is checked', CONVERT,
+        '        return RubyUClass(check_class_name(value["__uclass__"]),',
+        '        return RubyUClass(value["__uclass__"],',
+        [NAMES + "test_a_uclass_name_is_checked"],
+        'the class of a subclassed builtin reached the file unchecked',
+    ),
+    Guard(
+        'every extended module name is checked', CONVERT,
+        '            [check_class_name(name) for name in value["__extended__"]],',
+        '            list(value["__extended__"]),',
+        [NAMES + "test_an_extended_module_name_is_checked"],
+        'the module list on an extended object reached the file unchecked',
+    ),
+    Guard(
+        'an invented field cannot hide in a hash', CONVERT,
+        '''    if isinstance(replacement, RubyHash) and isinstance(existing, RubyHash):''',
+        '''    if False:''',
+        [HIDDEN + "test_a_typo_inside_a_hash_value_is_refused",
+         HIDDEN + "test_a_typo_inside_a_hash_inside_a_list_is_refused"],
+        'the walk recursed into objects and lists and returned silently for a hash, so a typo inside one was never compared against the value it replaces -- the rule the docstring states did not apply to one of the three containers the format nests objects in',
+    ),
+    Guard(
+        'an invented field cannot hide in a nested list', CONVERT,
+        '''            if isinstance(item, (list, RubyHash)):''',
+        '''            if False:''',
+        [HIDDEN + "test_a_typo_inside_a_nested_list_is_refused"],
+        'the list branch recursed only into elements that were themselves objects, so a list of lists went through unexamined',
     ),
 ]
 

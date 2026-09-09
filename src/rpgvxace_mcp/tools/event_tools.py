@@ -296,6 +296,19 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         if common is None:
             raise ToolError("there is no common event %d" % common_id)
         commands = common.get("list") or []
+        # One allowance and one conversion budget for this reply, the same two
+        # the map branch below takes. This branch had neither: it rendered the
+        # whole list, so a common event whose @list is 250,000 links to one
+        # command -- a few kilobytes on disk -- produced a thirty-megabyte
+        # reply; and it built a fresh `new_walk()` per command, which is the
+        # defect `to_json`'s docstring describes as fixed.
+        #
+        # `take` rather than `spend`: one list has no surrounding loop, so a
+        # prefix is worth more than nothing. `command_count` stays the real
+        # length either way -- what was rendered is a separate fact.
+        command_budget = CommandBudget()
+        walk = new_walk()
+        shown = commands[:command_budget.take(len(commands))]
         triggers = {0: "none", 1: "autorun", 2: "parallel"}
         result: dict[str, Any] = {
             "common_event_id": common_id,
@@ -303,12 +316,15 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             "trigger": triggers.get(common.get("trigger"), common.get("trigger")),
             "switch_id": common.get("switch_id"),
             "command_count": len(commands),
-            "script": render_script(commands, ctx.codec),
+            "script": render_script(shown, ctx.codec),
         }
         if include_raw:
             result["commands"] = [
-                to_json(c, ctx.codec, TABLE_MODES[0], new_walk())
-                for c in commands]
+                to_json(c, ctx.codec, TABLE_MODES[0], walk) for c in shown]
+        stopped = command_budget.note("event_get")
+        if stopped:
+            result["commands_rendered"] = len(shown)
+            result["command_walk_stopped"] = stopped
         return result
 
     game_map = ctx.project.load_map(map_id, refresh)

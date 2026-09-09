@@ -438,48 +438,67 @@ def from_json(value: Any, codec: TextCodec) -> Any:
     raise ConversionError("cannot convert a %s into a Ruby value" % type(value).__name__)
 
 
+def _ivars_from_json(value: dict[str, Any], codec: TextCodec) -> dict[str, Any]:
+    """The ``__ivars__`` a wrapper carries, with every name checked.
+
+    Three forms carry these -- the two string forms and the ivar wrapper -- and
+    each had its own copy of this comprehension without the name check, which
+    is how one fix would have missed the other two. `check_ivar_name`'s
+    docstring says an unchecked name "produces a file the editor cannot open",
+    and these names are written into the Marshal stream exactly as given.
+    """
+    return {check_ivar_name(name): from_json(item, codec)
+            for name, item in (value.get("__ivars__") or {}).items()}
+
+
 def _dict_from_json(value: dict[str, Any], codec: TextCodec) -> Any:
     if "__symbol__" in value:
         return RubySymbol(value["__symbol__"])
     if "__bytes_base64__" in value:
         # The string form travels with the bytes, so an undecodable string with
         # a non-default encoding record still round trips.
-        ivars = {k: from_json(v, codec)
-                 for k, v in (value.get("__ivars__") or {}).items()}
+        ivars = _ivars_from_json(value, codec)
         return RubyString(
             _payload_from_base64(value["__bytes_base64__"], "__bytes_base64__"),
             ivars or None)
     if "__string__" in value:
-        ivars = {k: from_json(v, codec)
-                 for k, v in (value.get("__ivars__") or {}).items()}
+        ivars = _ivars_from_json(value, codec)
         return RubyString(codec.encode(value["__string__"]), ivars or None)
     if "__hash__" in value:
         pairs = [(from_json(k, codec), from_json(v, codec)) for k, v in value["__hash__"]]
         default = from_json(value["__default__"], codec) if "__default__" in value else None
         return RubyHash(pairs, default)
     if "__ivar_wrapper__" in value:
-        return RubyIvars(
-            from_json(value["__ivar_wrapper__"], codec),
-            {k: from_json(v, codec) for k, v in (value.get("__ivars__") or {}).items()})
+        return RubyIvars(from_json(value["__ivar_wrapper__"], codec),
+                         _ivars_from_json(value, codec))
     if "__data__" in value:
-        return RubyData(value["__data__"], from_json(value.get("value"), codec))
+        return RubyData(check_class_name(value["__data__"]),
+                        from_json(value.get("value"), codec))
     if "__cycle__" in value:
         raise ConversionError(
             "this value was reported as a cycle when it was read, so it cannot "
             "be written back. Edit the field that contains it instead."
         )
     if "__struct__" in value:
-        return RubyStruct(value["__struct__"],
-                          {k: from_json(v, codec)
-                           for k, v in (value.get("members") or {}).items()})
+        # A struct's members are named like ivars and are written as symbols,
+        # so they go through the same check.
+        return RubyStruct(check_class_name(value["__struct__"]),
+                          {check_ivar_name(name): from_json(item, codec)
+                           for name, item in (value.get("members") or {}).items()})
     if "__class_ref__" in value:
-        return RubyClassRef(value["__class_ref__"], value.get("kind", "class"))
+        return RubyClassRef(check_class_name(value["__class_ref__"]),
+                            value.get("kind", "class"))
     if "__regexp__" in value:
         return RubyRegexp(codec.encode(value["__regexp__"]), int(value.get("options", 0)))
     if "__uclass__" in value:
-        return RubyUClass(value["__uclass__"], from_json(value["inner"], codec))
+        return RubyUClass(check_class_name(value["__uclass__"]),
+                          from_json(value["inner"], codec))
     if "__extended__" in value:
-        return RubyExtended(list(value["__extended__"]), from_json(value["inner"], codec))
+        # Module names, written as symbols in the stream, so the same shape
+        # applies: `Comparable`, `RPG::Whatever`.
+        return RubyExtended(
+            [check_class_name(name) for name in value["__extended__"]],
+            from_json(value["inner"], codec))
 
     cls = value.get("__class__")
     if cls is None:
@@ -723,10 +742,19 @@ def refuse_invented_in_replacement(existing: Any, replacement: Any,
     A list is compared element-wise against any existing element of the same
     class, which is what catches a typo in one entry of an @learnings array.
 
+    Walks objects, lists and hashes, because those are the three containers
+    the format nests objects inside. Hashes were missed at first, and the gap
+    was closed by coincidence rather than by design: the format has two hash
+    locations -- a map's `events` and the MapInfos file -- and raw_data
+    refuses replacing `events` for an unrelated reason while no patch path
+    reaches MapInfos whole. Neither of those is this rule, and a caller
+    reading the docstring would have believed this rule applied.
+
     Where there is nothing to compare against -- an empty array, a class not
-    already present -- nothing is refused. That is the same escape
-    `refuse_unknown_fields` makes, and for the same reason: this narrows what a
-    write may say, and never blocks one it cannot judge.
+    already present, a hash key the existing hash does not have -- nothing is
+    refused. That is the same escape `refuse_unknown_fields` makes, and for
+    the same reason: this narrows what a write may say, and never blocks one
+    it cannot judge.
     """
     if depth > MAX_JSON_DEPTH:
         return
@@ -752,16 +780,36 @@ def refuse_invented_in_replacement(existing: Any, replacement: Any,
                 existing.get(name), replacement.get(name),
                 "%s.%s" % (path, name) if path else name, depth + 1)
         return
+    if isinstance(replacement, RubyHash) and isinstance(existing, RubyHash):
+        # By key, because a hash in this format is an index -- event id to
+        # event -- so the value under a key is the thing the value under that
+        # same key replaces. A key the existing hash lacks has no authority
+        # behind it and is left alone, the same escape as everywhere else here.
+        old_values = dict(existing.items())
+        for key, item in replacement.items():
+            if key in old_values:
+                refuse_invented_in_replacement(
+                    old_values[key], item, "%s[%r]" % (path, key), depth + 1)
+        return
     if isinstance(replacement, list) and isinstance(existing, list):
         for index, item in enumerate(replacement):
+            here = "%s[%d]" % (path, index)
+            if isinstance(item, (list, RubyHash)):
+                # A container inside a list: compared against the element at
+                # the same position, since there is no class to match on. This
+                # branch used to `continue`, so a list of lists -- and a list
+                # of hashes -- went through unexamined.
+                if index < len(existing):
+                    refuse_invented_in_replacement(
+                        existing[index], item, here, depth + 1)
+                continue
             if not isinstance(item, RubyObject):
                 continue
             twin = next((old for old in existing
                          if isinstance(old, RubyObject) and old.cls == item.cls),
                         None)
             if twin is not None:
-                refuse_invented_in_replacement(
-                    twin, item, "%s[%d]" % (path, index), depth + 1)
+                refuse_invented_in_replacement(twin, item, here, depth + 1)
 
 
 def normalize_strings(value: Any, codec: TextCodec, depth: int = 0) -> Any:

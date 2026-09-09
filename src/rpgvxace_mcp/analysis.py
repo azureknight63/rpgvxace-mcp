@@ -77,13 +77,19 @@ DEFAULT_LIMIT = 200
 # hundred. It is far above any real project's count, so reaching it means
 # something is wrong with the project rather than with the rules.
 #
-# Enforced in every walk that appends inside a loop -- the map tree, the
-# parent-cycle pass, the tileset sheets, the command walk and the asset walk --
-# and between the database checks, where `check_database`'s own `room()` gates
-# each block. An earlier version of this named two of those and said the
-# database checks were "bounded by their tables and left to run", which was
-# both incomplete and the wrong reason: a table's entry count comes out of the
-# file, so it is not a bound.
+# Enforced in every walk that appends inside a loop: the map tree, the
+# parent-cycle pass, the maps, the tilesets (both loops), the encounters, the
+# command walk, the event-page rules, and the asset walk -- where the ceiling
+# belongs to `_AssetChecker` itself, since four walks share one and the one
+# call site that carried the guard had written it against the wrong list.
+# `check_database`'s own `room()` gates each of its blocks.
+#
+# Two earlier versions of this comment were wrong, in the two ways such a
+# comment goes wrong: the first named two walks and claimed the database checks
+# were "bounded by their tables and left to run" -- a table's entry count comes
+# out of the file, so that is not a bound. The second listed walks that had no
+# guard at all. Both are why `TestNoWalkCollectsPastTheCeiling` tests the walks
+# directly with this patched small, rather than trusting the list above.
 MAX_FINDINGS = 5000
 
 # Text out of a project file, quoted back in a message. A crafted event name can
@@ -276,6 +282,25 @@ class CommandBudget:
             self.exhausted = True
             return False
         return True
+
+    def take(self, commands: int) -> int:
+        """Charge for as much of one list as there is allowance left for.
+
+        Returns how many are affordable, which is fewer than asked for exactly
+        when the walk has run out. `spend` is the all-or-nothing form and is
+        right inside a loop: a page is rendered whole or not at all, because a
+        reply of truncated fragments from two hundred pages is not worth
+        reading. One common event has no such loop, so a prefix beats nothing.
+        """
+        if self.exhausted:
+            return 0
+        if commands <= self.remaining:
+            self.remaining -= commands
+            return commands
+        affordable = self.remaining
+        self.remaining = 0
+        self.exhausted = True
+        return affordable
 
     def note(self, what: str) -> "str | None":
         """What to tell the caller, or None if the walk finished."""
@@ -482,12 +507,27 @@ REFERENCE_PREVIEW = 25
 
 
 def find_references(project: Project, table: str, entry_id: int,
+                    budget: CommandBudget,
                     limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
-    """Find event commands that mention ``entry_id`` from ``table``."""
+    """Find event commands that mention ``entry_id`` from ``table``.
+
+    ``budget`` is required, and is the caller's to read afterwards. This runs
+    on a *write* path -- both `db_edit op="delete"` and `map_edit op="delete"`
+    ask it what still points at the thing about to go -- and it is bounded
+    only when the answer is "yes, lots": it returns as soon as it has ``limit``
+    hits, so the case that walks every command in the project is the case that
+    answers "nothing points at it". A crafted file makes that five million
+    visits, and the caller then reports zero references with the scan marked
+    as done, which reads as "safe to delete".
+
+    Required rather than defaulted because there is no safe default here: a
+    caller that forgets gets the unbounded walk back, and this is the one
+    walk whose answer a caller acts on destructively.
+    """
     if table not in REFERENCE_RULES:
         return []
     hits: list[dict[str, Any]] = []
-    for location, commands in iter_command_lists(project):
+    for location, commands in iter_command_lists(project, None, budget):
         for index, command in enumerate(commands):
             if not isinstance(command, RubyObject):
                 continue
@@ -871,10 +911,14 @@ def check_maps(project: Project, map_ids: list[int],
 
 def _check_encounters(project: Project, map_id: int, game_map: RubyObject,
                       troop_ids: set[int] | None) -> list[Finding]:
-    findings = []
+    findings: list[Finding] = []
     encounters = _seq(game_map.get("encounter_list"))
     if troop_ids is not None:
         for entry in encounters:
+            # The list length comes out of the file, and one bad troop id
+            # repeated is one finding each.
+            if len(findings) >= MAX_FINDINGS:
+                break
             troop_id = _encounter_troop_id(entry)
             if troop_id is not None and troop_id not in troop_ids:
                 findings.append(_missing(
@@ -946,6 +990,8 @@ def check_tilesets(project: Project, map_ids: list[int],
         return findings
 
     for map_id, game_map in iter_maps(project, map_ids):
+        if len(findings) >= MAX_FINDINGS:
+            break
         tileset_id = _int(game_map.get("tileset_id"))
         if tileset_id is not None and tileset_id not in tileset_ids:
             findings.append(_missing(
@@ -959,7 +1005,15 @@ def check_tilesets(project: Project, map_ids: list[int],
     # differ only in case.
     checker = _AssetChecker(project)
     for entry_id, tileset in tables.rows_of("tilesets"):
-        if len(findings) >= MAX_FINDINGS:
+        # The bound that matters is `_AssetChecker`'s own, because this loop
+        # appends there: the guard here used to test the map loop's
+        # `findings`, which this loop never touches, so it could not fire.
+        # Kept to stop the iterating as well as the collecting -- a tileset
+        # carries nine sheet names and the row count comes out of the file --
+        # but it cannot change what this returns, so it has no entry in
+        # `prove_guards`. That is the honest description of a line whose
+        # reverted form passes every test.
+        if checker.full or len(findings) >= MAX_FINDINGS:
             break
         if not isinstance(tileset, RubyObject):
             continue
@@ -1128,12 +1182,17 @@ def check_event_pages(project: Project, map_ids: list[int]) -> list[Finding]:
     page before it, and it is the final page being an unconditional Autorun
     that traps the player.
     """
-    findings = []
+    findings: list[Finding] = []
     for map_id, game_map in iter_maps(project, map_ids):
         events = game_map.get("events")
         if not isinstance(events, RubyHash):
             continue
         for event_id, event in events.sorted_items():
+            # Two findings per event at most, and the event count comes out of
+            # the file: a crafted map that shares one event object across
+            # forty thousand slots produced forty thousand findings here.
+            if len(findings) >= MAX_FINDINGS:
+                return findings
             if not isinstance(event, RubyObject):
                 continue
             pages = _seq(event.get("pages"))
@@ -1246,8 +1305,23 @@ class _AssetChecker:
         self.complete = project.assets_complete
         self.severity = WARNING if self.complete else INFO
 
+    @property
+    def full(self) -> bool:
+        """Whether this has collected all it is going to.
+
+        The ceiling lives on the collector because four walks share one of
+        these and a guard written at a call site is a guard that can be
+        written against the wrong list -- which is exactly what
+        `check_tilesets` did: it tested its own `findings` while its loop
+        appended here, so the break could never fire. A fifth caller gets this
+        for free.
+        """
+        return len(self.findings) >= MAX_FINDINGS
+
     def check(self, name: Any, kind: str, location: Location,
               rule: str = "missing_graphic", context: str = "") -> None:
+        if self.full:
+            return
         text = _text(self.project, name)
         if not text:
             return
@@ -1328,6 +1402,11 @@ def check_assets(project: Project, map_ids: list[int],
 def _check_map_assets(project: Project, checker: _AssetChecker,
                       map_ids: list[int]) -> None:
     for map_id, game_map in iter_maps(project, map_ids):
+        # The collector refuses past its ceiling on its own; this stops the
+        # loading and decoding too. One crafted map is events x pages, and
+        # those two numbers come out of the file.
+        if checker.full:
+            return
         checker.check(game_map.get("parallax_name"), "parallaxes",
                       _map_at(map_id, "parallax_name"))
         if game_map.get("specify_battleback"):
@@ -1348,10 +1427,14 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
         if not isinstance(events, RubyHash):
             continue
         for event_id, event in events.sorted_items():
+            if checker.full:
+                return
             if not isinstance(event, RubyObject):
                 continue
             name = _text(project, event.get("name"))
             for page_index, page in enumerate(_seq(event.get("pages"))):
+                if checker.full:
+                    return
                 if not isinstance(page, RubyObject):
                     continue
                 graphic = page.get("graphic")

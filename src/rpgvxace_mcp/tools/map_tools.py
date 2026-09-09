@@ -12,7 +12,7 @@ from ..convert import (
     normalize_strings,
     to_json,
 )
-from ..analysis import REFERENCE_PREVIEW, find_references
+from ..analysis import CommandBudget, REFERENCE_PREVIEW, find_references
 from ..project import MAX_MAP_ID, ProjectError
 from ..rubytypes import CELL_MASK, RubyHash, RubyObject, RubyString, Table
 from ..schema import TILE_ID_RANGES, TRIGGER_NAMES, new_map_info
@@ -887,9 +887,14 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     # times was said to be referenced twenty-five -- and a caller that fixed
     # those twenty-five would believe the map was free. The constant's own
     # comment claimed this fix before this line had it.
+    # Bounded, and a scan that stopped is reported: the walk returns early
+    # only when it finds hits, so "no map transfers here" is the answer that
+    # costs a full traversal of every command in the project.
+    scan = CommandBudget()
     found = [hit["where"] for hit in
-             find_references(ctx.project, "maps", map_id,
+             find_references(ctx.project, "maps", map_id, scan,
                              limit=REFERENCE_PREVIEW + 1)]
+    incomplete = scan.note("a map delete's transfer scan")
     more_than_shown = len(found) > REFERENCE_PREVIEW
     incoming = found[:REFERENCE_PREVIEW]
 
@@ -905,6 +910,11 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
             "would_delete": filename if has_file else None,
             "incoming_transfers": incoming,
             "incoming_transfers_truncated": more_than_shown}
+        if incomplete:
+            # An empty `incoming_transfers` from a scan that stopped reads as
+            # "no map sends the player here", which is the one thing a caller
+            # about to delete a map acts on.
+            preview["incoming_transfers_scan_stopped"] = incomplete
         if not has_file:
             preview["note"] = ("there is no %s to delete, so only the tree "
                                "entry would be removed" % filename)
@@ -939,6 +949,8 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     if not has_file:
         result["note"] = ("there is no %s to delete, so only the tree entry "
                           "was removed" % filename)
+    if incomplete:
+        result["incoming_transfers_scan_stopped"] = incomplete
     if incoming:
         result["warning"] = (
             "%s Transfer Player command(s) still point at map %d and will now "
