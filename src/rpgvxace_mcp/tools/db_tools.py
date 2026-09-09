@@ -299,16 +299,37 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"table": table, "entries": out}
     if missing:
         result["missing_ids"] = missing
-        # Only the ids db_edit will actually accept get that advice: id 0 is
-        # RPG Maker's deliberately empty slot and _check_id refuses it, so
-        # offering create for it hands the caller a remedy that cannot work.
-        creatable = [i for i in missing if i >= 1]
+        # Only the ids db_edit will actually accept get that advice, and
+        # "above zero" was not that test. db_edit refuses two more classes:
+        # an id far past the end of the table, which would pad it with empty
+        # slots, and every id in a table it will not touch at all. The comment
+        # here claimed this filter already did that.
+        if table not in EDITABLE_DATABASE_TABLES:
+            result["note"] = (
+                "ids with no entry are empty slots. db_edit does not change "
+                "%s, so it cannot fill these in -- the map tree is edited "
+                "with map_edit, which moves the tree entry and the map file "
+                "together." % table
+                if table == "map_infos" else
+                "ids with no entry are empty slots, and db_edit does not "
+                "change %s." % table)
+            return result
+        container = ctx.project.load_data(table)
+        kind = ctx.project.container_kind(table, container)
+        creatable = [i for i in missing
+                     if _can_create(container, kind, i)]
+        refused = [i for i in missing if i not in creatable]
         result["note"] = (
             'ids with no entry are empty slots; db_edit with op "create" '
             "fills in %s" % (", ".join(str(i) for i in creatable)
-                             if creatable else "none of these")
-            + (". Id 0 is not an entry: RPG Maker keeps slot 0 empty so every "
-               "id matches its position." if 0 in missing else ""))
+                             if creatable else "none of these"))
+        if refused:
+            result["note"] += (
+                ". It will not create %s: id 0 is never an entry -- RPG Maker "
+                "keeps slot 0 empty so every id matches its position -- and an "
+                "id far past the end of the table would pad it with empty "
+                "slots. Create the ids in between first."
+                % ", ".join(str(i) for i in refused))
     return result
 
 
@@ -328,7 +349,8 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                            "here: a tree entry and its Map### file have to "
                            "change together, so use map_edit for those.",
                       enum=EDITABLE_DATABASE_TABLES),
-        "ops": prop(ARR, "Operations, applied in order.",
+        "ops": prop(ARR, "Operations, applied in order. At most %d per "
+                         "call." % MAX_OPS,
                     maxItems=MAX_OPS, items={
             "additionalProperties": False,
             "type": OBJ,
@@ -342,10 +364,12 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 # size in its refusal, which is the answer a caller can act
                 # on.
                 "id": {"type": INT, "description":
-                       "Entry id, numbered from 1. op \"create\" accepts "
-                       "an id up to about a thousand past the end of the "
-                       "table, and its refusal says exactly how far. Optional "
-                       "for create, which appends by default."},
+                       "Entry id, numbered from 1. For an id-indexed "
+                       "table op \"create\" accepts an id up to about a "
+                       "thousand past the end, and its refusal says exactly "
+                       "how far; a hash-keyed table (VX's areas) has no slots "
+                       "to pad, so any id up to %d. Optional for create, "
+                       "which appends by default." % MAX_ENTRY_ID},
                 "clone_from": {"type": INT, "description":
                                "For create: copy this entry, then apply the patch."},
                 "patch": {"type": OBJ, "description":
@@ -624,14 +648,37 @@ def _check_id(request: "_DbRequest", entry_id: int,
             "id matches its position. Ids start at 1.")
     if existing:
         return
-    ceiling = (min(MAX_ENTRY_ID, len(container) + ARRAY_GROWTH_HEADROOM)
-               if kind == ARRAY else MAX_ENTRY_ID)
+    ceiling = _create_ceiling(container, kind)
     if entry_id > ceiling:
         raise ToolError(
             "id %d is too high; this table has %d entries, so ids up to %d can "
             "be created. Creating id %d would fill the table with %d empty "
             "slots." % (entry_id, len(container), ceiling, entry_id,
                         entry_id - len(container)))
+
+
+def _can_create(container: Any, kind: str, entry_id: int) -> bool:
+    """Whether op "create" would accept this id, asked without raising.
+
+    `_check_id` is the authority and refuses by raising, which is right at a
+    write. A read that wants to *offer* create needs the same answer as a
+    question -- and computing it a second time by hand is how db_get came to
+    promise a create that db_edit then refused.
+    """
+    return entry_id >= 1 and entry_id <= _create_ceiling(container, kind)
+
+
+def _create_ceiling(container: Any, kind: str) -> int:
+    """The highest id op "create" will accept for this container.
+
+    An id-indexed Array grows, so it is its length plus a little headroom. A
+    Hash-keyed table has no slots to pad, so its only ceiling is the global
+    one -- which is why the refusal below branches on the kind rather than
+    telling a Hash it would "fill the table with empty slots".
+    """
+    if kind == ARRAY:
+        return min(MAX_ENTRY_ID, len(container) + ARRAY_GROWTH_HEADROOM)
+    return MAX_ENTRY_ID
 
 
 def _carries_id(request: "_DbRequest") -> bool:

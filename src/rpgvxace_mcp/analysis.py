@@ -77,11 +77,13 @@ DEFAULT_LIMIT = 200
 # hundred. It is far above any real project's count, so reaching it means
 # something is wrong with the project rather than with the rules.
 #
-# Enforced where a finding can be produced per command or per cell walked:
-# the command walk and the asset walk, which are the only paths whose finding
-# count scales with the size of the file rather than with the number of
-# entries in a table. `validate` also stops between checks. The database
-# checks are bounded by their tables and are left to run.
+# Enforced in every walk that appends inside a loop -- the map tree, the
+# parent-cycle pass, the tileset sheets, the command walk and the asset walk --
+# and between the database checks, where `check_database`'s own `room()` gates
+# each block. An earlier version of this named two of those and said the
+# database checks were "bounded by their tables and left to run", which was
+# both incomplete and the wrong reason: a table's entry count comes out of the
+# file, so it is not a bound.
 MAX_FINDINGS = 5000
 
 # Text out of a project file, quoted back in a message. A crafted event name can
@@ -235,7 +237,60 @@ def _text(project: Project, value: Any) -> str:
     return text
 
 
-def iter_command_lists(project: Project, map_ids: list[int] | None = None
+# How many event commands one call may visit. A real project's largest map has
+# a few thousand across all its pages; this is far above that. It exists
+# because a file's *rendered* size is not its size on disk: Ruby Marshal has
+# object links, so one command, a list of two thousand links to it, fifty
+# links to that page and fifty links to that event is 7 KB describing five
+# million command visits -- measured at 36 seconds in event_get.
+MAX_COMMANDS_WALKED = 200_000
+
+
+class CommandBudget:
+    """How much of the command walk one call has left, and whether it ran out.
+
+    Passed in by the caller rather than started per traversal, so a tool that
+    walks several times -- validate runs a command check and an asset check --
+    spends one allowance across all of them. `marshal_rb` bounds how deeply a
+    file nests and nothing bounds how much it can share, so this is the only
+    thing standing between a crafted file and a walk the user has to kill the
+    server to escape.
+
+    Every caller that can run out has to say so in its reply: a search that
+    stopped early and reports no hits is indistinguishable from one that
+    looked everywhere, which is the worst shape of answer available here.
+    """
+
+    __slots__ = ("remaining", "exhausted")
+
+    def __init__(self, limit: int = MAX_COMMANDS_WALKED):
+        self.remaining = limit
+        self.exhausted = False
+
+    def spend(self, commands: int) -> bool:
+        """Charge for one command list. False once there is nothing left."""
+        if self.exhausted:
+            return False
+        self.remaining -= commands
+        if self.remaining < 0:
+            self.exhausted = True
+            return False
+        return True
+
+    def note(self, what: str) -> "str | None":
+        """What to tell the caller, or None if the walk finished."""
+        if not self.exhausted:
+            return None
+        return ("this project's event commands number more than the %d %s "
+                "reads in one call, so the walk stopped early and this answer "
+                "is incomplete. That happens when a file shares objects by "
+                "reference far more than the editor does -- run validate, and "
+                "narrow the request (fewer maps, or one event) to see the "
+                "rest." % (MAX_COMMANDS_WALKED, what))
+
+
+def iter_command_lists(project: Project, map_ids: list[int] | None = None,
+                       budget: "CommandBudget | None" = None
                        ) -> Iterator[tuple[Location, list[Any]]]:
     """Every event command list in the project, with where it came from.
 
@@ -245,6 +300,11 @@ def iter_command_lists(project: Project, map_ids: list[int] | None = None
     ``map_ids`` narrows the map pages only. Common events and troop pages
     belong to the project rather than to any map, so they are always included;
     every caller that reports a map count says so separately.
+
+    ``budget`` bounds how many commands the walk visits in total. Without one
+    it is unbounded, which is right for a caller that has already bounded
+    itself and wrong for anything reading a file it did not write -- see
+    :class:`CommandBudget`.
     """
     for map_id, game_map in iter_maps(project, map_ids):
         events = game_map.get("events")
@@ -256,21 +316,29 @@ def iter_command_lists(project: Project, map_ids: list[int] | None = None
             name = _text(project, event.get("name"))
             for page_index, page in enumerate(_seq(event.get("pages"))):
                 if isinstance(page, RubyObject):
+                    commands = _seq(page.get("list"))
+                    if budget is not None and not budget.spend(len(commands)):
+                        return
                     yield (_event_at(map_id, event_id, name, page_index),
-                           _seq(page.get("list")))
+                           commands)
 
     for entry_id, common in _safe_entries(project, "common_events"):
         if isinstance(common, RubyObject):
-            yield (Location("common_event", entry_id=entry_id),
-                   _seq(common.get("list")))
+            commands = _seq(common.get("list"))
+            if budget is not None and not budget.spend(len(commands)):
+                return
+            yield (Location("common_event", entry_id=entry_id), commands)
 
     for entry_id, troop in _safe_entries(project, "troops"):
         if not isinstance(troop, RubyObject):
             continue
         for page_index, page in enumerate(_seq(troop.get("pages"))):
             if isinstance(page, RubyObject):
-                yield (Location("troop_page", entry_id=entry_id, page=page_index),
-                       _seq(page.get("list")))
+                commands = _seq(page.get("list"))
+                if budget is not None and not budget.spend(len(commands)):
+                    return
+                yield (Location("troop_page", entry_id=entry_id,
+                                page=page_index), commands)
 
 
 def iter_maps(project: Project, map_ids: list[int] | None = None
@@ -600,15 +668,19 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
         findings += check_map_tree(project)
         findings += check_maps(project, ids, tables)
         findings += check_tilesets(project, ids, tables)
+    # One allowance for every command walk this call makes. A file that
+    # shares objects by reference can render as millions of commands from a few
+    # kilobytes, and neither the Marshal reader nor MAX_FINDINGS bounds that.
+    walk_budget = CommandBudget()
     if "events" in scopes and len(findings) < MAX_FINDINGS:
         ran.append("event command structure and references (plus every common "
                    "event and troop page, which belong to the project rather "
                    "than to a map)")
-        findings += check_commands(project, ids, tables)
+        findings += check_commands(project, ids, tables, walk_budget)
         findings += check_event_pages(project, ids)
     if "assets" in scopes and len(findings) < MAX_FINDINGS:
         ran.append("graphic and audio file references")
-        findings += check_assets(project, ids)
+        findings += check_assets(project, ids, walk_budget)
     if "database" in scopes and len(findings) < MAX_FINDINGS:
         ran.append("database cross-references")
         findings += check_database(project, tables)
@@ -641,6 +713,14 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
                 "confirmed for both VX Ace and VX; commands outside that set "
                 "are not checked.",
     }
+    # Named apart from `stopped` above, which means "MAX_FINDINGS was hit".
+    # Two different facts -- the walk ran out, versus the findings did -- and
+    # reusing the one name made the second branch below read the first fact.
+    walk_stopped = walk_budget.note("validate")
+    if walk_stopped:
+        # Said in the reply, because a clean bill from a walk that never
+        # finished is the worst answer this function can give.
+        report["command_walk_stopped"] = walk_stopped
     if not project.command_layouts_modelled:
         report["engine_warning"] = (
             "this is a %s project, whose event command layouts are not modelled "
@@ -894,9 +974,13 @@ def check_tilesets(project: Project, map_ids: list[int],
     return findings + checker.findings
 
 
-def check_commands(project: Project, map_ids: list[int],
-                   tables: _Tables) -> list[Finding]:
-    """Every event command list: structure, and the ids the commands name."""
+def check_commands(project: Project, map_ids: list[int], tables: _Tables,
+                   budget: "CommandBudget | None" = None) -> list[Finding]:
+    """Every event command list: structure, and the ids the commands name.
+
+    ``budget`` is shared with the asset walk, so one validate call spends one
+    allowance across both -- see :class:`CommandBudget`.
+    """
     findings = []
     # A table absent from this mapping is one that could not be read, so
     # the rules comparing ids against it are skipped rather than answered
@@ -912,7 +996,7 @@ def check_commands(project: Project, map_ids: list[int],
     on_disk = set(project.map_ids_on_disk())
     check_parameters = project.command_layouts_modelled
 
-    for location, commands in iter_command_lists(project, map_ids):
+    for location, commands in iter_command_lists(project, map_ids, budget):
         if len(findings) >= MAX_FINDINGS:
             break
         labels: set[str] | None = None
@@ -1213,7 +1297,8 @@ class _AssetChecker:
             "%d files in %s and any located RTP" % (len(pool), folder)))
 
 
-def check_assets(project: Project, map_ids: list[int]) -> list[Finding]:
+def check_assets(project: Project, map_ids: list[int],
+                 budget: "CommandBudget | None" = None) -> list[Finding]:
     """Graphic and audio names, against the files present.
 
     Covers what an agent is most likely to break: map parallaxes and
@@ -1235,7 +1320,7 @@ def check_assets(project: Project, map_ids: list[int]) -> list[Finding]:
     """
     checker = _AssetChecker(project)
     _check_map_assets(project, checker, map_ids)
-    _check_command_assets(project, checker, map_ids)
+    _check_command_assets(project, checker, map_ids, budget)
     _check_database_assets(project, checker)
     return checker.findings
 
@@ -1276,13 +1361,14 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
 
 
 def _check_command_assets(project: Project, checker: _AssetChecker,
-                          map_ids: list[int]) -> None:
+                          map_ids: list[int],
+                          budget: "CommandBudget | None" = None) -> None:
     if not project.command_layouts_modelled:
         # An unmodelled engine's parameter layouts are different: XP's Show
         # Text keeps the message where Ace keeps the face graphic, so these
         # rules would invent a missing file for every line of dialogue.
         return
-    for location, commands in iter_command_lists(project, map_ids):
+    for location, commands in iter_command_lists(project, map_ids, budget):
         if len(checker.findings) >= MAX_FINDINGS:
             break
         for index, command in enumerate(commands):

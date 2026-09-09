@@ -22,7 +22,12 @@ from rpgvxace_mcp.project import (  # noqa: E402
     ReadOnlyError,
     StaleFileError,
 )
-from rpgvxace_mcp.rubytypes import RubyObject, RubyString, Table  # noqa: E402
+from rpgvxace_mcp.rubytypes import (  # noqa: E402
+    RubyHash,
+    RubyObject,
+    RubyString,
+    Table,
+)
 from rpgvxace_mcp import convert  # noqa: E402
 from rpgvxace_mcp.convert import ConversionError  # noqa: E402
 from rpgvxace_mcp.schema import PROFILES  # noqa: E402
@@ -2549,7 +2554,7 @@ class TestAddPageRefusesInsteadOfCrashing(ToolTest):
 
 
 class TestSearchPatternsStayFast(ToolTest):
-    """The corpus pattern_safety's docstring points at.
+    r"""The corpus pattern_safety's docstring points at.
 
     A cost model cannot be checked by reading it, so this measures. Every
     pattern the module allows must finish quickly against the worst subject it
@@ -2918,9 +2923,15 @@ class TestDbGetArgumentsAreHonoured(ToolTest):
             self.call("db_list", table="items", fields=[["price"]])
 
     def test_the_empty_slot_note_only_offers_what_create_accepts(self):
+        """Both ids are named, and only the creatable one is offered."""
         out = self.call("db_get", table="items", ids=[0, 998])
-        self.assertIn("998", out["note"])
-        self.assertIn("Id 0", out["note"])
+        note = out["note"]
+        self.assertIn("fills in 998", note)
+        # Id 0 is named as refused rather than silently dropped from the
+        # advice: "we did not mention it" and "you can create it" read the
+        # same to a caller scanning for its id.
+        self.assertIn("will not create 0", note)
+        self.assertIn("slot 0 empty", note)
 
     def test_scripts_is_not_advertised(self):
         self.assertNotIn("scripts",
@@ -3929,3 +3940,151 @@ class TestRefusalsAreBounded(ToolTest):
         self.assertIs(server.echo, registry.echo)
         shown = registry.echo("x" * 5_000_000)
         self.assertLess(len(shown), registry.MAX_ECHO_CHARS + 60)
+
+
+class TestSharedChildrenCannotAmplifyAWalk(ToolTest):
+    """A file whose objects share children must not buy an unbounded walk.
+
+    Ruby Marshal has object links and this codec supports them, so a few
+    kilobytes can describe a structure that *renders* as millions of nodes:
+    one command, a list of two thousand links to it, fifty links to that page,
+    fifty links to that event. Measured before the fix, from a 7.4 KB map:
+    event_get 36s, search 20s, validate 13s -- on a single-threaded stdio
+    server, with no way for the user to interrupt any of them.
+
+    `marshal_rb` bounds nesting depth and never object count, and the walk
+    budget `_Walk` applies to one JSON conversion does not reach the command
+    walk at all.
+    """
+
+    # Small enough to build quickly, large enough that an unbounded walk is
+    # unmistakable: 2000 x 50 x 50 is five million command visits.
+    LIST_LEN, PAGES, EVENTS = 2000, 50, 50
+
+    # Far below the 13-36 seconds measured without a bound, and far above what
+    # any of the three costs with one.
+    BUDGET_SECONDS = 10.0
+
+    def craft_shared_map(self):
+        """Rewrite map 1 so every command, page and event is one shared object."""
+        game_map = self.project.load_map(1)
+        command = RubyObject("RPG::EventCommand")
+        command.set("code", 108)
+        command.set("indent", 0)
+        command.set("parameters", [self.project.codec.make_string("x")])
+
+        page = RubyObject("RPG::Event::Page")
+        page.set("condition", RubyObject("RPG::Event::Page::Condition"))
+        page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
+        for name, value in (("trigger", 0), ("priority_type", 0),
+                            ("move_type", 0), ("move_speed", 3),
+                            ("move_frequency", 3), ("walk_anime", True),
+                            ("step_anime", False), ("direction_fix", False),
+                            ("through", False)):
+            page.set(name, value)
+        page.set("list", [command] * self.LIST_LEN)
+
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", [page] * self.PAGES)
+
+        events = RubyHash()
+        for event_id in range(1, self.EVENTS + 1):
+            events.set(event_id, event)
+        game_map.set("events", events)
+
+        path = self.project.path_for(self.project.map_file(1))
+        path.write_bytes(marshal_rb.dump(game_map))
+        # Small on disk is the whole point of the finding.
+        self.assertLess(path.stat().st_size, 64 * 1024)
+        self.ctx = self.reopen()
+
+    def assert_bounded(self, tool_name, **arguments):
+        import time
+        start = time.perf_counter()
+        out = self.call(tool_name, **arguments)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, self.BUDGET_SECONDS,
+                        "%s took %.1fs on a 7 KB crafted map" % (tool_name, elapsed))
+        return out
+
+    def test_event_get_stops_and_says_so(self):
+        self.craft_shared_map()
+        out = self.assert_bounded("event_get", map_id=1)
+        self.assertIn("commands", " ".join(str(v) for v in out.values()))
+        self.assertTrue(
+            any("stopped" in str(v) or "not read" in str(v)
+                for v in out.values()),
+            "the reply does not say the walk was cut short: %s" % sorted(out))
+
+    def test_search_stops_and_says_so(self):
+        self.craft_shared_map()
+        out = self.assert_bounded("search", query="zzz-nothing-matches",
+                                  scopes=["events"])
+        # A search that stopped early must not read as "there are none".
+        self.assertTrue(out.get("may_have_more") or "stopped" in str(out),
+                        "an empty result from a cut-short walk reads as "
+                        "nothing found: %s" % sorted(out))
+
+    def test_validate_stops_and_says_so(self):
+        self.craft_shared_map()
+        out = self.assert_bounded("validate", map_ids=[1], scopes=["events"])
+        self.assertTrue(out.get("truncated") or "stopped" in str(out),
+                        "validate reports a clean bill from a walk that never "
+                        "finished: %s" % sorted(out))
+
+
+class TestAdviceNamesOnlyWhatWillWork(ToolTest):
+    """A remedy the sibling tool refuses is not a remedy.
+
+    db_get's note offered `db_edit op="create"` for every missing id above
+    zero, and db_edit refuses two whole classes of those: an id far past the
+    end of the table (it would pad the table with empty slots), and any id at
+    all in a table db_edit will not touch. The comment above the filter
+    claimed it named "only the ids db_edit will actually accept".
+    """
+
+    def test_an_id_past_the_create_ceiling_is_not_offered(self):
+        out = self.call("db_get", table="items", ids=[1, 500000])
+        self.assertIn("500000", str(out["missing_ids"]))
+        self.assertNotIn("fills in 500000", out["note"])
+        self.assertIn("500000", out["note"])      # named, as refused
+
+    def test_a_table_db_edit_will_not_touch_is_not_offered(self):
+        out = self.call("db_get", table="map_infos", ids=[500])
+        self.assertNotIn('db_edit with op "create"', out["note"])
+        self.assertIn("map_edit", out["note"])
+
+    def test_an_ordinary_empty_slot_is_still_offered(self):
+        total = self.call("db_list", table="items")["matching_entries"]
+        out = self.call("db_get", table="items", ids=[total + 1])
+        self.assertIn("fills in %d" % (total + 1), out["note"])
+
+
+class TestArgumentDescriptionsComeFromTheTables(ToolTest):
+    """A description that lists the wrong ops sends a caller the wrong way.
+
+    `commands` said "for set_commands/append_commands/create" while
+    EVENT_OP_ARGS lets set_page and add_page read it too -- so a model wanting
+    a page with commands on it splits one op into two, or omits the commands.
+    Generated from the table, so the two cannot disagree again.
+    """
+
+    def ops_reading(self, table, argument):
+        return sorted(op for op, reads in table.items() if argument in reads)
+
+    def test_the_commands_description_names_every_op_that_reads_it(self):
+        properties = (REGISTRY["event_edit"].schema["properties"]["ops"]
+                      ["items"]["properties"])
+        described = properties["commands"]["description"]
+        for op in self.ops_reading(event_tools.EVENT_OP_ARGS, "commands"):
+            self.assertIn(op, described,
+                          "%s reads commands and the description omits it" % op)
+
+    def test_the_patch_description_covers_a_common_event(self):
+        properties = (REGISTRY["event_edit"].schema["properties"]["ops"]
+                      ["items"]["properties"])
+        self.assertIn("RPG::CommonEvent", properties["patch"]["description"])

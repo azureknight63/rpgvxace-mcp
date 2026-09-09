@@ -278,12 +278,18 @@ def refuse_unknown_fields(patch: dict[str, Any], known: "set[str]",
     deliberately unvalidated escape hatch was stricter than the validating
     tools.
 
-    ``known`` is drawn from the project's own data -- the fields this entry
-    already carries, or a sibling's -- rather than from a table of documented
-    field names. Two reasons: the reference tables cover the map and event
-    classes but no database class, so a documented allow-list would refuse
-    every field on every database entry; and a project whose scripts add their
-    own ivars is normal, and refusing those would break editing it.
+    ``known`` always includes the project's own data -- the fields this entry
+    carries, or a sibling's -- and never consists of documented names alone.
+    Two reasons: the reference tables cover the map and event classes but no
+    database class, so a documented allow-list would refuse every field on
+    every database entry; and a project whose scripts add their own ivars is
+    normal, and refusing those would break editing it.
+
+    It is not *only* the project's data, which an earlier version of this said:
+    `known_fields` unions in the class's documented fields, so a map, an event
+    page and a common event each accept a documented field the entry happens
+    not to carry yet. `project_info`'s description states that rule; this one
+    used to contradict it.
 
     An empty ``known`` means there was nothing to compare against, so nothing
     is refused: this check narrows what a patch may say, and never blocks a

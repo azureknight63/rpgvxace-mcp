@@ -155,6 +155,7 @@ DELPREV = "tests/test_tools.py::TestADeletePreviewMatchesTheDelete::"
 NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
 BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
 INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
+AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
 
 GUARDS = [
     Guard(
@@ -1391,6 +1392,15 @@ GUARDS = [
         '        if False:',
         [INERT + "test_regex_alongside_a_command_code_is_refused"],
         'regex says how to read query, and a command_code search reads neither, so the flag is silently dropped',
+    ),
+    Guard(
+        'shared children cannot amplify a walk', ANALYSIS,
+        '                    if budget is not None and not budget.spend(len(commands)):\n                        return',
+        '                    if False:\n                        return',
+        [AMPLIFY + "test_event_get_stops_and_says_so",
+         AMPLIFY + "test_search_stops_and_says_so",
+         AMPLIFY + "test_validate_stops_and_says_so"],
+        'a 7 KB map whose objects share children renders as five million commands: event_get takes 36 seconds, search 20 and validate 13, on a server the user cannot interrupt',
     ),
 ]
 

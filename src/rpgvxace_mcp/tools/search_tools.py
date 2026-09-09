@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..analysis import Location, iter_command_lists
+from ..analysis import CommandBudget, Location, iter_command_lists
 from ..commands import command_name, summarize
 from ..project import ProjectError
 from ..rubytypes import RubyObject, RubyString, _bare_name
@@ -149,7 +149,8 @@ class _Hits:
     one script slot.
     """
 
-    __slots__ = ("rows", "limit", "searched", "unsearchable", "unreadable")
+    __slots__ = ("rows", "limit", "searched", "unsearchable", "unreadable",
+                 "walk")
 
     def __init__(self, limit: int):
         self.rows: list[dict[str, Any]] = []
@@ -157,6 +158,11 @@ class _Hits:
         self.searched: list[str] = []
         self.unsearchable: dict[str, str] = {}
         self.unreadable: list[int] = []
+        # One allowance for the command walk. A file that shares objects by
+        # reference renders as far more commands than its size suggests, and
+        # a search that stopped early and found nothing reads exactly like one
+        # that looked everywhere.
+        self.walk = CommandBudget()
 
     @property
     def full(self) -> bool:
@@ -216,13 +222,18 @@ class _Hits:
             out["scripts_not_searched"] = self.unreadable
         if self.unsearchable:
             out["could_not_read"] = self.unsearchable
+        stopped = self.walk.note("search")
+        if stopped:
+            out["command_walk_stopped"] = stopped
+            # So an empty result cannot read as "there are none".
+            out["may_have_more"] = True
         return out
 
 def _search_events(ctx: Context, found: _Hits, matcher: "_Matcher | None",
                    code_filter: "int | None") -> None:
     """Every event command list on every map, plus common events and troops."""
     found.searching("events")
-    for location, commands in iter_command_lists(ctx.project):
+    for location, commands in iter_command_lists(ctx.project, None, found.walk):
         if found.full:
             return
         for index, command in enumerate(commands):

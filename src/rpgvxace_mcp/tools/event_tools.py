@@ -23,6 +23,7 @@ from ..convert import (
     normalize_strings,
     to_json,
 )
+from ..analysis import CommandBudget
 from ..project import MAX_MAP_ID
 from ..rubytypes import RubyHash, RubyObject, RubyString
 from ..schema import (
@@ -218,8 +219,15 @@ def _text(ctx: Context, value: Any) -> str:
 
 
 def _page_view(ctx: Context, page: RubyObject, index: int,
-               include_raw: bool, walk: Any) -> dict[str, Any]:
+               include_raw: bool, walk: Any,
+               budget: "CommandBudget | None" = None) -> dict[str, Any]:
     commands = page.get("list") or []
+    if budget is not None and not budget.spend(len(commands)):
+        # Charged before rendering, because rendering is the cost: a page whose
+        # @list is two thousand links to one command renders two thousand
+        # lines, and fifty links to that page renders a hundred thousand.
+        return {"page": index, "command_count": len(commands),
+                "not_read": "the command walk stopped before this page"}
     condition = page.get("condition")
     graphic = page.get("graphic")
     view: dict[str, Any] = {
@@ -308,6 +316,10 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     # command of every event asked for, and the number of commands on a
     # page comes out of the file.
     walk = new_walk()
+    # And one allowance for the commands themselves, which is a different
+    # budget from the JSON one: `new_walk` bounds how much a value expands
+    # into a reply, and this bounds how many commands are visited at all.
+    command_budget = CommandBudget()
     events = game_map.get("events")
     unreadable = unreadable_events_note(events)
     if unreadable:
@@ -339,21 +351,30 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             if only_page is not None and index != only_page:
                 continue
             if isinstance(page, RubyObject):
-                pages.append(_page_view(ctx, page, index, include_raw, walk))
+                pages.append(_page_view(ctx, page, index, include_raw, walk,
+                                        command_budget))
         out.append({
             "id": event_id, "name": name,
             "x": event.get("x"), "y": event.get("y"),
             "page_count": len(event.get("pages") or []),
             "pages": pages,
         })
+    result: dict[str, Any] = {
+        "map_id": map_id, "events": out, "total": len(out),
+        "note": "VX runs the LAST page whose conditions are satisfied, so a "
+                "later page with no conditions hides the pages before it."}
     if only_page is not None and not any(e["pages"] for e in out):
-        return {"map_id": map_id, "events": out, "total": len(out),
-                "page_note": "no event on this map has a page %d; the pages "
-                             "each one does have are counted in page_count"
-                             % only_page}
-    return {"map_id": map_id, "events": out, "total": len(out),
-            "note": "VX runs the LAST page whose conditions are satisfied, so a "
-                    "later page with no conditions hides the pages before it."}
+        result["page_note"] = (
+            "no event on this map has a page %d; the pages each one does have "
+            "are counted in page_count" % only_page)
+    stopped = command_budget.note("event_get")
+    if stopped:
+        # One reply built once, with each thing it has to admit added to it.
+        # Three separate early returns is how a note ended up unreachable
+        # behind another, and how `stopped` came to be read on a path that
+        # never assigned it.
+        result["command_walk_stopped"] = stopped
+    return result
 
 
 @tool(
@@ -371,7 +392,8 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                                      "apply to a common event -- the page ops "
                                      "are map-only. Pass exactly one of map_id "
                                      "or common_event_id."),
-        "ops": prop(ARR, "Operations, applied in order.",
+        "ops": prop(ARR, "Operations, applied in order. At most %d per "
+                         "call." % MAX_OPS,
                     maxItems=MAX_OPS, items={
             "additionalProperties": False,
             "type": OBJ,
@@ -393,14 +415,25 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                           "direction_fix, through, and nested condition/graphic "
                           'objects, e.g. {"trigger": 3, "graphic": '
                           '{"character_name": "People1", "character_index": 2}, '
-                          '"condition": {"self_switch_valid": true}}'},
+                          '"condition": {"self_switch_valid": true}}. '
+                          "Against a common_event_id this patches the "
+                          "RPG::CommonEvent instead, whose fields are name, "
+                          "trigger and switch_id -- a page field there is "
+                          "refused, because a common event has no pages."},
                 "commands": {"type": ARR,
                              "maxItems": MAX_COMMANDS_PER_LIST,
-                             "description": "Command entries for "
-                                            "set_commands/append_commands/"
-                                            "create. At most %d, and a page "
-                                            "holds no more than that in total."
-                                            % MAX_COMMANDS_PER_LIST,
+                             # Generated from the table that decides it. Named
+                             # by hand, this said three of the five ops that
+                             # read `commands`, so a model wanting a page with
+                             # commands on it split one op into two.
+                             "description": "Command entries, for op %s. At "
+                                            "most %d, and a page holds no "
+                                            "more than that in total."
+                                            % (", ".join(sorted(
+                                                op for op, reads
+                                                in EVENT_OP_ARGS.items()
+                                                if "commands" in reads)),
+                                               MAX_COMMANDS_PER_LIST),
                              "items": {"type": OBJ}},
             },
             "required": ["op"],
