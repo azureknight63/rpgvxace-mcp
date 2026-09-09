@@ -31,7 +31,10 @@ from .maps import (
 )
 from .pages import check_event_pages
 from .command_rules import check_commands
-from .assets import check_assets
+from .assets import (
+    _AssetChecker,
+    check_assets,
+)
 from .database import (
     check_database,
     check_tilesets,
@@ -75,6 +78,12 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
             "map %s was asked for but there is no map file with that id, so "
             "nothing about it was checked" % map_id, _map_at(map_id)))
 
+    # One checker across the two scopes that both want the command lists.
+    # Built only when both are selected, so the assets branch below is the
+    # only place that reads it into `findings` -- which is what it has
+    # always been.
+    shared_checker = (_AssetChecker(project)
+                      if {"events", "assets"} <= set(scopes) else None)
     walked_maps = bool({"maps", "events", "assets"} & set(scopes))
     # One allowance for every walk this call makes, built before the first of
     # them rather than between two: a file that shares objects by reference
@@ -93,11 +102,14 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
         ran.append("event command structure and references (plus every common "
                    "event and troop page, which belong to the project rather "
                    "than to a map)")
-        check_commands(project, ids, tables, walk_budget, findings)
+        check_commands(project, ids, tables, walk_budget, findings,
+                       shared_checker)
         check_event_pages(project, ids, walk_budget, findings)
     if "assets" in scopes and findings.room:
         ran.append("graphic and audio file references")
-        findings.extend(check_assets(project, ids, walk_budget))
+        findings.extend(check_assets(
+            project, ids, walk_budget, shared_checker,
+            commands_done=shared_checker is not None))
     if "database" in scopes and findings.room:
         ran.append("database cross-references")
         check_database(project, tables, walk_budget, findings)

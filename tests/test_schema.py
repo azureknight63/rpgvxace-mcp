@@ -496,7 +496,12 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         "findings": set(),
         "maps": {"findings"},
         "pages": {"findings"},
-        "command_rules": {"findings", "maps"},
+        # `assets` as well, since `check_commands` does the command
+        # asset checks in the loop it already runs -- the two rules
+        # that need a command list read a strict subset of what
+        # that loop holds, and a second traversal is charged what
+        # the first was.
+        "command_rules": {"findings", "maps", "assets"},
         "assets": {"findings"},
         "database": {"findings", "assets"},
         "report": {"findings", "maps", "pages", "command_rules", "assets",

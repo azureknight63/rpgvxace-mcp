@@ -11,9 +11,11 @@ from collections.abc import Set as AbstractSet
 from typing import Any
 
 from ...commands import (
+    AUDIO_COMMAND_KINDS,
     CODE_BLANK,
     CODE_JUMP_TO_LABEL,
     CODE_LABEL,
+    CODE_SHOW_TEXT,
     TRANSFER_X,
     TRANSFER_Y,
     command_name,
@@ -43,16 +45,24 @@ from .findings import (
     _Tables,
     _missing,
 )
+from .assets import _AssetChecker
 from .maps import _MapSizes
 
 
 def check_commands(project: Project, map_ids: list[int], tables: _Tables,
                    budget: "WalkBudget | None" = None,
-                   collected: "_Findings | None" = None) -> list[Finding]:
+                   collected: "_Findings | None" = None,
+                   checker: "_AssetChecker | None" = None) -> list[Finding]:
     """Every event command list: structure, and the ids the commands name.
 
     ``budget`` is shared with the asset walk, so one validate call spends one
     allowance across both -- see :class:`WalkBudget`.
+
+    ``checker`` makes this the asset walk too. `validate` passes one when it
+    was asked for both the events and the assets scope, which the default
+    run is: the two rules that need a command list read a strict subset of
+    what this loop already holds, and a second traversal is charged exactly
+    what the first was.
     """
     findings = _Findings.given(collected)
     # A table absent from this mapping is one that could not be read, so
@@ -102,6 +112,8 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
                 continue
             findings.extend(_check_references(code, params, existing,
                                               on_disk, map_sizes, here))
+            if checker is not None:
+                _command_assets(checker, code, params, here)
             if code == CODE_JUMP_TO_LABEL and params:
                 if labels is None:
                     # Built on first use: most pages have no labels at all,
@@ -112,6 +124,32 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
 
         findings.extend(check_list_terminator(location, commands))
     return findings.items
+
+
+def _command_assets(checker: _AssetChecker, code: Any, params: list[Any],
+                    here: Location) -> None:
+    """The two asset references a command can carry.
+
+    Here rather than in its own walk over the same lists. It was
+    `_check_command_assets` in `assets.py`, iterating every command of every
+    page a second time and charging the same shared allowance -- and the
+    charge comes from the file rather than from the rule, so the second walk
+    cost exactly what the first did. Command walking was twice its minimum
+    on the default run, whatever the project.
+
+    Everything it read -- the code, the parameters, the location -- the loop
+    above already has in a local, so this costs nothing per command beyond
+    the two tests. `checker.full` is `_AssetChecker`'s own business: it
+    returns before it counts anything.
+    """
+    if code == CODE_SHOW_TEXT:
+        if params:
+            checker.check(params[0], "faces", here)
+    elif _int(code) in AUDIO_COMMAND_KINDS:
+        track = params[0] if params else None
+        if isinstance(track, RubyObject):
+            checker.check(track.get("name"), AUDIO_COMMAND_KINDS[code],
+                          here, "missing_audio")
 
 
 def _check_indent(index: int, command: RubyObject, previous: int,

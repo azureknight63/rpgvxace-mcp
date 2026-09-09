@@ -131,7 +131,9 @@ class _AssetChecker:
 
 
 def check_assets(project: Project, map_ids: list[int],
-                 budget: "WalkBudget | None" = None) -> list[Finding]:
+                 budget: "WalkBudget | None" = None,
+                 checker: "_AssetChecker | None" = None,
+                 commands_done: bool = False) -> list[Finding]:
     """Graphic and audio names, against the files present.
 
     Covers what an agent is most likely to break: map parallaxes and
@@ -151,9 +153,14 @@ def check_assets(project: Project, map_ids: list[int],
     will read a clean result as "no missing assets" when it means "none of the
     ones this looks at".
     """
-    checker = _AssetChecker(project)
+    checker = _AssetChecker(project) if checker is None else checker
     _check_map_assets(project, checker, map_ids, budget)
-    _check_command_assets(project, checker, map_ids, budget)
+    if not commands_done:
+        # Only when nothing else walked them. With the events scope selected
+        # -- which the default run has -- `check_commands` does these two
+        # checks in the loop it already runs, and this walk would be a
+        # second full traversal charged to the same allowance.
+        _check_command_assets(project, checker, map_ids, budget)
     _check_database_assets(project, checker, budget)
     return checker.findings
 
@@ -218,6 +225,13 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
 def _check_command_assets(project: Project, checker: _AssetChecker,
                           map_ids: list[int],
                           budget: "WalkBudget | None" = None) -> None:
+    """The command asset references, when no other rule walked the lists.
+
+    The default run does not reach this: `check_commands` does these checks
+    inside the walk it already makes, and `_command_assets` in
+    `command_rules` is the shared body. This is the path for
+    `validate scopes=["assets"]`, which has no such walk to join.
+    """
     if not project.command_layouts_modelled:
         # An unmodelled engine's parameter layouts are different: XP's Show
         # Text keeps the message where Ace keeps the face graphic, so these

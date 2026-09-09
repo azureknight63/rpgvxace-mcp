@@ -1261,3 +1261,109 @@ class TestOneCommandCannotOutrunTheDeadline(ToolTest):
 # either way, which is why nobody noticed.
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOneCommandWalkForAWholeValidate(ToolTest):
+    """`validate` reads each command list once, not once per rule that wants it.
+
+    `check_commands` and `_check_command_assets` each iterated every command
+    of every page, and both charged the same shared allowance -- the charge
+    comes from the file, not from the rule, so the second walk cost exactly
+    what the first did. Command walking was twice its minimum on the default
+    run, whatever the project, and a caller near the ceiling was refused at
+    half the real depth.
+
+    The asset walk read a strict subset of what `check_commands` already had
+    in locals: the code, the parameters and the location. So it is the same
+    loop now, and the two rules that need it are two `if`s in it.
+
+    Counted at `iter_command_lists`, which is the thing being paid for.
+    Counting findings would not show this: both walks produce the right
+    answers, which is why three rounds of reading did not find it.
+    """
+
+    def walks(self, **arguments):
+        """How many command-list traversals one validate makes."""
+        from rpgvxace_mcp.analysis import walk as walk_module
+        original = walk_module.iter_command_lists
+        counted = []
+
+        def counting(*args, **kwargs):
+            counted.append(1)
+            return original(*args, **kwargs)
+
+        # Patched on every module that bound the name, for the reason
+        # `lower_the_finding_ceiling` exists: `from .walk import
+        # iter_command_lists` binds it in the importer, so patching only
+        # `walk` leaves every real call reading the original.
+        import sys
+        patched = [module for name, module in sorted(sys.modules.items())
+                   if name.startswith("rpgvxace_mcp")
+                   and getattr(module, "iter_command_lists", None) is original]
+        self.assertTrue(patched, "nothing bound the name, so this patched "
+                                 "nothing and would count zero")
+        for module in patched:
+            self.addCleanup(setattr, module, "iter_command_lists", original)
+            module.iter_command_lists = counting
+        self.call("validate", **arguments)
+        return len(counted)
+
+    def test_a_default_validate_walks_the_commands_once(self):
+        self.assertEqual(self.walks(), 1)
+
+    def test_asking_for_assets_alone_still_walks_them(self):
+        """The fallback: without the events scope there is no walk to join."""
+        self.assertEqual(self.walks(scopes=["assets"]), 1)
+
+    def test_asking_for_events_alone_walks_them_once(self):
+        self.assertEqual(self.walks(scopes=["events"]), 1)
+
+    def test_neither_scope_walks_no_commands(self):
+        self.assertEqual(self.walks(scopes=["database"]), 0)
+
+
+class TestTheMergedWalkStillFindsBothKinds(ValidateTest):
+    """Sharing one loop must not lose either rule's findings.
+
+    The asset checks moved into `check_commands`' loop, which is gated by
+    `command_layouts_modelled` and by the finding ceiling in a different
+    place than they were. Both rules are checked on a map crafted to break
+    both at once, and in each scope on its own.
+    """
+
+    def craft_a_missing_face_and_a_bad_jump(self):
+        game_map = self.project.load_map(1)
+        _, _, event = self.first_event(1)
+        page = event.get("pages")[0]
+        text = RubyObject("RPG::EventCommand")
+        text.set("code", 101)                 # Show Text: face graphic
+        text.set("indent", 0)
+        text.set("parameters",
+                 [self.project.codec.make_string("NoSuchFace"), 0, 0, 2])
+        jump = RubyObject("RPG::EventCommand")
+        jump.set("code", 119)                 # Jump to Label, with no Label
+        jump.set("indent", 0)
+        jump.set("parameters", [self.project.codec.make_string("nowhere")])
+        page.set("list", [text, jump])
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="crafted")
+        self.ctx = self.reopen()
+
+    def rules(self, **arguments):
+        self.craft_a_missing_face_and_a_bad_jump()
+        return {f["rule"] for f in self.findings(**arguments)}
+
+    def test_a_default_run_reports_both(self):
+        found = self.rules()
+        self.assertIn("missing_graphic", found)
+        self.assertIn("missing_label", found)
+
+    def test_the_assets_scope_alone_reports_the_asset(self):
+        self.assertIn("missing_graphic", self.rules(scopes=["assets"]))
+
+    def test_the_events_scope_alone_reports_the_jump(self):
+        found = self.rules(scopes=["events"])
+        self.assertIn("missing_label", found)
+        self.assertNotIn("missing_graphic", found,
+                         "the events scope answered an asset question it "
+                         "was not asked")
