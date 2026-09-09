@@ -106,7 +106,8 @@ SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
     "script hit). The reply also says which scopes were actually read, which "
     "of them could not be read at all. \"may_have_more\" is true when the page "
     "filled *or* when any part of the project was not read or not reached -- "
-    "\"scopes_not_read\", \"could_not_read\", \"command_walk_stopped\" and "
+    "\"scopes_not_read\", \"files_not_read\", \"scripts_not_read\", "
+    "\"command_walk_stopped\" and "
     "\"text_scan_stopped\" say which, so read those before raising limit and "
     "asking again. It is not the same as validate's \"findings_truncated\": "
     "this scan stops at the limit and so never drops a hit it found, while "
@@ -339,15 +340,26 @@ class _Hits:
                 "string in full."
                 % (matcher.clipped, "s were" if matcher.clipped > 1 else " was",
                    MAX_SUBJECT_CHARS))
-        # Through `partial`, which owns the three suffixes. One mapping,
-        # not one key per scope: `"%s_note" % scope` built a key name out of
-        # data, so a caller could not look it up in any schema and had to
-        # guess at four possible spellings.
+        # All three through `partial`, which owns the suffixes. One mapping
+        # per subject, not one key per scope: `"%s_note" % scope` built a key
+        # name out of data, so a caller could not look it up in any schema
+        # and had to guess at four possible spellings.
+        #
+        # Three subjects because there are three key spaces, not because
+        # there are three kinds of fact: `empty` is keyed by scope,
+        # `unsearchable` by data file, `unreadable` by script slot. They
+        # were `scopes_not_read`, `could_not_read` and
+        # `scripts_not_searched` -- one inside the vocabulary, one whose
+        # "subject" parsed as `could`, and one outside it altogether, so
+        # `TestOneVocabularyForAPartialAnswer`'s type test could see only
+        # the first.
         out.update(partial("scopes", not_read=self.empty))
-        if self.unreadable:
-            out["scripts_not_searched"] = self.unreadable
-        if self.unsearchable:
-            out["could_not_read"] = self.unsearchable
+        out.update(partial("files", not_read=self.unsearchable))
+        # Slot index to reason, because `_not_read` is a mapping: this was a
+        # bare list of indices, which says which and never says why.
+        out.update(partial("scripts", not_read={
+            str(index): "the slot's body would not inflate"
+            for index in self.unreadable}))
         stopped = self.walk.note("search")
         if stopped:
             out["command_walk_stopped"] = stopped

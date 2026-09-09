@@ -115,7 +115,7 @@ def _parent_cycles(infos: dict[Any, Any],
     alone. `check_map_tree` reads the collector it passed in; the return
     value is for the tests, which pass none.
     """
-    findings = _Findings() if findings is None else findings
+    findings = _Findings.given(findings)
     settled: dict[int, bool] = {}   # map id -> is its chain sound
     for start in infos:
         if not findings.room:
@@ -223,7 +223,7 @@ def _check_encounters(project: Project, map_id: int, game_map: RubyObject,
     reads the collector; the return value is for the tests, which pass
     none.
     """
-    findings = _Findings() if findings is None else findings
+    findings = _Findings.given(findings)
     encounters = _seq(game_map.get("encounter_list"))
     if troop_ids is not None:
         for entry in encounters:

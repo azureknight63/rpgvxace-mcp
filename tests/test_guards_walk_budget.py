@@ -1577,3 +1577,77 @@ class TestASetResolvesItsPathOnce(ToolTest):
                   path="1/order", value={"value": 4})
         out = self.call("raw_data", table="map_infos", path="1/order")
         self.assertEqual(out["value"], 4)
+
+
+class TestTheMapListingHasOneTruth(ToolTest):
+    """`map_ids_present()` and `map_ids_on_disk()` never disagree.
+
+    Two forms of one fact, and `_forget_map_ids` drops both -- which was a
+    sentence in `map_ids_on_disk`'s comment and in `project.py`'s, and a
+    claim no test held. It is written at four sites, one of them in
+    `backups.py`, so "four chances to forget a second field" was the
+    defect's own description of itself.
+
+    Every path that can change which map files exist, and the set checked
+    against the list after each.
+    """
+
+    def assert_agree(self, what):
+        listed = self.project.map_ids_on_disk()
+        present = self.project.map_ids_present()
+        self.assertEqual(present, frozenset(listed),
+                         "after %s the set says %s and the list says %s"
+                         % (what, sorted(present), sorted(listed)))
+        return present
+
+    def test_they_agree_before_anything_happens(self):
+        self.assertTrue(self.assert_agree("opening the project"))
+
+    def test_a_created_map_appears_in_both(self):
+        before = self.assert_agree("opening the project")
+        free = max(before) + 1
+        self.call("map_edit", op="create", map_id=free, name="New",
+                  width=20, height=15)
+        after = self.assert_agree("map_edit op=create")
+        self.assertIn(free, after, "the new map is in neither form")
+
+    def test_a_deleted_map_leaves_both(self):
+        before = self.assert_agree("opening the project")
+        gone = max(before)
+        self.call("map_edit", op="delete", map_id=gone)
+        after = self.assert_agree("map_edit op=delete")
+        self.assertNotIn(gone, after, "the deleted map is still in both")
+
+    def test_a_restore_leaves_them_agreeing(self):
+        """The fourth invalidation site, and the one in another module.
+
+        A restore overwrites the files the snapshot holds; it does not
+        delete a map added since, so the created map is still on disk
+        afterwards and still in both forms. What this holds is that the two
+        forms agree across the call -- `assert_agree` is the assertion.
+        """
+        self.assert_agree("opening the project")
+        stamp = self.call("backups", op="create", label="t")["backup"]
+        free = max(self.project.map_ids_present()) + 1
+        self.call("map_edit", op="create", map_id=free, name="New",
+                  width=20, height=15)
+        self.assertIn(free, self.assert_agree("map_edit op=create"))
+        self.call("backups", op="restore", backup=stamp)
+        self.assertIn(free, self.assert_agree("backups op=restore"))
+
+    def test_the_listing_is_refreshed_when_asked(self):
+        """`map_list refresh=true` reads the directory, not the cache.
+
+        It re-read MapInfos and the map files and then asked a cached
+        listing which files exist, so a map the editor had just created came
+        back as a tree row with `file_present: false` and no details.
+        """
+        before = self.assert_agree("opening the project")
+        free = max(before) + 1
+        # Behind the server's back, exactly as the editor does it.
+        source = self.project.path_for(self.project.map_file(max(before)))
+        target = self.project.path_for(self.project.map_file(free))
+        target.write_bytes(source.read_bytes())
+        self.assertNotIn(free, self.project.map_ids_present(),
+                         "the cache saw a file written behind its back")
+        self.assertIn(free, self.project.map_ids_present(refresh=True))

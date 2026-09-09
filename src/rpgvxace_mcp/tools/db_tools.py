@@ -95,6 +95,14 @@ MAX_ROWS = 500
 
 TABLE_LIST = ", ".join(ALL_DATABASE_TABLES)
 
+
+DB_OP_ARGS = {
+    "update": {"op", "id", "patch"},
+    "create": {"op", "id", "clone_from", "patch"},
+    "delete": {"op", "id"},
+}
+
+
 # The two table lists the schemas below advertise.
 #
 # Both are unions across engines, because a tool schema is built before any
@@ -111,13 +119,6 @@ TABLE_LIST = ", ".join(ALL_DATABASE_TABLES)
 #
 # `delete` reads no patch: an op meaning to rename an entry and delete it did
 # the delete and reported nothing amiss.
-DB_OP_ARGS = {
-    "update": {"op", "id", "patch"},
-    "create": {"op", "id", "clone_from", "patch"},
-    "delete": {"op", "id"},
-}
-
-
 # Every table db_get will read. Scripts is left out rather than advertised and
 # then refused at runtime: it is the script editor, not an id-indexed table,
 # and the scripts tool is what reads it.

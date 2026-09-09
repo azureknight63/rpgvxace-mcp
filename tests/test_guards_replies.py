@@ -254,7 +254,7 @@ class TestSearchDoesNotClaimToHaveRead(ValidateTest):
         self.corrupt("Troops")
         self.ctx = self.reopen()
         result = self.call("search", query="zzz", scopes=["database"])
-        self.assertIn("troops", result["could_not_read"])
+        self.assertIn("troops", result["files_not_read"])
         # The scope still counts as searched, because the other tables read.
         self.assertIn("database", result["scopes_searched"])
 
@@ -265,7 +265,7 @@ class TestSearchDoesNotClaimToHaveRead(ValidateTest):
         self.ctx = self.reopen()
         result = self.call("search", query="zzz", scopes=["maps"])
         self.assertNotIn("maps", result["scopes_searched"])
-        self.assertIn("map_infos", result["could_not_read"])
+        self.assertIn("map_infos", result["files_not_read"])
 
 
 class TestScriptHitsSayWhere(ToolTest):
@@ -1452,7 +1452,7 @@ class TestAPageFieldCanBeReadBackAfterWriting(ToolTest):
         # The keys a reply adds that are not fields of the object: the page
         # index, the rendered script, the counts, and the raw echo.
         REPLY_ONLY = {"page", "script", "command_count", "commands",
-                      "trigger_code", "not_read"}
+                      "trigger_code", "commands_not_read"}
         invented = sorted(set(page) - self.page_fields() - REPLY_ONLY)
         self.assertEqual(invented, [],
                          "these are neither page fields nor named reply "

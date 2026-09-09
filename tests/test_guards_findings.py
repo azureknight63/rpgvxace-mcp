@@ -914,3 +914,174 @@ class TestTheCeilingStopsTheWalkingToo(ToolTest):
 # either way, which is why nobody noticed.
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAFindingNamesTheRightCommand(ValidateTest):
+    """The index a finding reports is the index of the command that is wrong.
+
+    Each rule takes the command list's location and copies it at the index
+    where it reports, rather than the loop building one per command. The
+    only test of that crafted a one-command page and asserted "command 0",
+    which `location.at(0)`, `location.at(anything)` on a one-command list,
+    and any index-independent expression all satisfy equally.
+
+    So the bad command sits at index 3 here, with three innocent commands
+    before it, and each of the three command rules is checked.
+    """
+
+    def craft(self, bad):
+        """A page of three comments, then `bad`, then a blank terminator."""
+        _, _, event = self.first_event(1)
+        page = event.get("pages")[0]
+        commands = []
+        for _ in range(3):
+            comment = RubyObject("RPG::EventCommand")
+            comment.set("code", 108)
+            comment.set("indent", 0)
+            comment.set("parameters", [self.project.codec.make_string("x")])
+            commands.append(comment)
+        commands.append(bad)
+        end = RubyObject("RPG::EventCommand")
+        end.set("code", 0)
+        end.set("indent", 0)
+        end.set("parameters", [])
+        commands.append(end)
+        page.set("list", commands)
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="crafted")
+        self.ctx = self.reopen()
+
+    def where(self, rule):
+        rows = [f for f in self.findings(rule=rule)]
+        self.assertTrue(rows, "the %s rule reported nothing" % rule)
+        return rows[0]
+
+    def command(self, code, parameters, indent=0):
+        command = RubyObject("RPG::EventCommand")
+        command.set("code", code)
+        command.set("indent", indent)
+        command.set("parameters", parameters)
+        return command
+
+    def test_a_missing_label_names_index_three(self):
+        self.craft(self.command(
+            119, [self.project.codec.make_string("nowhere")]))
+        found = self.where("missing_label")
+        self.assertIn("command 3", found["where"])
+        self.assertEqual(found["location"]["index"], 3)
+
+    def test_an_indent_jump_names_index_three(self):
+        self.craft(self.command(108, [
+            self.project.codec.make_string("x")], indent=5))
+        found = self.where("indent_jump")
+        self.assertIn("command 3", found["where"])
+        self.assertEqual(found["location"]["index"], 3)
+
+    def test_a_missing_reference_names_index_three(self):
+        """A Transfer Player to a map that is not there."""
+        self.craft(self.command(201, [0, 9999, 1, 1, 0]))
+        found = self.where("transfer_to_missing_map")
+        self.assertIn("command 3", found["where"])
+        self.assertEqual(found["location"]["index"], 3)
+
+
+class TestEveryCollectorIsShared(unittest.TestCase):
+    """Every function that collects findings collects into the run's list.
+
+    `MAX_FINDINGS` bounds findings *collected*, and a check that keeps a
+    list of its own has a ceiling of its own -- so two of them are a ceiling
+    of twice that, which is the sentence `_parent_cycles` uses and the
+    defect this package has fixed four times: `_check_encounters`,
+    `_parent_cycles`, `check_tilesets` and, until this round,
+    `_check_system`.
+
+    `TestEveryLintWalkTakesAnAllowance` is the same idea for the walk
+    budget, and it is deliberately a scan rather than a list of names,
+    because the older checks enumerate by name and cannot see a walk nobody
+    thought to add. This is the ceiling's half of that, and it did not
+    exist: `MAX_FINDINGS`' own comment claimed the walk scan covered it,
+    which it does not -- that test asks about `budget`.
+
+    A function is in scope if it appends to a list it made itself *and*
+    loops. The escape hatch is a reason, as it is next door.
+    """
+
+    # Functions that build their own list of findings and legitimately do
+    # not take the run's collector. A reason each.
+    OWN_LIST_IS_FINE = {
+        "_check_start_position": "does not loop -- it reports at most two "
+                                 "findings about one map's start position, "
+                                 "so its list is bounded by the code",
+        "_check_indent": "one command, at most one finding",
+        "_check_jump": "one command, at most one finding",
+        "_check_transfer": "one command, at most two findings",
+        "_check_references": "loops over the rules one command code has, "
+                             "which is this server's own table, so the "
+                             "length is bounded by the source",
+        "_check_shadowing": "loops over one event's pages and reports at "
+                            "most one finding for the whole event",
+        "_check_autorun": "one page, at most one finding",
+        "_report": "the reply builder -- it reads the collected list and "
+                   "does not add to it",
+        "validate": "the caller that makes the collector",
+    }
+
+    def functions(self):
+        """Every top-level function of the linter, with its source."""
+        import ast
+        package = (Path(__file__).resolve().parent.parent / "src"
+                   / "rpgvxace_mcp" / "analysis" / "lint")
+        found = sorted(path for path in package.glob("*.py")
+                       if path.name != "__init__.py")
+        self.assertGreater(len(found), 1, "found no linter modules")
+        for path in found:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef):
+                    yield path.stem, node, ast.unparse(node)
+
+    def collectors(self):
+        """Functions that both loop and build a findings list of their own."""
+        import ast
+        out = {}
+        for stem, node, body in self.functions():
+            loops = any(isinstance(inner, (ast.For, ast.While))
+                        for inner in ast.walk(node))
+            # A collector this function made, rather than one it was
+            # handed. `_Findings.given` is the package's one spelling of
+            # "the caller's, or a fresh one", so calling it is what counts
+            # as sharing -- the two spellings of that idiom are why this
+            # test is keyed off the call and not off the assignment.
+            owns = (("findings = []" in body or "_Findings()" in body)
+                    and "_Findings.given" not in body)
+            if loops and owns:
+                out[node.name] = stem
+        return out
+
+    def test_every_collecting_walk_shares_the_run_list_or_is_excused(self):
+        unshared = sorted(
+            "%s.%s" % (stem, name)
+            for name, stem in self.collectors().items()
+            if name not in self.OWN_LIST_IS_FINE)
+        self.assertEqual(
+            unshared, [],
+            "these loop and collect into a list of their own, so each has a "
+            "ceiling of its own on top of the run's: " + ", ".join(unshared))
+
+    def test_no_excuse_outlives_its_function(self):
+        """A reason for a function that no longer collects is a stale reason."""
+        import ast
+        names = {node.name for _, node, _ in self.functions()}
+        self.assertTrue(names, "read no functions, so this checked nothing")
+        stale = sorted(set(self.OWN_LIST_IS_FINE) - names)
+        self.assertEqual(stale, [],
+                         "excused and no longer here: " + ", ".join(stale))
+        _ = ast
+
+    def test_the_shared_collector_is_what_bounds_a_whole_run(self):
+        """`_Findings.given` is the mechanism, so it has to be reachable."""
+        from rpgvxace_mcp.analysis.lint.findings import _Findings
+        shared = _Findings()
+        self.assertIs(_Findings.given(shared), shared,
+                      "given() made a second collector out of one")
+        self.assertIsInstance(_Findings.given(None), _Findings)

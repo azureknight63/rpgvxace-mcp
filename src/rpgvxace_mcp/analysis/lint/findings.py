@@ -40,13 +40,13 @@ DEFAULT_FINDING_LIMIT = 200
 # hundred. It is far above any real project's count, so reaching it means
 # something is wrong with the project rather than with the rules.
 #
-# Enforced in every walk that appends inside a loop. Which walks those are was
-# a list here, and the list was wrong twice -- once naming two of them and
-# calling the database checks "bounded by their tables", which a table's own
-# entry count is not, and once naming walks that had no guard at all. So it is
-# not a list any more: `TestEveryLintWalkTakesAnAllowance` reads every module
-# of this package and asks which functions loop, and
-# `TestNoWalkCollectsPastTheCeiling` runs them with this patched small.
+# Enforced in every walk that appends inside a loop. Which walks those are
+# was a list here and the list was wrong twice, so it is not a list any more
+# -- but be precise about what replaced it, because an earlier version of
+# this comment was not. `TestEveryLintWalkTakesAnAllowance` scans every
+# module of this package, and what it scans for is the *walk budget*, not
+# this ceiling. This ceiling is held by `TestNoWalkCollectsPastTheCeiling`
+# and `TestEveryCollectorIsShared` below it, the second of which is the scan.
 #
 # Bound in each module that reads it, which matters when writing a test:
 # patching it on the package changes nothing that runs, and

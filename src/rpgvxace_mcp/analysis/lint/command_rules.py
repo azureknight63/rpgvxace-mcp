@@ -27,6 +27,7 @@ from ..references import (
     MAP_TARGET,
     REFERENCE_RULES,
     TABLE_NOUNS,
+    _REFERENCE_CODES,
     _referenced_ids,
 )
 from ..walk import (
@@ -116,11 +117,21 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
 
             if not check_parameters:
                 continue
-            findings.extend(_check_references(code, params, existing,
-                                              on_disk, map_sizes, location,
-                                              index))
+            # `_int(code)` once for the two rules below, and the reference
+            # rules skipped outright for a command that can name nothing.
+            # Sixteen codes carry a reference; on the developer's project
+            # 9,700 of 9,819 commands do not, and each was paying a list
+            # allocation, a generator frame and a dict miss. The pre-check
+            # went into `find_references_for` last round and not into this
+            # walk, which reads the same commands.
+            code_int = _int(code)
+            if code_int in _REFERENCE_CODES:
+                findings.extend(_check_references(
+                    code, params, existing, on_disk, map_sizes, location,
+                    index))
             if checker is not None:
-                _command_assets(checker, code, params, location, index)
+                _command_assets(checker, code_int, code, params, location,
+                                index)
             if code == CODE_JUMP_TO_LABEL and params:
                 if labels is None:
                     # Built on first use: most pages have no labels at all,
@@ -133,7 +144,8 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
     return findings.items
 
 
-def _command_assets(checker: _AssetChecker, code: Any, params: list[Any],
+def _command_assets(checker: _AssetChecker, code_int: "int | None",
+                    code: Any, params: list[Any],
                     location: Location, index: int) -> None:
     """The two asset references a command can carry.
 
@@ -151,12 +163,12 @@ def _command_assets(checker: _AssetChecker, code: Any, params: list[Any],
     """
     if code == CODE_SHOW_TEXT:
         if params:
-            checker.check(params[0], "faces", location.at(index))
-    elif _int(code) in AUDIO_COMMAND_KINDS:
+            checker.check(params[0], "faces", lambda: location.at(index))
+    elif code_int in AUDIO_COMMAND_KINDS:
         track = params[0] if params else None
         if isinstance(track, RubyObject):
             checker.check(track.get("name"), AUDIO_COMMAND_KINDS[code],
-                          location.at(index), "missing_audio")
+                          lambda: location.at(index), "missing_audio")
 
 
 def _check_indent(index: int, previous: int,

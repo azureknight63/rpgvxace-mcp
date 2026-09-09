@@ -5,13 +5,10 @@ backup store, which is read for its own reasons -- what a restore does
 before it copies, which snapshots a prune spares -- and had to be scrolled
 past to reach the loading and saving it sits between.
 
-A mixin rather than a collaborator, and deliberately: `restore_backup`
-reads the file cache, the per-run backup flags, the map-id cache and the
-staleness check. An object holding a reference to `Project` in order to
-reach six of its private attributes would be the same coupling with a
-longer name. This is one class in two files, and what it needs from the
-other file is written down below and checked by
-`TestTheBackupMixinContractHolds`.
+A mixin rather than a collaborator: this is one class in two files, and
+`TestTheBackupMixinContractHolds` is where that trade is argued and
+checked. What this half needs from the other is `NEEDS_FROM_PROJECT`
+below.
 """
 
 from __future__ import annotations
@@ -39,21 +36,13 @@ from .paths import (
 class BackupStore:
     """The backup store and the change log, mixed into `Project`.
 
-    What this needs from the class it is mixed into. Every name is checked
-    against `Project` by a test, so this list cannot go stale silently:
-
-        data_dir, extension     which files a snapshot copies
-        backup_keep             how many snapshots a prune leaves
-        _session                this run's snapshot name
-        _cache, _backed_up      what has been read and backed up
-        _map_ids, _map_ids_set  invalidated by a restore
-        work_dir(), path_for()  where a file goes
-        _assert_writable()      the read-only gate
-        _assert_not_stale()     the editor-changed-it gate
-
-    Not `root` or `read_only`, which is the sort of thing the test caught:
-    they are reached only through `work_dir()` and `_assert_writable()`, so
-    listing them describes those two methods' business as this class's.
+    `NEEDS_FROM_PROJECT` is what this half needs from the other, and it is
+    the only statement of it -- a prose copy alongside would be a second
+    list, checked by nothing, of the kind this class exists to argue
+    against. The tuple is checked three ways, including that nothing in it
+    is unread: that is what rejected `root` and `read_only`, which are
+    reached only through `work_dir()` and `_assert_writable()`, so listing
+    them described those methods' business as this class's.
     """
 
     # Each is set or defined by `Project`; declared here so a reader of this
@@ -62,8 +51,7 @@ class BackupStore:
     # not is worse than no list.
     NEEDS_FROM_PROJECT = (
         "data_dir", "extension", "backup_keep",
-        "_session", "_cache", "_backed_up", "_map_ids",
-        "_map_ids_set",
+        "_session", "_cache", "_backed_up", "_forget_map_ids",
         "work_dir", "path_for", "_assert_writable", "_assert_not_stale",
     )
 
@@ -153,9 +141,10 @@ class BackupStore:
             if not dry_run:
                 shutil.copy2(path, target / name)
             copied.append(name)
-        # The prune is part of the act, so the preview reports it too. It was
-        # left out of both, so `backups op="create"` quietly removed the
-        # oldest snapshot while the sibling op="prune" reports every removal.
+        # The prune is part of the act, so the preview reports it too: it
+        # was left out of both, and `backups op="create"` quietly removed
+        # the oldest snapshot while the sibling op="prune" reported every
+        # removal.
         #
         # One key set on both paths. The dry run used to answer
         # `would_snapshot`, `label` and `would_prune` where the act answers
@@ -258,8 +247,7 @@ class BackupStore:
             # With the cache entry gone, the per-run backup flag has to go too,
             # or the next save of a restored file skips its own backup.
             self._backed_up.discard(name)
-        self._map_ids = None
-        self._map_ids_set = frozenset()
+        self._forget_map_ids()
         self._log_change("backups", ",".join(wanted), "restored from %s" % stamp)
         return {"backup": stamp, "restored": wanted, "safety_backup": pre["backup"]}
 

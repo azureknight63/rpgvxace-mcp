@@ -66,19 +66,14 @@ def _is_reparse_point(path: Path) -> bool:
     that meant to step over a directory it did not create stepped straight
     into one.
 
-    What that actually did is worth recording, because it is not what a review
-    of this code predicted. The prediction was that `shutil.rmtree` would
-    recurse through the junction and delete the target's contents. Measured on
-    3.11: rmtree refuses ("Cannot call rmtree on a symbolic link") and the
-    target survives -- and it never gets that far anyway, because
-    `_contained` resolves the junction to its target, finds it outside the
-    backup root, and raises. So there was no data loss. What there was is one
-    foreign directory failing the prune for the whole project, with a message
-    about containment rather than about a directory that was never ours.
+    The cost was a foreign directory failing the prune for the whole
+    project, with a message about containment rather than about a directory
+    that was never ours. Not data loss: `shutil.rmtree` refuses a symlink,
+    and `_contained` resolves the junction and raises before it is reached.
 
-    Three checks because no single one covers every version: `is_symlink` for
-    a real symlink, `os.path.isjunction` where it exists, and the reparse
-    attribute for 3.11 on Windows.
+    Three checks because no single one covers every version: `is_symlink`
+    for a real symlink, `os.path.isjunction` where it exists, and the
+    reparse attribute for 3.11 on Windows.
     """
     if path.is_symlink():
         return True

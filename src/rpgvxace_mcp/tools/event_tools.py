@@ -46,7 +46,6 @@ from .registry import (
     ToolError,
     check_op_args,
     decoded,
-    echo,
     int_list,
     known_fields,
     one_of,
@@ -57,6 +56,7 @@ from .registry import (
     opt_int_default,
     opt_list,
     opt_str,
+    partial,
     prop,
     refuse_fields,
     refuse_inert,
@@ -181,8 +181,14 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
         # Charged before rendering, because rendering is the cost: a page whose
         # @list is two thousand links to one command renders two thousand
         # lines, and fifty links to that page renders a hundred thousand.
+        # `commands_not_read`, through `partial`: this was a bare
+        # `not_read` holding a string, which is outside the vocabulary in
+        # both name and type -- and `"not_read".endswith("_not_read")` is
+        # False, so the type test could not see it and the key had been
+        # added to that test's own reply-only allowance.
         return {"page": index, "command_count": len(commands),
-                "not_read": "the command walk stopped before this page"}
+                **partial("commands", not_read={
+                    "page": "the command walk stopped before this page"})}
     view: dict[str, Any] = {
         "page": index,
         # The trigger twice: the name for a reader and the code for a
@@ -202,7 +208,10 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
     # `list` is excluded because it is answered as `script` and
     # `command_count` above, and `_check_page_patch` refuses to patch it
     # wholesale. Nothing else is: a field this engine's files do not carry
-    # simply comes back absent, as it does everywhere else in this layer.
+    # answers `null`, which says "this page has no value here" rather than
+    # leaving a caller to infer it from a missing key -- and every field in
+    # `PAGE_FIELDS` is one `event_edit` will accept a patch to, so a caller
+    # reading the view sees the same set it may write.
     for field in sorted(PAGE_FIELDS):
         if field in view or field == "list":
             continue

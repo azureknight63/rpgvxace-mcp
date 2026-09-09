@@ -1,15 +1,19 @@
 """Rules about files on disk, and the one checker that knows what is there.
 
 Three walks are here, and a fourth -- `check_tilesets` -- is in
-`database.py`, because a tileset's nine sheets are files on disk. All four
-share one `_AssetChecker`, and that is why the finding ceiling lives on the
-collector rather than at the call sites: the one site that carried the
-guard had written it against the wrong list.
+`database.py`, because a tileset's nine sheets are files on disk.
+
+The three here share one `_AssetChecker`. `check_tilesets` builds its own,
+and `validate` shares one across the events and assets scopes only when
+both are selected -- so the number of checkers in a run is between one and
+two, and it is not four. The finding ceiling lives on the collector rather
+than at the call sites for the same reason either way: the one site that
+carried the guard had written it against the wrong list.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from ...commands import (
     AUDIO_COMMAND_KINDS,
@@ -83,17 +87,35 @@ class _AssetChecker:
     def full(self) -> bool:
         """Whether this has collected all it is going to.
 
-        The ceiling lives on the collector because four walks share one of
-        these and a guard written at a call site is a guard that can be
-        written against the wrong list -- which is exactly what
+        The ceiling lives on the collector because several walks share
+        one of these and a guard written at a call site is a guard that can
+        be written against the wrong list -- which is exactly what
         `check_tilesets` did: it tested its own `findings` while its loop
-        appended here, so the break could never fire. A fifth caller gets this
-        for free.
+        appended here, so the break could never fire. Another caller gets
+        this for free.
         """
         return len(self.findings) >= MAX_FINDINGS
 
-    def check(self, name: Any, kind: str, location: Location,
-              rule: str = "missing_graphic", context: str = "") -> None:
+    def check(self, name: Any, kind: str,
+              where: "Location | Callable[[], Location]",
+              rule: str = "missing_graphic",
+              context: "str | Callable[[], str]" = "") -> None:
+        """Report a reference to a file that is not there.
+
+        ``where`` and ``context`` may each be a callable. Four of the five
+        early returns below happen before either is read -- an empty name,
+        a pool that could not be assembled, a name that is present -- and
+        on a healthy project that is very nearly every call: the
+        developer's own 39-map project produces two asset findings from
+        about two thousand checks. Each of the other 1,998 built a
+        `Location`, and `check_tilesets` formatted a four-value sentence,
+        to be dropped.
+
+        The callers that can build one for the price of the call still pass
+        a value: `_map_at(map_id, field)` is two arguments and a
+        constructor. The ones that decode a name or format a string pass a
+        function.
+        """
         if self.full:
             return
         text = _text(self.project, name)
@@ -106,6 +128,8 @@ class _AssetChecker:
             return
         if text in pool:
             return
+        location = where() if callable(where) else where
+        context = context() if callable(context) else context
         folder = ASSET_DIRS.get(kind, kind)
         # `context` names what holds the reference when the location alone is
         # not enough to find it -- which tileset sheet, say. Without one the
@@ -238,8 +262,10 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
                     continue
                 graphic = page.get("graphic")
                 if isinstance(graphic, RubyObject):
-                    checker.check(graphic.get("character_name"), "characters",
-                                  _event_at(map_id, event_id, name, page_index))
+                    checker.check(
+                        graphic.get("character_name"), "characters",
+                        lambda: _event_at(map_id, event_id, name,
+                                          page_index))
 
 
 def _check_command_assets(project: Project, checker: _AssetChecker,
@@ -269,13 +295,16 @@ def _check_command_assets(project: Project, checker: _AssetChecker,
             if code == CODE_SHOW_TEXT:
                 params = _seq(command.get("parameters"))
                 if params:
-                    checker.check(params[0], "faces", location.at(index))
+                    checker.check(params[0], "faces",
+                                  lambda: location.at(index))
             elif _int(code) in AUDIO_COMMAND_KINDS:
                 params = _seq(command.get("parameters"))
                 track = params[0] if params else None
                 if isinstance(track, RubyObject):
-                    checker.check(track.get("name"), AUDIO_COMMAND_KINDS[code],
-                                  location.at(index), "missing_audio")
+                    checker.check(track.get("name"),
+                                  AUDIO_COMMAND_KINDS[code],
+                                  lambda: location.at(index),
+                                  "missing_audio")
 
 
 def _check_database_assets(project: Project, checker: _AssetChecker,

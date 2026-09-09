@@ -543,11 +543,30 @@ class Project(BackupStore):
                     and digits == "%03d" % int(digits):
                 ids.append(int(digits))
         self._map_ids = sorted(set(ids))
-        # The set form goes with the list form, so an invalidation of one
-        # cannot leave the other standing. `_map_ids = None` is written in
-        # four places, which is four chances to forget a second field.
+        # The set form goes with the list form, and `_forget_map_ids`
+        # drops both, so an invalidation of one cannot leave the other
+        # standing at any of the four sites that do it.
         self._map_ids_set = frozenset(self._map_ids)
         return list(self._map_ids)
+
+    def _forget_map_ids(self) -> None:
+        """Drop the map listing, both forms of it.
+
+        One method because the two are one fact: this was two assignments
+        written out at four call sites, and `map_ids_on_disk`'s own comment
+        said so -- "four chances to forget a second field". Round 9 then
+        moved the fourth site into `backups.py`, so the pair spanned two
+        modules and both names had to be declared in
+        `BackupStore.NEEDS_FROM_PROJECT`. Now one does.
+
+        Clearing the set is belt to the brace, not the brace: dropping the
+        list is what invalidates both, because `map_ids_on_disk` rebuilds
+        the set whenever it rebuilds the list. A guard that reverted only
+        this method came back VACUOUS and was right to -- the property is
+        held twice, so the guard reverts both halves.
+        """
+        self._map_ids = None
+        self._map_ids_set = frozenset()
 
     def map_ids_present(self, refresh: bool = False) -> "frozenset[int]":
         """The same ids, for the callers that ask "is this one of them?".
@@ -808,14 +827,12 @@ class Project(BackupStore):
             raise ProjectError("%s already exists" % filename)
         self._cache[filename] = CachedFile(value, 0, 0, [])
         self._backed_up.add(filename)  # nothing to back up
-        self._map_ids = None
-        self._map_ids_set = frozenset()
+        self._forget_map_ids()
 
     def forget_file(self, filename: str) -> None:
         """Drop a cached file, undoing a :meth:`create_file` that came to nothing."""
         self._cache.pop(filename, None)
-        self._map_ids = None
-        self._map_ids_set = frozenset()
+        self._forget_map_ids()
 
     def delete_file(self, filename: str, dry_run: bool = False,
                     tool: str = "") -> dict[str, Any]:
@@ -835,8 +852,7 @@ class Project(BackupStore):
         backup = self.backup_file(filename)
         path.unlink()
         self._cache.pop(filename, None)
-        self._map_ids = None
-        self._map_ids_set = frozenset()
+        self._forget_map_ids()
         # Deleting is the most destructive thing here, so it is logged like
         # every other write.
         self._log_change(tool, filename, "deleted")

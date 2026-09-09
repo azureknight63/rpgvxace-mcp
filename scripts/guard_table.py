@@ -215,6 +215,9 @@ CEILWALK = "tests/test_guards_findings.py::TestTheCeilingStopsTheWalkingToo::"
 SUBJECTS = "tests/test_guards_patterns.py::TestEveryNamedCharacterIsMeasured::"
 SEARCHWORK = "tests/test_guards_walk_budget.py::TestSearchBoundsItsTotalWork::"
 FAILCLOSED = "tests/test_guards_patterns.py::TestTheMeasurementFailsClosed::"
+ALPHABET = "tests/test_guards_patterns.py::TestTheAlphabetFailsClosed::"
+RIGHTCMD = "tests/test_guards_findings.py::TestAFindingNamesTheRightCommand::"
+ONETRUTH = "tests/test_guards_walk_budget.py::TestTheMapListingHasOneTruth::"
 
 
 GUARDS = [
@@ -799,7 +802,8 @@ GUARDS = [
     ),
     Guard(
         "the start position is bounds-checked", LINT_DATABASE,
-        "            findings += _check_start_position(project, system, start_map)",
+        "            findings.extend(_check_start_position("
+        "project, system, start_map))",
         "            pass  # rule removed",
         [VSTART + "test_a_start_position_off_the_start_map_is_reported"],
         "the game boots with the party standing off the edge of the start "
@@ -1547,12 +1551,10 @@ GUARDS = [
     ),
     Guard(
         'the asset collector refuses past its ceiling', LINT_ASSETS,
-        '''    def check(self, name: Any, kind: str, location: Location,
-              rule: str = "missing_graphic", context: str = "") -> None:
+        '''        """
         if self.full:
             return''',
-        '''    def check(self, name: Any, kind: str, location: Location,
-              rule: str = "missing_graphic", context: str = "") -> None:
+        '''        """
         if False:
             return''',
         [CEILING + "test_the_asset_checker_itself_stops_collecting",
@@ -2203,5 +2205,28 @@ GUARDS = [
         [MAPW + "test_a_tile_value_the_layer_cannot_hold_is_refused",
          MAPW + "test_a_region_id_beyond_the_layer_is_refused"],
         'Table.set masks to 16 bits, so an out-of-range id was silently stored as a different tile and then reported back as the value the caller asked for -- and layer 3 holds region ids the editor numbers 0 to 63, so 2816 is a plausible value from a tileset that reads as a region',
+    ),
+    Guard(
+        'an unreadable alphabet is a refusal', SAFETY,
+        '    if depth > MAX_ALPHABET_DEPTH:',
+        '    if False:',
+        [ALPHABET + "test_a_pattern_too_deep_to_read_is_refused"],
+        'past the cap this returned an empty alphabet, and an empty alphabet is not "no characters" but "could not tell" -- so every subject became a run of a, and a nested pattern measured at 0.0001s against a subject it cannot fail on while taking 3.9s per 2,000-digit string in the server, uninterruptibly',
+    ),
+    Guard(
+        'a finding names the command that is wrong', LINT_COMMANDS,
+        '        "remove the jump." % target, location.at(index))]',
+        '        "remove the jump." % target, location.at(0))]',
+        [RIGHTCMD + "test_a_missing_label_names_index_three"],
+        'each rule takes the command list location and copies it where it reports, so an index passed wrongly sends a reader to the wrong command -- and the only test of it used a one-command page, which any index satisfies',
+    ),
+    Guard(
+        'one listing of the map files, in both its forms', PROJECT,
+        ['    def _forget_map_ids(self) -> None:',
+         '        self._map_ids_set = frozenset(self._map_ids)'],
+        ['    def _forget_map_ids_unused(self) -> None:',
+         '        pass  # the set is never rebuilt'],
+        [ONETRUTH + "test_a_restore_leaves_them_agreeing"],
+        'the list and the set are two forms of one fact, held twice over: `_forget_map_ids` drops both, and `map_ids_on_disk` rebuilds the set whenever it rebuilds the list. Reverting either alone proves nothing, which is what a single-anchor version of this guard reported as VACUOUS -- so both are reverted, and then a membership test answers from before the last change to the folder',
     ),
 ]

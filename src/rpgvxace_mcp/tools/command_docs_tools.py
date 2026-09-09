@@ -140,7 +140,7 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         "layouts_are_this_engines": modelled,
         "commands": rows,
         # `search` filters these, so this is the number that matched and not
-        # the size of the table. Same rename, same reason as event_get above.
+        # the size of the table. Same rename, same reason as `event_get` in `event_tools`.
         "matching_commands": len(rows),
         **({"engine_warning": borrowed} if borrowed else {}),
         "authoring": DSL_HELP,
