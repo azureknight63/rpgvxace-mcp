@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import Any
 from ..project import MAX_MAP_ID
-from ..rubytypes import Table
+from array import array
+
+from ..rubytypes import CELL_MASK, Table
 from .map_common import MAX_CELLS_PER_READ, _check_budget, _check_tile
 from .registry import (
     ARR,
@@ -101,16 +103,42 @@ class _Rect:
                 "layer": ctx.project.profile.map_layers.get(
                     self.z, "layer %d (not used by this engine)" % self.z)}
 
+    def _row_start(self, dy: int) -> int:
+        """Where one row of this rectangle begins in the flat buffer."""
+        plane = self.data.xsize * self.data.ysize
+        return (self.z * plane + (self.y + dy) * self.data.xsize + self.x)
+
     def read(self) -> list[list[int]]:
-        return [[self.data.get(self.x + dx, self.y + dy, self.z)
-                 for dx in range(self.width)]
+        """One slice per row off the flat buffer.
+
+        `Table.get` is two Python calls, three bounds compares and an index
+        multiply per cell, and MAX_CELLS_PER_READ is 20,000 of them -- about
+        30x the cost of the slices below. The same conversion `_tile_counts`
+        and `_cells_outside` already carry, in the tile tool that is the
+        primary path for reading tiles and was not converted with them.
+
+        The rectangle is checked against the table's extents before this is
+        reached (`_check_budget`), which is what makes it safe to bypass the
+        per-cell bounds test rather than merely faster.
+        """
+        buffer = self.data.data
+        return [list(buffer[self._row_start(dy):
+                            self._row_start(dy) + self.width])
                 for dy in range(self.height)]
 
     def paint(self, cells: "list[int]") -> None:
-        """Write one value per cell, left to right and top to bottom."""
-        for index, value in enumerate(cells):
-            self.data.set(self.x + index % self.width,
-                          self.y + index // self.width, self.z, value)
+        """Write one value per cell, left to right and top to bottom.
+
+        One slice assignment per row, for the reason `read` gives. The mask
+        is applied here because `Table.set` is what used to apply it, and a
+        cell that does not fit two bytes would otherwise be written whole.
+        """
+        buffer = self.data.data
+        for dy in range(self.height):
+            row = cells[dy * self.width:(dy + 1) * self.width]
+            start = self._row_start(dy)
+            buffer[start:start + len(row)] = array(
+                buffer.typecode, (value & CELL_MASK for value in row))
 
 
 def _cells_to_fill(ctx: Context, args: dict[str, Any],

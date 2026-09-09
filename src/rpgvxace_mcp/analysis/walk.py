@@ -20,7 +20,7 @@ from typing import Any
 
 from ..convert import brief, decoded_text
 from ..project import Project, ProjectError
-from ..rubytypes import RubyHash, RubyObject
+from ..rubytypes import RubyHash, RubyObject, as_int, as_list
 
 
 class Location:
@@ -110,19 +110,13 @@ def _event_at(map_id: int, event_id: int, event_name: str, page: int) -> Locatio
                     event_name=event_name, page=page)
 
 
-def _seq(value: Any) -> list[Any]:
-    """A value from a project file, as something safe to iterate.
-
-    An ivar the class model says is an Array can hold anything at all in a file
-    this server did not write, and ``for x in 7`` is a TypeError that escapes
-    the whole validate run rather than becoming one finding.
-    """
-    return value if isinstance(value, list) else []
-
-
-def _int(value: Any) -> int | None:
-    """An id from a project file, or None if it is not usable as one."""
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+# `_seq` and `_int` live in `rubytypes` now, under the names `as_list` and
+# `as_int`: `commands` needs them and sits below `analysis`, so keeping them
+# here meant that module spelled the rule as nine `or []` copies instead --
+# and `or []` is not the same rule. Aliased rather than renamed at 40 call
+# sites, because the short names read better inside a walk.
+_seq = as_list
+_int = as_int
 
 
 def _brief(value: Any) -> str:

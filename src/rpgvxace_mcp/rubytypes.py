@@ -705,3 +705,36 @@ def ruby_children(value: "Any") -> "list[Any]":
         # A payload is bytes, not a value tree; the ivar record is a tree.
         return list(value.ivars.values())
     return []
+
+
+def as_list(value: "Any") -> "list[Any]":
+    """A value out of a project file, as something safe to iterate.
+
+    An ivar the class model calls an Array can hold anything at all in a
+    file this server did not write, and ``for x in 7`` is a TypeError that
+    escapes the whole call rather than becoming one finding.
+
+    `or []` is not this, and the difference is the defect: `RubyHash`
+    defines `__len__` and neither `__iter__` nor `__getitem__`, so an empty
+    hash is falsy and becomes `[]` while a *non-empty* one is truthy and
+    reaches the loop. Measured -- a Hash of one pair where a command's
+    @parameters belongs made `event_get` answer "'RubyHash' object is not
+    subscriptable" and `search` "not iterable".
+
+    Here rather than in `analysis`, which is where it was: `commands` needs
+    it too and sits below that, so the copy in `commands` was nine `or []`
+    spellings instead.
+    """
+    return value if isinstance(value, list) else []
+
+
+def as_int(value: "Any") -> "int | None":
+    """A value out of a project file as an int, or None if it is not one.
+
+    Beside `as_list` and for the same reason: `bool` is a subclass of `int`
+    in Python and is not an id in any RGSS file, so `isinstance(x, int)`
+    alone answers yes for `True`.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value

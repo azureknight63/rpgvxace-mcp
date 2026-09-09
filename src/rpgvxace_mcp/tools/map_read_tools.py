@@ -10,7 +10,7 @@ from collections import Counter
 from typing import Any
 from ..convert import TABLE_MODES, new_walk, to_json
 from ..project import MAX_MAP_ID, ProjectError
-from ..rubytypes import RubyHash, RubyObject, RubyString, Table
+from ..rubytypes import RubyHash, RubyObject, RubyString, Table, as_list
 from ..schema import TILE_ID_RANGES, TRIGGER_NAMES, unreadable_events_note
 from .map_common import MAX_CELLS_PER_WALK, _check_budget
 from .registry import (
@@ -121,7 +121,10 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     # whenever a filter was given, without looking, so a filtered call reported
     # "no orphan map files" from a check that never ran -- and it is one set
     # difference, so there was nothing to save.
-    orphans = sorted(on_disk - {i for i, _ in ctx.project.entries("map_infos")})
+    # From the tree already read above, rather than a second `entries`
+    # call: that re-runs `container_kind` and a `sorted_items()` sort to
+    # rebuild exactly what `infos` is holding.
+    orphans = sorted(on_disk - {i for i, _ in infos})
     return {
         "maps": rows,
         # Named for what it counted. "total" read as the size of the tree, so
@@ -347,7 +350,7 @@ def _event_summaries(ctx: Context, game_map: RubyObject
         rows += 1
         if not isinstance(event, RubyObject):
             continue
-        pages = event.get("pages") or []
+        pages = as_list(event.get("pages"))
         page_rows = []
         for index, page in enumerate(pages):
             if rows >= MAX_EVENT_SUMMARY_ROWS:
@@ -364,7 +367,7 @@ def _event_summaries(ctx: Context, game_map: RubyObject
             rows += 1
             if not isinstance(page, RubyObject):
                 continue
-            commands = page.get("list") or []
+            commands = as_list(page.get("list"))
             graphic = page.get("graphic")
             page_rows.append({
                 "page": index,

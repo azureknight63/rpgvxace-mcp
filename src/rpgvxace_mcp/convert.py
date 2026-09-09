@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import codecs
 import re
+import reprlib
 from typing import Any
 
 from .rubytypes import (
@@ -287,6 +288,25 @@ class _Walk:
 
     __slots__ = ("path", "depth", "budget")
 
+    def spend(self, nodes: int = 1) -> None:
+        """Charge for rendered nodes, refusing once there is nothing left.
+
+        A method rather than the inline `budget -= 1` this replaces,
+        because there are two chargers now: one per value converted, and
+        one per cell of a Table. A Table used to cost a single node however
+        many cells it inlined, which made it the one payload shape this
+        budget could not see -- and the budget was sized from the response
+        ceiling precisely so a conversion cannot build more than the
+        transport will carry.
+        """
+        self.budget -= nodes
+        if self.budget < 0:
+            raise ConversionError(
+                "this value expands to more than %d pieces, which is too "
+                "large for one response. Read a smaller part of it -- a "
+                "single entry, one event, or a tile region with map_tiles."
+                % MAX_JSON_NODES)
+
     def __init__(self, budget: int = MAX_JSON_NODES):
         self.path: set[int] = set()
         self.depth = 0
@@ -300,13 +320,7 @@ def _to_json(value: Any, codec: TextCodec, tables: str, walk: _Walk) -> Any:
             "value nests deeper than %d levels; this file is not shaped like "
             "project data" % MAX_JSON_DEPTH
         )
-    walk.budget -= 1
-    if walk.budget < 0:
-        raise ConversionError(
-            "this value expands to more than %d pieces, which is too large for "
-            "one response. Read a smaller part of it -- a single entry, one "
-            "event, or a tile region with map_tiles." % MAX_JSON_NODES
-        )
+    walk.spend()
 
     container = isinstance(value, (list, RubyHash, RubyObject, RubyIvars))
     if container:
@@ -356,7 +370,7 @@ def _to_json_value(value: Any, codec: TextCodec, tables: str, walk: _Walk) -> An
             out["__default__"] = _to_json(value.default, codec, tables, walk)
         return out
     if isinstance(value, Table):
-        return table_to_json(value, tables)
+        return table_to_json(value, tables, walk)
     if isinstance(value, RGSSFloats):  # Color and Tone
         return {"__class__": type(value).CLASS_NAME, **value.as_dict()}
     if isinstance(value, RubyObject):
@@ -433,7 +447,21 @@ def _string_to_json(value: RubyString, codec: TextCodec, tables: str,
     return out
 
 
-def table_to_json(table: Table, mode: str = "summary") -> dict[str, Any]:
+def table_to_json(table: Table, mode: str = "summary",
+                  walk: "_Walk | None" = None) -> dict[str, Any]:
+    """One RGSS Table as JSON, charging the budget for the cells it inlines.
+
+    Measured before the charge: a map whose @encounter_list is 250,000
+    links to one 256-cell Table is 1.3 MB on disk, and `map_get map_id=1`
+    with no arguments at all converted 64,000,000 cells into about a
+    gigabyte of lists -- 250,000 nodes of a 250,000-node budget, and every
+    one of those cells free.
+
+    The omission is reported in the same vocabulary as every other partial
+    answer, `cells_truncated` plus `cells_note`, rather than in a `hint` of
+    its own. `cells_omitted` stays: the count is a fact a caller reads, and
+    neither suffix carries a number.
+    """
     out: dict[str, Any] = {
         "__class__": "Table",
         "dim": table.dim,
@@ -442,15 +470,22 @@ def table_to_json(table: Table, mode: str = "summary") -> dict[str, Any]:
         "zsize": table.zsize,
         "size": table.size,
     }
-    if table.size <= TABLE_INLINE_LIMIT or (
-            mode == "full" and table.size <= TABLE_FULL_LIMIT):
+    inline = table.size <= TABLE_INLINE_LIMIT or (
+        mode == "full" and table.size <= TABLE_FULL_LIMIT)
+    if inline:
+        if walk is not None:
+            # Before the cells are built, and one per cell: each is a
+            # rendered node of the reply, which is what this budget counts.
+            walk.spend(table.size)
         out["cells"] = list(table.data)
     else:
         out["cells_omitted"] = table.size
-        out["hint"] = ("use map_tiles to read or write regions of this table"
-                       if table.size > TABLE_FULL_LIMIT and mode == "full"
-                       else "pass tables=\"full\" for the cells, or use "
-                            "map_tiles to read a region")
+        out["cells_truncated"] = True
+        out["cells_note"] = (
+            "use map_tiles to read or write regions of this table"
+            if table.size > TABLE_FULL_LIMIT and mode == "full"
+            else "pass tables=\"full\" for the cells, or use map_tiles to "
+                 "read a region")
     return out
 
 
@@ -884,19 +919,38 @@ def decoded_text(codec: TextCodec, value: Any) -> str:
     return text
 
 
+# `repr` with every container bounded, so a crafted value cannot make a
+# message out of its own length. The per-container counts are generous
+# relative to MAX_TEXT_CHARS -- the slice below still decides the final
+# length -- and the point of each is only that the *building* stops.
+_BOUNDED_REPR = reprlib.Repr()
+_BOUNDED_REPR.maxlevel = 4
+_BOUNDED_REPR.maxstring = MAX_TEXT_CHARS
+_BOUNDED_REPR.maxother = MAX_TEXT_CHARS
+for _container in ("list", "tuple", "dict", "set", "frozenset", "array",
+                   "deque"):
+    setattr(_BOUNDED_REPR, "max" + _container, 20)
+
+
 def brief(value: Any, limit: int = MAX_TEXT_CHARS) -> str:
-    """A value quoted into a message, sliced before it is repr'd.
+    """A value quoted into a message, bounded before it is built.
 
-    The slice comes first, which is the point and the half one of the
-    two copies of this helper missed: `analysis._brief`'s only caller
-    passes a MapInfos hash key straight out of an untrusted file, so a
-    crafted key was repr'd whole and cut afterwards -- a cap that
-    bounds the result and not the work, which is the opposite of the
-    rule `decoded_text` states for itself just above.
+    The bound comes first, which is the point and the half one of the two
+    copies of this helper missed: `analysis._brief`'s only caller passes a
+    MapInfos hash key straight out of an untrusted file, so a crafted key
+    was repr'd whole and cut afterwards -- a cap that bounds the result and
+    not the work, which is the opposite of the rule `decoded_text` states
+    for itself just above.
 
-    Here rather than in either caller: `registry.echo` had the same job
-    and the pre-slice, `analysis._brief` had the job and not the
-    pre-slice, and the two used different constants.
+    A string is sliced. Everything else goes through `reprlib`, because
+    slicing a `repr` is not bounding it: a 200,000-entry Array is a legal
+    MapInfos key, and `repr` of one built 1.3 MB to return 224 characters --
+    measured. `reprlib` stops at the limits below instead of building the
+    whole thing first. Stdlib, so it costs no dependency.
+
+    Here rather than in either caller: `registry.echo` had the same job and
+    the pre-slice for strings, `analysis._brief` had the job and neither,
+    and the two used different constants.
     """
     if isinstance(value, RubyString):
         return brief(value.data, limit)
@@ -904,7 +958,16 @@ def brief(value: Any, limit: int = MAX_TEXT_CHARS) -> str:
         return "%r... (%d %s)" % (
             value[:limit], len(value),
             "characters" if isinstance(value, str) else "bytes")
-    shown = repr(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        # Before `repr`, not through it. CPython 3.11 refuses to render an
+        # integer above 4300 digits at all -- `ValueError: Exceeds the
+        # limit for integer string conversion` -- and a MapInfos key is
+        # whatever the file put there, so a Bignum key raised that out of
+        # `check_map_tree` and ended the whole validate run. Reported by
+        # size, which is the only fact about it worth a message.
+        if value.bit_length() > limit * 3:
+            return "<Integer, %d bits>" % value.bit_length()
+    shown = _BOUNDED_REPR.repr(value)
     if len(shown) > limit:
         return shown[:limit] + "... (%d characters)" % len(shown)
     return shown

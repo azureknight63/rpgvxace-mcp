@@ -851,16 +851,14 @@ class _MapSizes:
         self.project = project
         self._sizes: dict[int, tuple["int | None", "int | None"]] = {}
 
-    def get(self, map_id: int,
-            default: "tuple[int | None, int | None] | None" = None
-            ) -> "tuple[int | None, int | None]":
+    def get(self, map_id: int) -> "tuple[int | None, int | None]":
         """The size of one map, parsed on first ask.
 
-        Named `get` with a default because that is how `_check_transfer` asks,
-        and because every id is answerable here: a map that will not parse
-        answers (None, None) rather than being absent, so the caller's default
-        is only reached when it passes an id and this returns nothing -- which
-        it does not. Kept in the signature so the call site reads unchanged.
+        No default parameter, because no path reaches one: every id is
+        answerable here, since a map that will not parse answers
+        (None, None) rather than being absent. It had one, unread, kept "so
+        the call site reads unchanged" -- which is an argument for changing
+        the call site.
         """
         if map_id not in self._sizes:
             try:
@@ -890,7 +888,7 @@ def _check_transfer(map_id: int, params: list[Any], on_disk: AbstractSet[int],
             "Transfer Player targets map %s" % map_id,
             "Point the transfer at an existing map.", here,
             "every Transfer Player against the map files present")]
-    width, height = map_sizes.get(map_id, (None, None))
+    width, height = map_sizes.get(map_id)
     if width is None or height is None:
         return []       # unreadable or size-less; check_maps reports that
     if len(params) <= max(TRANSFER_X, TRANSFER_Y):
@@ -963,7 +961,8 @@ def check_event_pages(project: Project, map_ids: list[int],
                 return findings
             name = _text(project, event.get("name"))
             findings += _check_shadowing(map_id, event_id, name, pages)
-            findings += _check_autorun(map_id, event_id, name, pages)
+            findings += _check_autorun(map_id, event_id, name, pages,
+                                       budget)
     return findings
 
 
@@ -1005,7 +1004,8 @@ def _check_shadowing(map_id: int, event_id: int, name: str,
 
 
 def _check_autorun(map_id: int, event_id: int, name: str,
-                   pages: list[Any]) -> list[Finding]:
+                   pages: list[Any],
+                   budget: "WalkBudget | None" = None) -> list[Finding]:
     if not pages:
         return []
     last = pages[-1]
@@ -1014,6 +1014,14 @@ def _check_autorun(map_id: int, event_id: int, name: str,
     if last.get("trigger") != TRIGGER_AUTORUN:
         return []
     commands = _seq(last.get("list"))
+    # Charged before the two scans, not after. `_has_code` walks the whole
+    # list twice and neither pass short-circuits on the codes a crafted file
+    # simply omits, so a 2.5 MB map -- one command, a @list of a million
+    # links to it, one unconditional Autorun page, an events hash of
+    # 100,000 links to one event -- put two unbudgeted million-step scans
+    # behind a per-event charge of two.
+    if budget is not None and not budget.spend(len(commands)):
+        return []
     if _has_code(commands, OPAQUE_ESCAPE_CODES):
         # A common event or a script could transfer the player, erase the event
         # or change scene, and this file cannot see through either. Suppressing
@@ -1161,7 +1169,7 @@ def check_assets(project: Project, map_ids: list[int],
     checker = _AssetChecker(project)
     _check_map_assets(project, checker, map_ids, budget)
     _check_command_assets(project, checker, map_ids, budget)
-    _check_database_assets(project, checker)
+    _check_database_assets(project, checker, budget)
     return checker.findings
 
 
@@ -1251,14 +1259,24 @@ def _check_command_assets(project: Project, checker: _AssetChecker,
                                   location.at(index), "missing_audio")
 
 
-def _check_database_assets(project: Project, checker: _AssetChecker) -> None:
+def _check_database_assets(project: Project, checker: _AssetChecker,
+                           budget: "WalkBudget | None" = None) -> None:
+    # The fourth asset walk, and the one of the four with neither the
+    # budget its siblings take nor a `checker.full` test. `_AssetChecker`
+    # returns before it counts anything for a name that is empty or
+    # present, so the collector ceiling cannot stop this either -- an
+    # array of a million links to one row was a million free visits.
     for entry_id, animation in _safe_entries(project, "animations"):
+        if checker.full or (budget is not None and not budget.spend(1)):
+            return
         if not isinstance(animation, RubyObject):
             continue
         for field in ("animation1_name", "animation2_name"):
             checker.check(animation.get(field), "animations",
                           _db_at("animations", entry_id, field))
     for entry_id, actor in _safe_entries(project, "actors"):
+        if checker.full or (budget is not None and not budget.spend(1)):
+            return
         if not isinstance(actor, RubyObject):
             continue
         for field, kind in (("character_name", "characters"),
@@ -1266,6 +1284,8 @@ def _check_database_assets(project: Project, checker: _AssetChecker) -> None:
             checker.check(actor.get(field), kind,
                           _db_at("actors", entry_id, field))
     for entry_id, foe in _safe_entries(project, "enemies"):
+        if checker.full or (budget is not None and not budget.spend(1)):
+            return
         if isinstance(foe, RubyObject):
             checker.check(foe.get("battler_name"), "battlers",
                           _db_at("enemies", entry_id, "battler_name"))
@@ -1363,11 +1383,12 @@ def check_database(project: Project, tables: _Tables,
                         % (noun, noun),
                         _db_at(ref.owner, entry_id, ref.field)))
 
-    findings += _check_system(project, tables.ids("actors"))
+    findings += _check_system(project, tables.ids("actors"), budget)
     return findings
 
 
-def _check_system(project: Project, actor_ids: set[int] | None) -> list[Finding]:
+def _check_system(project: Project, actor_ids: "set[int] | None",
+                  budget: "WalkBudget | None" = None) -> list[Finding]:
     findings = []
     try:
         system = project.load_data("system")
@@ -1380,6 +1401,15 @@ def _check_system(project: Project, actor_ids: set[int] | None) -> list[Finding]
         return findings
     if actor_ids is not None:
         for raw_id in _seq(system.get("party_members")):
+            # The only lint loop that appended findings with neither a
+            # budget nor a ceiling: @party_members is an Array out of the
+            # System file, so five million two-byte Fixnums in a 10 MB file
+            # were five million Finding objects, which `_report` then
+            # sorted and counted three times.
+            if len(findings) >= MAX_FINDINGS:
+                break
+            if budget is not None and not budget.spend(1):
+                break
             actor_id = _int(raw_id)
             if actor_id is not None and actor_id not in actor_ids:
                 findings.append(_missing(

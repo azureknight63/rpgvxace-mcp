@@ -25,7 +25,7 @@ from ..convert import (
 )
 from ..analysis import WalkBudget
 from ..project import MAX_MAP_ID
-from ..rubytypes import RubyHash, RubyObject
+from ..rubytypes import RubyHash, RubyObject, as_list
 from ..schema import (
     COMMON_EVENT_TRIGGER_NAMES,
     TRIGGER_NAMES,
@@ -221,7 +221,7 @@ def _one_target(args: dict[str, Any], verb: str) -> "tuple[int | None, int | Non
 def _page_view(ctx: Context, page: RubyObject, index: int,
                include_raw: bool, walk: Any,
                budget: "WalkBudget | None" = None) -> dict[str, Any]:
-    commands = page.get("list") or []
+    commands = as_list(page.get("list"))
     if budget is not None and not budget.spend(len(commands)):
         # Charged before rendering, because rendering is the cost: a page whose
         # @list is two thousand links to one command renders two thousand
@@ -314,10 +314,9 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 "common event %d does not hold an RPG::CommonEvent object, "
                 "so it cannot be read. Run validate to see what is wrong "
                 "with the file." % common_id)
-        raw_list = common.get("list")
         # A slot that holds an RPG::CommonEvent whose @list is not an
         # Array is the same class of crafted file, one level down.
-        commands = raw_list if isinstance(raw_list, list) else []
+        commands = as_list(common.get("list"))
         # One allowance and one conversion budget for this reply, the same two
         # the map branch below takes. This branch had neither: it rendered the
         # whole list, so a common event whose @list is 250,000 links to one
@@ -394,7 +393,7 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         if needle and needle not in name.lower():
             continue
         pages = []
-        for index, page in enumerate(event.get("pages") or []):
+        for index, page in enumerate(as_list(event.get("pages"))):
             # Before both skips. `_page_view` charges per command, so a slot
             # that is not a page cost nothing -- and naming `page` made it
             # worse rather than better, because the `continue` for every
@@ -409,7 +408,7 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         out.append({
             "id": event_id, "name": name,
             "x": event.get("x"), "y": event.get("y"),
-            "page_count": len(event.get("pages") or []),
+            "page_count": len(as_list(event.get("pages"))),
             "pages": pages,
         })
     result: dict[str, Any] = {
@@ -1072,7 +1071,7 @@ def _insert_move_route_steps(commands: list[RubyObject]) -> list[RubyObject]:
         following = commands[index + 1] if index + 1 < len(commands) else None
         if isinstance(following, RubyObject) and following.get("code") == 505:
             continue
-        params = command.get("parameters") or []
+        params = as_list(command.get("parameters"))
         route = params[1] if len(params) > 1 else None
         if isinstance(route, RubyObject) and route.cls == "RPG::MoveRoute":
             out.extend(move_route_steps(route, command.get("indent", 0) or 0))

@@ -394,10 +394,16 @@ def _alphabet(parsed: Any, depth: int = 0) -> "set[str]":
 def _subjects(pattern: str) -> "list[str]":
     """The texts to measure this pattern against, worst-case first.
 
-    A run of each character the pattern mentions, plus two mixtures: a run of
-    one character is what makes competing atoms backtrack, and the mixtures
-    catch the shapes that need two kinds of character to alternate.
-    """
+    A run of each of the first %d characters the pattern mentions, in sort
+    order, plus three more: a pair mixture, a run built from every character
+    it names, and one alphanumeric mixture. A run of one character is what
+    makes competing atoms backtrack, and the mixtures catch the shapes that
+    need two kinds of character to alternate.
+
+    The count and the cap are interpolated rather than written out, because
+    this sentence said "plus two mixtures" against three of them and "each
+    character" against a capped eight.
+    """ % MAX_SUBJECTS_PER_CHARACTER
     try:
         alphabet = _alphabet(_sre_parse.parse(pattern))
     except Exception:

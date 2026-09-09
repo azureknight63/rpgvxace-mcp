@@ -2405,3 +2405,89 @@ class TestTheTileRectangleUsesTheBuffer(ToolTest):
         out = self.call("map_tiles", op="read", map_id=1, x=0, y=0, width=2,
                         height=2, z=0)
         self.assertEqual(out["rows"], [[1, 2], [3, 4]])
+
+
+class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
+    """Every function in `lint` that loops over file data takes a budget.
+
+    Three rounds have now fixed unbudgeted walks one at a time, found by
+    reading: `_check_map_assets` and `check_tilesets` in round 7, the whole
+    maps and database scopes in round 8, and `_check_autorun`,
+    `_check_system` and `_check_database_assets` in round 9. The pattern is
+    always the same -- a loop whose iterable comes out of a file and whose
+    charge sits after an `isinstance` test, or is absent.
+
+    `TestNoWalkCollectsPastTheCeiling` and `prove_guards` both work, and
+    both enumerate walks *by name*, so neither can see a walk nobody
+    thought to add. This asks the module instead: a function that loops and
+    does not take a `budget` parameter is either listed below with a reason
+    or a defect.
+    """
+
+    # Functions that loop and legitimately take no allowance. A reason
+    # each, because this is the escape hatch and an escape hatch without a
+    # reason is where unbudgeted walks come back. Every name is checked
+    # against the module, so a rename cannot leave a stale excuse.
+    NO_BUDGET_NEEDED = {
+        "validate": "loops over the map ids the caller named, which "
+                    "`check_args` bounds by the declared maxItems",
+        "_check_references": "loops over the rules one command code has, "
+                             "which is this server's own table",
+        "_check_shadowing": "loops over one event's pages, which the "
+                            "caller of `check_event_pages` has charged for",
+    }
+
+    def module(self):
+        return (Path(__file__).resolve().parent.parent / "src"
+                / "rpgvxace_mcp" / "analysis" / "lint.py")
+
+    def looping_functions(self):
+        """Every top-level function in `lint` with a loop in it."""
+        import ast
+        tree = ast.parse(self.module().read_text(encoding="utf-8"))
+        out = {}
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if any(isinstance(inner, (ast.For, ast.While))
+                   for inner in ast.walk(node)):
+                out[node.name] = [a.arg for a in node.args.args]
+        return out
+
+    def test_every_looping_function_takes_a_budget_or_is_excused(self):
+        unbudgeted = sorted(
+            name for name, args in self.looping_functions().items()
+            if "budget" not in args and name not in self.NO_BUDGET_NEEDED)
+        self.assertEqual(
+            unbudgeted, [],
+            "these loop over data out of a file and cannot be stopped: "
+            + ", ".join(unbudgeted))
+
+    def test_no_excuse_outlives_its_function(self):
+        """A reason for a function that was renamed away is a stale reason."""
+        looping = set(self.looping_functions())
+        stale = sorted(set(self.NO_BUDGET_NEEDED) - looping)
+        self.assertEqual(stale, [],
+                         "these are excused from taking a budget and no "
+                         "longer loop: " + ", ".join(stale))
+
+    def test_every_budget_taking_function_spends_it(self):
+        """A parameter nothing reads is worse than no parameter.
+
+        A `budget` argument that is accepted and never spent reads, at
+        every call site, as a walk that is bounded.
+        """
+        import ast
+        tree = ast.parse(self.module().read_text(encoding="utf-8"))
+        idle = []
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if "budget" not in [a.arg for a in node.args.args]:
+                continue
+            body = ast.unparse(node)
+            if "budget.spend" not in body and "budget)" not in body:
+                idle.append(node.name)
+        self.assertEqual(idle, [],
+                         "these take a budget and neither spend it nor pass "
+                         "it on: " + ", ".join(idle))

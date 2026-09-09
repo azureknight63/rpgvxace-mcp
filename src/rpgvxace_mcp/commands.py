@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from .convert import TextCodec, decoded_text
-from .rubytypes import RubyObject, RubyString, rendered
+from .rubytypes import RubyObject, RubyString, as_list, rendered
 from .schema import new_event_command, new_move_command
 
 # Every code the VX interpreter handles, plus the continuation codes that live
@@ -399,7 +399,9 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
     while failing to name one it does is not.
     """
     code = command.get("code", 0) or 0
-    params = command.get("parameters") or []
+    # `as_list`, not `or []`: a non-empty RubyHash here is truthy and
+    # reaches `params[index]` as a TypeError.
+    params = as_list(command.get("parameters"))
     name = command_name(code)
 
     def p(index: int, default: Any = None) -> Any:
@@ -420,7 +422,7 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
         # out of the file, so it is not bounded by it. Rendering is capped
         # rather than the result, because a crafted Array of a million links
         # to one string is three megabytes on disk.
-        return "%s: %s" % (name, rendered(p(0) or [],
+        return "%s: %s" % (name, rendered(as_list(p(0)),
                                           lambda c: _text(c, codec),
                                           separator=" / "))
     if code == 402:
@@ -843,7 +845,7 @@ def _compile_choices(entry: dict[str, Any], enc: TextCodec, indent: int,
     if not 1 <= len(choices) <= MAX_CHOICES:
         raise CommandError("the engine allows 1 to %d choices, got %d"
                            % (MAX_CHOICES, len(choices)))
-    branches = entry.get("branches") or []
+    branches = as_list(entry.get("branches"))
     if not isinstance(branches, (list, tuple)):
         raise CommandError("branches must be an array of command lists, "
                            "got %r" % (branches,))
@@ -969,7 +971,7 @@ def _build_move_route(value: dict[str, Any], enc: TextCodec) -> RubyObject:
 def move_route_steps(route: RubyObject, indent: int) -> list[RubyObject]:
     """The 505 commands the editor writes beside a Set Move Route command."""
     steps = []
-    for move in route.get("list") or []:
+    for move in as_list(route.get("list")):
         if isinstance(move, RubyObject) and (move.get("code", 0) or 0) != 0:
             steps.append(_cmd(505, indent, [move]))
     return steps

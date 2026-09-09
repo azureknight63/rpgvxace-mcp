@@ -20,6 +20,8 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from build_project import build  # noqa: E402
 
 from rpgvxace_mcp.commands import CommandError  # noqa: E402
+from rpgvxace_mcp import marshal_rb  # noqa: E402
+from rpgvxace_mcp.rubytypes import RubyHash, RubyObject  # noqa: E402
 from rpgvxace_mcp.project import (  # noqa: E402
     Project,
 )
@@ -1555,3 +1557,90 @@ class TestADeclaredCharacterCeilingIsEnforced(ToolTest):
         from rpgvxace_mcp.tools.registry import check_args
         check_args({"properties": {"q": {"type": "string", "maxLength": 4}}},
                    {"q": "abcd"}, "this tool")
+
+
+class TestAnArrayFieldThatIsNotAnArrayIsReadSafely(ToolTest):
+    """`or []` looks like `_seq` and is a different rule.
+
+    `RubyHash` defines `__len__` and neither `__iter__` nor `__getitem__`,
+    so an *empty* hash is falsy and becomes `[]` while a *non-empty* one is
+    truthy and reaches the loop. Measured before this: a Hash of one pair
+    where a command's @parameters belongs made `event_get` answer
+    "'RubyHash' object is not subscriptable" and `search` "not iterable",
+    which `server._tool_error` reports as "an argument was not the shape
+    the tool expected" -- a diagnosis about the caller for a fact about the
+    file, which is exactly what `as_list`'s docstring says it prevents.
+
+    `validate` answered correctly throughout, because it read the same
+    field through `_seq`. One rule, two spellings, and only one of them
+    was the rule.
+    """
+
+    def craft(self, value):
+        """Put `value` where a command's @parameters belongs."""
+        game_map = self.project.load_map(1)
+        page = game_map.get("events").get(1).get("pages")[0]
+        command = RubyObject("RPG::EventCommand")
+        command.set("code", 401)
+        command.set("indent", 0)
+        command.set("parameters", value)
+        page.set("list", [command] + list(page.get("list")))
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+
+    def non_empty_hash(self):
+        """Non-empty, which is what makes it truthy and reach the loop."""
+        pairs = RubyHash()
+        pairs.set(0, self.project.codec.make_string("hello"))
+        return pairs
+
+    def test_event_get_reads_a_hash_where_an_array_belongs(self):
+        self.craft(self.non_empty_hash())
+        out = self.call("event_get", map_id=1)
+        self.assertIn("events", out)
+
+    def test_search_reads_it_too(self):
+        self.craft(self.non_empty_hash())
+        out = self.call("search", query="hello", scopes=["events"])
+        self.assertIn("hits", out)
+
+    def test_validate_still_reports_the_map(self):
+        self.craft(self.non_empty_hash())
+        out = self.call("validate", scopes=["events"])
+        self.assertIn("findings", out)
+
+    def test_a_scalar_where_an_array_belongs_is_read_too(self):
+        """The shape `or []` does handle, so it must keep working."""
+        self.craft(7)
+        self.assertIn("events", self.call("event_get", map_id=1))
+
+    def test_no_module_spells_the_rule_as_or_empty_list(self):
+        """The rule, not the three cases: no `or []` on a file read.
+
+        `x.get(...) or []` is the shape; `required or []` on a schema
+        argument is not, because that value came from this server.
+        """
+        import ast
+        root = (Path(__file__).resolve().parent.parent / "src"
+                / "rpgvxace_mcp")
+        spelled = []
+        for path in sorted(root.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not (isinstance(node, ast.BoolOp)
+                        and isinstance(node.op, ast.Or)
+                        and len(node.values) == 2):
+                    continue
+                left, right = node.values
+                if not (isinstance(right, ast.List) and not right.elts):
+                    continue
+                # A `.get(...)` on the left is a read of a file's field.
+                if (isinstance(left, ast.Call)
+                        and isinstance(left.func, ast.Attribute)
+                        and left.func.attr == "get"):
+                    spelled.append("%s: %s" % (path.name,
+                                               ast.unparse(node)))
+        self.assertEqual(spelled, [],
+                         "these read a file's field with `or []`, which is "
+                         "not the same rule as `as_list`: "
+                         + "; ".join(spelled))

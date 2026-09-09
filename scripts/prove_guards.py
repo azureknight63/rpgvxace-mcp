@@ -1,8 +1,8 @@
-"""Prove that each hardening guard in the codec still checks something.
+"""Prove that each hardening guard in this codebase still checks something.
 
 A passing test suite is not evidence that a guard works: a guard that has
 stopped matching reads exactly like a guard that passes. So for every guard
-added to the Marshal codec, this script
+in this codebase, this script
 
   1. copies the source tree to a temporary directory,
   2. reverts that one guard to the code that preceded it,

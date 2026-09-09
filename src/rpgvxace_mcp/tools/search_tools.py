@@ -20,7 +20,7 @@ from ..analysis import (
 )
 from ..commands import command_name, summarize
 from ..project import ProjectError
-from ..rubytypes import RubyObject, RubyString, _bare_name
+from ..rubytypes import RubyObject, RubyString, _bare_name, as_list
 from ..schema import ARRAY, HASH
 from .pattern_safety import (
     MEASURED_FLAGS,
@@ -585,7 +585,7 @@ class _Matcher:
 
 def _command_texts(ctx: Context, command: RubyObject) -> list[str]:
     out = []
-    for value in command.get("parameters") or []:
+    for value in as_list(command.get("parameters")):
         if isinstance(value, RubyString):
             out.append(ctx.codec.decode(value.data))
         elif isinstance(value, list):
