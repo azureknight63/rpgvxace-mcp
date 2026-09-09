@@ -294,64 +294,82 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
     }),
 )
 def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
-    """Events on a map, or one common event, with rendered scripts."""
+    """Events on a map, or one common event, with rendered scripts.
+
+    One tool over two subjects, and they share only these four lines: a
+    common event has no pages, no position and no name filter, and the map
+    branch has no `switch_id`. Reading either one meant reading a hundred
+    lines of the other first, and both grew a budget and a truncation note
+    independently -- the common branch got neither until a crafted `@list`
+    produced a thirty-megabyte reply.
+    """
     include_raw = opt_bool(args, "include_raw")
     refresh = opt_bool(args, "refresh")
     common_id, map_id = _one_target(args, "read")
-
     if common_id is not None:
-        refuse_inert(
-            args, ("event_ids", "name_contains", "page"),
-            "a common event has no pages and is addressed by its own id, so "
-            "reading one")
-        common = ctx.project.get_entry("common_events", common_id, refresh)
-        if common is None:
-            raise ToolError("there is no common event %d" % common_id)
-        if not isinstance(common, RubyObject):
-            # The same refusal `_edit_common_event` makes, in the same words.
-            # The read path called `.get("list")` straight away, so a file
-            # holding an Array or a String in that slot raised AttributeError
-            # -- reported with the hint "an argument was not the shape the
-            # tool expected", which is a diagnosis about the caller for a
-            # fact about the file.
-            raise ToolError(
-                "common event %d does not hold an RPG::CommonEvent object, "
-                "so it cannot be read. Run validate to see what is wrong "
-                "with the file." % common_id)
-        # A slot that holds an RPG::CommonEvent whose @list is not an
-        # Array is the same class of crafted file, one level down.
-        commands = as_list(common.get("list"))
-        # One allowance and one conversion budget for this reply, the same two
-        # the map branch below takes. This branch had neither: it rendered the
-        # whole list, so a common event whose @list is 250,000 links to one
-        # command -- a few kilobytes on disk -- produced a thirty-megabyte
-        # reply; and it built a fresh `new_walk()` per command, which is the
-        # defect `to_json`'s docstring describes as fixed.
-        #
-        # `take` rather than `spend`: one list has no surrounding loop, so a
-        # prefix is worth more than nothing. `command_count` stays the real
-        # length either way -- what was rendered is a separate fact.
-        command_budget = WalkBudget()
-        walk = new_walk()
-        shown = commands[:command_budget.take(len(commands))]
-        result: dict[str, Any] = {
-            "common_event_id": common_id,
-            "name": decoded(ctx, common.get("name")),
-            "trigger": COMMON_EVENT_TRIGGER_NAMES.get(
-                common.get("trigger"), common.get("trigger")),
-            "switch_id": common.get("switch_id"),
-            "command_count": len(commands),
-            "script": render_script(shown, ctx.codec),
-        }
-        if include_raw:
-            result["commands"] = [
-                to_json(c, ctx.codec, TABLE_MODES[0], walk) for c in shown]
-        stopped = command_budget.note("event_get")
-        if stopped:
-            result["commands_rendered"] = len(shown)
-            result["command_walk_stopped"] = stopped
-        return result
+        return _common_event_view(ctx, args, common_id, refresh, include_raw)
+    return _map_events_view(ctx, args, map_id, refresh, include_raw)
 
+
+def _common_event_view(ctx: Context, args: dict[str, Any], common_id: int,
+                       refresh: bool, include_raw: bool) -> dict[str, Any]:
+    """One common event: its trigger, its switch and its command list."""
+    refuse_inert(
+        args, ("event_ids", "name_contains", "page"),
+        "a common event has no pages and is addressed by its own id, so "
+        "reading one")
+    common = ctx.project.get_entry("common_events", common_id, refresh)
+    if common is None:
+        raise ToolError("there is no common event %d" % common_id)
+    if not isinstance(common, RubyObject):
+        # The same refusal `_edit_common_event` makes, in the same words.
+        # The read path called `.get("list")` straight away, so a file
+        # holding an Array or a String in that slot raised AttributeError
+        # -- reported with the hint "an argument was not the shape the
+        # tool expected", which is a diagnosis about the caller for a
+        # fact about the file.
+        raise ToolError(
+            "common event %d does not hold an RPG::CommonEvent object, "
+            "so it cannot be read. Run validate to see what is wrong "
+            "with the file." % common_id)
+    # A slot that holds an RPG::CommonEvent whose @list is not an
+    # Array is the same class of crafted file, one level down.
+    commands = as_list(common.get("list"))
+    # One allowance and one conversion budget for this reply, the same two
+    # the map branch below takes. This branch had neither: it rendered the
+    # whole list, so a common event whose @list is 250,000 links to one
+    # command -- a few kilobytes on disk -- produced a thirty-megabyte
+    # reply; and it built a fresh `new_walk()` per command, which is the
+    # defect `to_json`'s docstring describes as fixed.
+    #
+    # `take` rather than `spend`: one list has no surrounding loop, so a
+    # prefix is worth more than nothing. `command_count` stays the real
+    # length either way -- what was rendered is a separate fact.
+    command_budget = WalkBudget()
+    walk = new_walk()
+    shown = commands[:command_budget.take(len(commands))]
+    result: dict[str, Any] = {
+        "common_event_id": common_id,
+        "name": decoded(ctx, common.get("name")),
+        "trigger": COMMON_EVENT_TRIGGER_NAMES.get(
+            common.get("trigger"), common.get("trigger")),
+        "switch_id": common.get("switch_id"),
+        "command_count": len(commands),
+        "script": render_script(shown, ctx.codec),
+    }
+    if include_raw:
+        result["commands"] = [
+            to_json(c, ctx.codec, TABLE_MODES[0], walk) for c in shown]
+    stopped = command_budget.note("event_get")
+    if stopped:
+        result["commands_rendered"] = len(shown)
+        result["command_walk_stopped"] = stopped
+    return result
+
+
+def _map_events_view(ctx: Context, args: dict[str, Any], map_id: int,
+                     refresh: bool, include_raw: bool) -> dict[str, Any]:
+    """The events on one map, filtered by id, by name or to one page."""
     game_map = ctx.project.load_map(map_id, refresh)
     # One conversion budget for the whole reply. This renders every
     # command of every event asked for, and the number of commands on a

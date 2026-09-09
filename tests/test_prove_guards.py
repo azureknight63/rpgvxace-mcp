@@ -19,8 +19,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "scripts"))
 
-import prove_guards  # noqa: E402
-from prove_guards import Guard, prove  # noqa: E402
+# Both halves of the prover: `guard_table` is the data and every guard in
+# it, `prove_guards` the engine that reverts one and runs its tests. The
+# module object itself for `guard_table`, because the alias check below
+# reads its whole namespace rather than any one name.
+import guard_table  # noqa: E402
+from guard_table import GUARDS, Guard  # noqa: E402
+from prove_guards import prove  # noqa: E402
 
 
 class Ran:
@@ -53,7 +58,7 @@ class ProveTest(unittest.TestCase):
         # A guard whose anchor really is in a file of the project, so the
         # revert step behaves as it does in a real run.
         self.guard = Guard(
-            "a test fixture", prove_guards.LINT,
+            "a test fixture", guard_table.LINT,
             "MAX_FINDINGS = 5000", "MAX_FINDINGS = 1",
             ["tests/test_guards_bounds.py::TestNoWalkCollectsPastTheCeiling"],
             "nothing -- this is a fixture",
@@ -97,7 +102,7 @@ class ProveTest(unittest.TestCase):
                       "the verdict does not say what is broken: %s" % detail)
 
     def test_a_stale_anchor_is_named_as_stale(self):
-        stale = Guard("a stale fixture", prove_guards.LINT,
+        stale = Guard("a stale fixture", guard_table.LINT,
                       "this text is not in that file anywhere", "irrelevant",
                       ["tests/test_tools.py::Nothing"], "nothing")
         runner = Runner()
@@ -126,19 +131,19 @@ class GuardTableTest(unittest.TestCase):
     """Properties of the registered guards that do not need a test run."""
 
     def test_every_guard_has_at_least_one_test(self):
-        for guard in prove_guards.GUARDS:
+        for guard in GUARDS:
             with self.subTest(guard=guard.name):
                 self.assertTrue(guard.tests)
 
     def test_every_guard_names_what_goes_wrong_without_it(self):
-        for guard in prove_guards.GUARDS:
+        for guard in GUARDS:
             with self.subTest(guard=guard.name):
                 self.assertTrue(guard.why.strip(),
                                 "a guard with no stated consequence cannot "
                                 "be reviewed for whether it is worth having")
 
     def test_no_two_guards_share_a_name(self):
-        names = [guard.name for guard in prove_guards.GUARDS]
+        names = [guard.name for guard in GUARDS]
         duplicates = sorted({n for n in names if names.count(n) > 1})
         self.assertEqual(duplicates, [],
                          "--only matches by name, so duplicates cannot be "
@@ -155,7 +160,7 @@ class GuardTableTest(unittest.TestCase):
         """
         seen: dict[tuple[str, str], str] = {}
         duplicates = []
-        for guard in prove_guards.GUARDS:
+        for guard in GUARDS:
             key = (guard.file, tuple(guard.present))
             if key in seen:
                 duplicates.append("%r and %r" % (seen[key], guard.name))
@@ -203,7 +208,7 @@ class GuardTableTest(unittest.TestCase):
             return found
 
         missing = []
-        for guard in prove_guards.GUARDS:
+        for guard in GUARDS:
             for test in guard.tests:
                 parts = test.split("::")
                 file_name = parts[0].rsplit("/", 1)[-1]
@@ -232,7 +237,7 @@ class GuardTableTest(unittest.TestCase):
 
     def test_reverting_a_guard_actually_changes_the_file(self):
         """A guard whose reverted text equals its present text reverts nothing."""
-        for guard in prove_guards.GUARDS:
+        for guard in GUARDS:
             for present, reverted in guard.anchors:
                 with self.subTest(guard=guard.name):
                     self.assertNotEqual(present, reverted)
@@ -250,11 +255,18 @@ class GuardTableTest(unittest.TestCase):
         test-class aliases and the file-path pair went on standing.
         """
         by_value: dict[str, list[str]] = {}
-        for name, value in vars(prove_guards).items():
+        for name, value in vars(guard_table).items():
             if (name.isupper() and isinstance(value, str)
                     and (value.startswith("tests/")
                          or value.startswith("src/") or value.startswith("scripts/"))):
                 by_value.setdefault(value, []).append(name)
+        # This test reads a module's namespace, so it passes trivially if it
+        # is ever pointed at the wrong module -- which is exactly what
+        # happened when the table moved to `guard_table.py` and the aliases
+        # went with it. So say how many there are to find.
+        self.assertGreater(len(by_value), 100,
+                           "no aliases found: this test is reading the wrong "
+                           "module, not passing")
         shared = ["%s: %s" % (value, ", ".join(sorted(names)))
                   for value, names in sorted(by_value.items())
                   if len(names) > 1]
@@ -275,7 +287,7 @@ class MultipleAnchorTest(unittest.TestCase):
     """
 
     def guard(self, present, reverted):
-        return prove_guards.Guard(
+        return Guard(
             "two anchors", "src/rpgvxace_mcp/analysis/lint.py", present, reverted,
             ["tests/test_tools.py::Fake::test_one"], "why")
 
