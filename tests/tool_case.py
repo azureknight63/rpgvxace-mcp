@@ -99,6 +99,40 @@ class ToolTest(unittest.TestCase):
         name = stem if stem.endswith(self.extension) else stem + self.extension
         return (self.tmp / "project" / "Data" / name).read_bytes()
 
+    def lower_the_finding_ceiling(self, ceiling):
+        """Patch `MAX_FINDINGS` everywhere it is bound, and prove it.
+
+        Four test classes each kept their own list of the modules to patch,
+        and one of those lists was wrong already: patching only the
+        `analysis` package left every real branch reading 5000, so the
+        assertions passed against a ceiling nothing had lowered. `from X
+        import MAX_FINDINGS` binds the value in the importing module, so
+        there is one name to patch per importer -- and a hand-kept list of
+        importers goes stale the moment the linter gains a module.
+
+        So the modules are found rather than named, and the two assertions
+        are the point: something was found, and afterwards nothing under
+        `analysis` still reads the old number.
+        """
+        from rpgvxace_mcp import analysis
+
+        prefix = analysis.__name__
+        under = [(name, module) for name, module in sorted(sys.modules.items())
+                 if name == prefix or name.startswith(prefix + ".")]
+        found = [module for _, module in under
+                 if getattr(module, "MAX_FINDINGS", None) is not None]
+        self.assertGreaterEqual(
+            len(found), 2, "no module bound MAX_FINDINGS, so this patched "
+                           "nothing and every branch still reads 5000")
+        for module in found:
+            self.addCleanup(setattr, module, "MAX_FINDINGS",
+                            module.MAX_FINDINGS)
+            module.MAX_FINDINGS = ceiling
+        self.assertEqual(
+            [name for name, module in under
+             if getattr(module, "MAX_FINDINGS", ceiling) != ceiling],
+            [], "these still read the old ceiling")
+
 
 class ValidateTest(ToolTest):
     """Helpers for the rules that must not cry wolf."""

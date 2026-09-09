@@ -430,9 +430,11 @@ class TestOneBlankLineConvention(unittest.TestCase):
     """
 
     def modules(self):
+        # Globbed, not listed: `scripts/` was one named file, so
+        # `guard_table.py` arrived with 2,000 lines nothing checked.
         root = Path(__file__).resolve().parent.parent
         return (sorted((root / "src" / "rpgvxace_mcp").rglob("*.py"))
-                + [root / "scripts" / "prove_guards.py"])
+                + sorted((root / "scripts").glob("*.py")))
 
     def test_every_top_level_definition_has_two_blank_lines_above_it(self):
         # The look-ahead covers a top-level CONSTANT as well as a
@@ -464,61 +466,117 @@ class TestOneBlankLineConvention(unittest.TestCase):
 
 
 class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
-    """`walk <- references <- lint`, checked rather than asserted in prose.
+    """Two ordered sets of modules, checked rather than asserted in prose.
 
-    The module was split because the dependency boundary and the criticality
-    boundary coincided: everything the four map tool modules import lives in
-    `walk`, everything the two delete paths import lives in `references`,
-    and `misc_tools` is the only importer of anything in `lint`. That order
-    is the whole reason the split is worth having, so it is worth a test --
-    a cycle would make the three files one file again with extra steps.
+    `analysis` was one module split into `walk <- references <- lint`
+    because the dependency boundary and the criticality boundary coincided:
+    everything the four map tool modules import lives in `walk`, everything
+    the two delete paths import lives in `references`, and `misc_tools` is
+    the only importer of anything in `lint`. That order is the whole reason
+    the split is worth having, so it is worth a test -- a cycle would make
+    the files one file again with extra steps.
+
+    `lint` then became seven modules of its own with the same argument, so
+    it has the same table. One checker over both, because the first version
+    of this class hard-coded three names and a directory.
+
+    Both directions. The first version asked only whether every name in the
+    table was a real module, so a module added to the package was invisible
+    to the layering it had just joined -- which is how `lint/` could have
+    grown an eighth file that imported `report`.
     """
 
     # Which siblings each module may import. Lower may not reach higher.
-    ALLOWED = {
+    ANALYSIS = {
         "walk": set(),
         "references": {"walk"},
         "lint": {"walk", "references"},
     }
+    LINT = {
+        "findings": set(),
+        "maps": {"findings"},
+        "pages": {"findings"},
+        "command_rules": {"findings", "maps"},
+        "assets": {"findings"},
+        "database": {"findings", "assets"},
+        "report": {"findings", "maps", "pages", "command_rules", "assets",
+                   "database"},
+    }
 
-    def package(self):
-        return (Path(__file__).resolve().parent.parent / "src"
+    def tables(self):
+        """Each layering table with the directory it describes."""
+        root = (Path(__file__).resolve().parent.parent / "src"
                 / "rpgvxace_mcp" / "analysis")
+        return (("analysis", self.ANALYSIS, root),
+                ("lint", self.LINT, root / "lint"))
 
-    def sibling_imports(self, name):
-        """Which sibling modules one file imports, from its source."""
+    def found(self, where):
+        """Every module in a directory: a file, or a package with an init."""
+        out = {}
+        for path in sorted(where.iterdir()):
+            if path.suffix == ".py" and path.name != "__init__.py":
+                out[path.stem] = [path]
+            elif path.is_dir() and (path / "__init__.py").is_file():
+                out[path.name] = sorted(path.glob("*.py"))
+        return out
+
+    def sibling_imports(self, table, where, paths):
+        """Which siblings in `table` these files reach, read from source.
+
+        A module one directory down names a parent's sibling with one more
+        dot, so the level that counts as "sibling" depends on where the file
+        is. `lint/report.py` reaching `..walk` is `lint` reaching `walk`.
+        """
         import ast
-        tree = ast.parse((self.package() / (name + ".py")).read_text(
-            encoding="utf-8"))
         out = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.level == 1:
-                if node.module in self.ALLOWED:
+        for path in paths:
+            level = 1 if path.parent == where else 2
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom) or node.level != level:
+                    continue
+                if node.module in table:
                     out.add(node.module)
                 for alias in node.names:
-                    if alias.name in self.ALLOWED:
+                    if alias.name in table:
                         out.add(alias.name)
         return out
 
     def test_no_module_imports_a_layer_above_itself(self):
-        for name, allowed in self.ALLOWED.items():
-            with self.subTest(module=name):
-                reached = self.sibling_imports(name)
-                self.assertEqual(
-                    sorted(reached - allowed), [],
-                    "%s imports a layer above it, so the split has a cycle"
-                    % name)
+        for label, table, where in self.tables():
+            modules = self.found(where)
+            for name, allowed in table.items():
+                with self.subTest(package=label, module=name):
+                    reached = self.sibling_imports(
+                        table, where, modules[name]) - {name}
+                    self.assertEqual(
+                        sorted(reached - allowed), [],
+                        "%s/%s imports a layer above it, so the split has a "
+                        "cycle" % (label, name))
 
     def test_the_bottom_layer_imports_no_sibling(self):
-        """Stated separately: `walk` is what makes the order an order."""
-        self.assertEqual(self.sibling_imports("walk"), set())
+        """Stated separately: it is what makes each order an order."""
+        for label, table, where in self.tables():
+            bottom = [name for name, allowed in table.items() if not allowed]
+            self.assertEqual(len(bottom), 1,
+                             "%s has %d bottom layers" % (label, len(bottom)))
+            with self.subTest(package=label, module=bottom[0]):
+                self.assertEqual(
+                    self.sibling_imports(table, where,
+                                         self.found(where)[bottom[0]]),
+                    set())
 
-    def test_every_named_module_exists(self):
-        """So the table above cannot outlive a rename."""
-        for name in self.ALLOWED:
-            self.assertTrue((self.package() / (name + ".py")).is_file(),
-                            "%s is named in the layering table and is not "
-                            "there" % name)
+    def test_the_table_and_the_directory_name_the_same_modules(self):
+        """Both directions, so neither can outlive the other.
+
+        A name in the table and no module is a rename nobody finished. A
+        module and no name in the table is worse: it is a file the layering
+        does not constrain at all, and it reads exactly like a file that
+        passes.
+        """
+        for label, table, where in self.tables():
+            with self.subTest(package=label):
+                self.assertEqual(sorted(self.found(where)), sorted(table))
 
     def test_the_package_re_exports_what_the_tools_import(self):
         """`from ..analysis import X` keeps working, for every X in use.
@@ -542,6 +600,63 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         self.assertEqual(missing, [],
                          "the tools layer imports these from `analysis` and "
                          "the package does not re-export them")
+
+    def test_only_one_tool_module_imports_the_linter(self):
+        """The claim the whole boundary rests on, checked.
+
+        `analysis` was split where it was because the dependency boundary
+        and the criticality boundary coincided: `walk` is imported by four
+        map tool modules, `references` by the two delete paths, and `lint`
+        by `misc_tools` alone. The first two are load-bearing on every read
+        and every write; the third runs when a caller asks for a report.
+
+        That was a sentence in two docstrings and nothing else, which is
+        the state the layering table was in before this class. A second
+        importer would not break anything -- it would quietly make the
+        linter load-bearing, and the argument for the boundary would be
+        false while still being written down.
+        """
+        import ast
+        from rpgvxace_mcp import analysis
+        of_the_linter = set(vars(analysis.lint))
+        # A sanity check on the definition above, not on the code: if the
+        # linter's own namespace came back empty this test would pass by
+        # finding no importers of anything.
+        self.assertIn("validate", of_the_linter)
+        tools = (Path(__file__).resolve().parent.parent / "src"
+                 / "rpgvxace_mcp" / "tools")
+        importers = {}
+        for path in sorted(tools.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                if node.module not in ("analysis", "analysis.lint"):
+                    continue
+                took = sorted({alias.name for alias in node.names}
+                              & of_the_linter)
+                if took:
+                    importers.setdefault(path.stem, set()).update(took)
+        self.assertEqual(
+            sorted(importers), ["misc_tools"],
+            "the linter is imported by more than the report tool now, so "
+            "the reason `analysis` is split where it is no longer holds: "
+            + "; ".join("%s takes %s" % (name, ", ".join(sorted(took)))
+                        for name, took in sorted(importers.items())))
+
+    def test_the_linter_is_reachable_by_the_name_it_had(self):
+        """`from ..analysis import validate` survived becoming a package.
+
+        Seven modules behind one name, and `misc_tools` imports the name.
+        Without this the re-export test above could pass on a package that
+        exported nothing a caller could run.
+        """
+        from rpgvxace_mcp import analysis
+        for name in ("validate", "VALIDATE_SCOPES", "MAX_FINDINGS",
+                     "Finding", "check_assets", "check_database"):
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(analysis.lint, name), name)
+                self.assertTrue(hasattr(analysis, name), name)
 
 
 # Last in the file, deliberately. It used to sit mid-module,

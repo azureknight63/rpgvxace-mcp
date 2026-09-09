@@ -5,12 +5,20 @@ subjects, at which point the dependency boundary and the criticality
 boundary turned out to coincide: everything the four map tool modules import
 lives in `walk`, everything the two delete paths import lives in
 `references`, and `misc_tools` is the only importer of anything in `lint`.
+That last claim is a test rather than a sentence -- `test_schema.py` reads
+every tool module's imports and requires that only `misc_tools` takes a
+name from `lint` -- because it is the reason the boundary is where it is,
+and a second importer would make it false while leaving it written down.
+
+`lint` is itself a package of seven modules now, for the same reason at the
+next scale down; its own `__init__` gives that order.
 
 Re-exported from here so `from ..analysis import X` keeps working: the split
 is about how this code is read and changed, not about making every caller
 learn which of three files a name lives in. `tests/test_schema.py` holds
-the layering itself -- a tool module is a leaf, and these three are ordered
-`walk <- references <- lint`.
+both layerings -- a tool module is a leaf, these three are ordered
+`walk <- references <- lint`, and every module in either package is named in
+the table that constrains it.
 """
 
 from .walk import (  # noqa: F401

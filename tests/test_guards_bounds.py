@@ -719,16 +719,8 @@ class TestNoWalkCollectsPastTheCeiling(ToolTest):
     def setUp(self):
         super().setUp()
         from rpgvxace_mcp import analysis
-        from rpgvxace_mcp.analysis import lint
         self.analysis = analysis
-        # `lint` as well as the package: the guards read the constant from
-        # the module they live in, and `analysis` is now a re-export -- so
-        # patching only the package left every real branch reading 5000 and
-        # the assertions failing against a ceiling nothing had lowered.
-        for module in (analysis, lint):
-            original = module.MAX_FINDINGS
-            self.addCleanup(setattr, module, "MAX_FINDINGS", original)
-            module.MAX_FINDINGS = self.CEILING
+        self.lower_the_finding_ceiling(self.CEILING)
 
     def craft_broken_map(self):
         """Map 1, where every event page names a graphic that is not there.
@@ -1564,12 +1556,7 @@ class TestTheMapScopeStopsCollecting(ToolTest):
         super().setUp()
         from rpgvxace_mcp import analysis
         self.analysis = analysis
-        original = analysis.MAX_FINDINGS
-        from rpgvxace_mcp.analysis import lint
-        self.addCleanup(setattr, lint, "MAX_FINDINGS", original)
-        lint.MAX_FINDINGS = self.CEILING
-        self.addCleanup(setattr, analysis, "MAX_FINDINGS", original)
-        analysis.MAX_FINDINGS = self.CEILING
+        self.lower_the_finding_ceiling(self.CEILING)
 
     def craft_bad_encounters(self):
         """Map 1, with an encounter list full of a troop id nothing defines."""
@@ -2414,7 +2401,7 @@ class TestTheTileRectangleUsesTheBuffer(ToolTest):
 
 
 class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
-    """Every function in `lint` that loops over file data takes a budget.
+    """Every function in the linter that loops over file data takes a budget.
 
     Three rounds have now fixed unbudgeted walks one at a time, found by
     reading: `_check_map_assets` and `check_tilesets` in round 7, the whole
@@ -2443,18 +2430,37 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
                             "caller of `check_event_pages` has charged for",
     }
 
-    def module(self):
-        return (Path(__file__).resolve().parent.parent / "src"
-                / "rpgvxace_mcp" / "analysis" / "lint.py")
+    def modules(self):
+        """Every module of the linter, globbed rather than named.
+
+        It was one file and this method returned it. Globbing is the whole
+        point of the class: a walk nobody thought to add is what it looks
+        for, and a module nobody thought to add is the same defect one
+        level up -- `lint/` could have gained an eighth file full of
+        unbudgeted loops without this failing.
+        """
+        package = (Path(__file__).resolve().parent.parent / "src"
+                   / "rpgvxace_mcp" / "analysis" / "lint")
+        found = sorted(path for path in package.glob("*.py")
+                       if path.name != "__init__.py")
+        self.assertGreater(len(found), 1,
+                           "found no linter modules, so this scanned nothing")
+        return found
+
+    def functions(self):
+        """Every top-level function of the linter, wherever it lives."""
+        import ast
+        for path in self.modules():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef):
+                    yield path.stem, node
 
     def looping_functions(self):
-        """Every top-level function in `lint` with a loop in it."""
+        """Every top-level function in the linter with a loop in it."""
         import ast
-        tree = ast.parse(self.module().read_text(encoding="utf-8"))
         out = {}
-        for node in tree.body:
-            if not isinstance(node, ast.FunctionDef):
-                continue
+        for _, node in self.functions():
             if any(isinstance(inner, (ast.For, ast.While))
                    for inner in ast.walk(node)):
                 out[node.name] = [a.arg for a in node.args.args]
@@ -2484,16 +2490,13 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
         every call site, as a walk that is bounded.
         """
         import ast
-        tree = ast.parse(self.module().read_text(encoding="utf-8"))
         idle = []
-        for node in tree.body:
-            if not isinstance(node, ast.FunctionDef):
-                continue
+        for stem, node in self.functions():
             if "budget" not in [a.arg for a in node.args.args]:
                 continue
             body = ast.unparse(node)
             if "budget.spend" not in body and "budget)" not in body:
-                idle.append(node.name)
+                idle.append("%s.%s" % (stem, node.name))
         self.assertEqual(idle, [],
                          "these take a budget and neither spend it nor pass "
                          "it on: " + ", ".join(idle))
@@ -2727,12 +2730,7 @@ class TestAWholeRunHasOneCeiling(ToolTest):
 
     def setUp(self):
         super().setUp()
-        from rpgvxace_mcp import analysis
-        from rpgvxace_mcp.analysis import lint
-        for module in (analysis, lint):
-            original = module.MAX_FINDINGS
-            self.addCleanup(setattr, module, "MAX_FINDINGS", original)
-            module.MAX_FINDINGS = self.CEILING
+        self.lower_the_finding_ceiling(self.CEILING)
 
     def break_everything(self):
         """Enough wrong, in enough scopes, to pass a small ceiling in each."""
@@ -2799,10 +2797,7 @@ class TestTheCeilingStopsTheWalkingToo(ToolTest):
         from rpgvxace_mcp.analysis import lint
         self.analysis = analysis
         self.lint = lint
-        for module in (analysis, lint):
-            original = module.MAX_FINDINGS
-            self.addCleanup(setattr, module, "MAX_FINDINGS", original)
-            module.MAX_FINDINGS = self.CEILING
+        self.lower_the_finding_ceiling(self.CEILING)
 
     def craft_shared_events(self, pages):
         """One event object across many slots, each page broken the same way."""
@@ -2868,17 +2863,24 @@ class TestTheCeilingStopsTheWalkingToo(ToolTest):
         page.set("list", [jump] * 500)
         self.craft_shared_events([page])
         looked = []
-        original = self.lint._check_jump
+        # The module that owns both, not the package that re-exports them:
+        # `check_commands` looks `_check_jump` up as its own global, so
+        # patching the re-export leaves the real one running and the count
+        # below reads as a pass.
+        rules = self.lint.command_rules
+        original = rules._check_jump
 
         def counting(*args, **kwargs):
             looked.append(1)
             return original(*args, **kwargs)
 
-        self.lint._check_jump = counting
-        self.addCleanup(setattr, self.lint, "_check_jump", original)
-        self.lint.check_commands(self.project, [1],
-                                 self.lint._Tables(self.project),
-                                 self.analysis.WalkBudget())
+        rules._check_jump = counting
+        self.addCleanup(setattr, rules, "_check_jump", original)
+        rules.check_commands(self.project, [1],
+                             self.lint._Tables(self.project),
+                             self.analysis.WalkBudget())
+        self.assertTrue(looked, "the counting wrapper never ran, so this "
+                                "test measured the unpatched rule")
         # A handful past the ceiling, not 3000 x 500 of them.
         self.assertLess(len(looked), 100,
                         "the command walk examined %d commands to report %d "

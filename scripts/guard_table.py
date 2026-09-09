@@ -33,7 +33,13 @@ PROJECT = "src/rpgvxace_mcp/project.py"
 SERVER = "src/rpgvxace_mcp/server.py"
 WALK = "src/rpgvxace_mcp/analysis/walk.py"
 REFERENCES = "src/rpgvxace_mcp/analysis/references.py"
-LINT = "src/rpgvxace_mcp/analysis/lint.py"
+LINT_FINDINGS = "src/rpgvxace_mcp/analysis/lint/findings.py"
+LINT_MAPS = "src/rpgvxace_mcp/analysis/lint/maps.py"
+LINT_PAGES = "src/rpgvxace_mcp/analysis/lint/pages.py"
+LINT_COMMANDS = "src/rpgvxace_mcp/analysis/lint/command_rules.py"
+LINT_ASSETS = "src/rpgvxace_mcp/analysis/lint/assets.py"
+LINT_DATABASE = "src/rpgvxace_mcp/analysis/lint/database.py"
+LINT_REPORT = "src/rpgvxace_mcp/analysis/lint/report.py"
 REGISTRY = "src/rpgvxace_mcp/tools/registry.py"
 DB_TOOLS = "src/rpgvxace_mcp/tools/db_tools.py"
 EVENT_TOOLS = "src/rpgvxace_mcp/tools/event_tools.py"
@@ -701,7 +707,7 @@ GUARDS = [
         "a rejected 32 MB method name is quoted back in full",
     ),
     Guard(
-        "tileset sheets go through the asset checker", LINT,
+        "tileset sheets go through the asset checker", LINT_DATABASE,
         "        checker.check(sheet_name, \"tilesets\",",
         "        _ = sheet_name and checker and (\"tilesets\",) and (",
         [VRTP + "test_a_tileset_sheet_miss_is_downgraded_with_an_unresolved_rtp"],
@@ -710,7 +716,7 @@ GUARDS = [
         "that live in the RTP -- and they outrank the downgraded ones",
     ),
     Guard(
-        "an unreadable table is not an empty table", LINT,
+        "an unreadable table is not an empty table", LINT_FINDINGS,
         "        self._load(name)\n"
         "        if name in self._failures:\n"
         "            return None\n"
@@ -722,7 +728,7 @@ GUARDS = [
         "that refers to it is reported as missing",
     ),
     Guard(
-        "page numbers are the ones the tools take", LINT,
+        "page numbers are the ones the tools take", LINT_PAGES,
         "        % (last_unconditional, event_id, name, last_unconditional - 1),",
         "        % (last_unconditional + 1, event_id, name, last_unconditional),",
         [VPAGE + "test_a_page_finding_names_the_page_the_tools_take"],
@@ -730,7 +736,7 @@ GUARDS = [
         "zero, so a model acting on \"page 2\" edits the third page",
     ),
     Guard(
-        "missing means absent, not unparseable", LINT,
+        "missing means absent, not unparseable", LINT_COMMANDS,
         '    if map_id not in on_disk:\n        return [_missing(',
         '    if map_id not in map_sizes:\n        return [_missing(',
         [VMISS + "test_a_transfer_to_an_unparseable_map_is_not_called_missing"],
@@ -738,7 +744,7 @@ GUARDS = [
         "sends an agent recreating a file that is already there",
     ),
     Guard(
-        "a tile table is checked for being one", LINT,
+        "a tile table is checked for being one", LINT_MAPS,
         "    if not isinstance(data, Table):",
         "    if False:",
         [VHOST + "test_a_tile_table_that_is_not_a_table"],
@@ -746,7 +752,7 @@ GUARDS = [
         "run, so one odd ivar denies the tool for that project",
     ),
     Guard(
-        "map ids in MapInfos are addressable ones", LINT,
+        "map ids in MapInfos are addressable ones", LINT_MAPS,
         "        if _int(map_id) is None or not 1 <= map_id <= MAX_MAP_ID:",
         "        if _int(map_id) is None:",
         [VHOST + "test_a_map_id_no_filename_can_express"],
@@ -754,7 +760,7 @@ GUARDS = [
         "of as the bad id it is",
     ),
     Guard(
-        "a non-numeric parent_id stops the walk", LINT,
+        "a non-numeric parent_id stops the walk", LINT_MAPS,
         "            current = _int(current)\n"
         "            if current is None or current == 0:",
         "            if current == 0:",
@@ -775,7 +781,7 @@ GUARDS = [
         "so a small file produces a response too large to return",
     ),
     Guard(
-        "repeated map ids are collapsed", LINT,
+        "repeated map ids are collapsed", LINT_REPORT,
         "    wanted = sorted({i for i in (_int(m) for m in map_ids) if i is not None})",
         "    wanted = [i for i in (_int(m) for m in map_ids) if i is not None]",
         [VSCOPE + "test_repeated_map_ids_are_counted_once"],
@@ -783,7 +789,7 @@ GUARDS = [
         "times they repeated it, and the reported map count with it",
     ),
     Guard(
-        "the findings limit cannot be negative", LINT,
+        "the findings limit cannot be negative", LINT_REPORT,
         "    limit = max(1, _int(limit) or DEFAULT_FINDING_LIMIT)",
         "    limit = _int(limit) or DEFAULT_FINDING_LIMIT",
         [VSCOPE + "test_a_negative_limit_does_not_drop_findings"],
@@ -791,7 +797,7 @@ GUARDS = [
         "the ones the caller most needed to see",
     ),
     Guard(
-        "the start position is bounds-checked", LINT,
+        "the start position is bounds-checked", LINT_DATABASE,
         "            findings += _check_start_position(project, system, start_map)",
         "            pass  # rule removed",
         [VSTART + "test_a_start_position_off_the_start_map_is_reported"],
@@ -1014,7 +1020,7 @@ GUARDS = [
         'docstring said a patch could not move an id',
     ),
     Guard(
-        "findings are counted before they are dropped", LINT,
+        "findings are counted before they are dropped", LINT_REPORT,
         "    counts = {level: sum(1 for f in findings if f.severity == level)",
         "    counts = {level: sum(1 for f in findings[:limit] if f.severity == level)",
         [TALLY + "test_counts_survive_truncation"],
@@ -1092,7 +1098,7 @@ GUARDS = [
         'commands: [] empties the page it was meant to rewrite and reports "replaced the command list" -- a deletion wearing the name of an edit',
     ),
     Guard(
-        "findings stop being collected at the ceiling", LINT,
+        "findings stop being collected at the ceiling", LINT_COMMANDS,
         # Anchored with its own comment, because the bare line now appears in
         # every walk that appends inside a loop -- which is the point of the
         # round that added them, and made this anchor ambiguous.
@@ -1539,7 +1545,7 @@ GUARDS = [
         'a common event whose @list is 250,000 links to one command is a few kilobytes on disk and renders a thirty-megabyte reply',
     ),
     Guard(
-        'the asset collector refuses past its ceiling', LINT,
+        'the asset collector refuses past its ceiling', LINT_ASSETS,
         '''    def check(self, name: Any, kind: str, location: Location,
               rule: str = "missing_graphic", context: str = "") -> None:
         if self.full:
@@ -1553,7 +1559,7 @@ GUARDS = [
         'four walks share one collector and none of them bounded it -- one crafted map produced 1600 findings against a ceiling of 4',
     ),
     Guard(
-        'the event page walk stops at the ceiling', LINT,
+        'the event page walk stops at the ceiling', LINT_PAGES,
         '''            # Two findings per event at most, and the event count comes out of
             # the file: a crafted map that shares one event object across
             # forty thousand slots produced forty thousand findings here.
@@ -1736,7 +1742,7 @@ GUARDS = [
         'the amplification unit is (events x pages), so charging only for command payload left the product free -- and a page slot holding something that is not an RPG::Event::Page was free as well',
     ),
     Guard(
-        'the page rule walk takes an allowance', LINT,
+        'the page rule walk takes an allowance', LINT_PAGES,
         '''            if budget is not None and not budget.spend(1):
                 return findings.items
             if not isinstance(event, RubyObject):
@@ -1751,7 +1757,7 @@ GUARDS = [
         'check_event_pages collects only for an unconditional page, so one condition flag set on a crafted page made a finding ceiling powerless and it walked every page of every event for nothing',
     ),
     Guard(
-        'the asset walk takes the allowance its sibling had', LINT,
+        'the asset walk takes the allowance its sibling had', LINT_ASSETS,
         """            if budget is not None and not budget.spend(1):
                 return
             if not isinstance(event, RubyObject):
@@ -1880,7 +1886,7 @@ GUARDS = [
         'five of the seven writing tools answered a dry run in the past tense with the one field saying otherwise nested a level down -- and map_edit disagreed with itself, its create and delete paths saying would_delete while its update and resize paths said changes',
     ),
     Guard(
-        'narrowing a validate narrows what it reads', LINT,
+        'narrowing a validate narrows what it reads', LINT_COMMANDS,
         '    map_sizes = _MapSizes(project)',
         """    map_sizes = {map_id: (_int(m.get("width")), _int(m.get("height")))
                  for map_id, m in iter_maps(project)}""",
@@ -1889,7 +1895,7 @@ GUARDS = [
         'the map-size lookup was built from every map on disk, so validate map_ids=[5] cost 74% of a whole-project run and the argument that exists to make a run cheap bought nothing -- measured on the real 39-map project, now 23%',
     ),
     Guard(
-        'the map scope collects into one bounded list', LINT,
+        'the map scope collects into one bounded list', LINT_FINDINGS,
         # `full` rather than one of its three readers -- the loop condition,
         # `add` and `extend` all consult it, so reverting any one of them
         # leaves the other two holding the line. Defence in depth is worth
@@ -2130,7 +2136,7 @@ GUARDS = [
         'a hash may legally contain itself -- _read_hash_pairs registers it before reading its pairs -- and each hash segment costs three linear scans, so "events/" + "1/" * 4,000,000 fits inside MAX_MESSAGE_CHARS and asks for 10^11 comparisons',
     ),
     Guard(
-        'every scope gets the same allowance', LINT,
+        'every scope gets the same allowance', LINT_REPORT,
         """    walk_budget = WalkBudget()
     if "maps" in scopes:""",
         """    if "maps" in scopes:""",
@@ -2138,7 +2144,7 @@ GUARDS = [
         'this was built between two of the four scopes, so the map tree, the map properties, the encounters, the tilesets and the database cross-references walked with no allowance at all -- every one of them a row-times-child product out of a file',
     ),
     Guard(
-        'a tileset sheet slot is charged for', LINT,
+        'a tileset sheet slot is charged for', LINT_DATABASE,
         """            if budget is not None and not budget.spend(1):
                 break
             sheet = (TILESET_SHEET_NAMES[index]""",
@@ -2147,7 +2153,7 @@ GUARDS = [
         '_AssetChecker.check returns before it counts anything when the name is empty, so checker.full never became true and the row-times-slot product had no bound at all',
     ),
     Guard(
-        'a parent chain cannot collect past the ceiling', LINT,
+        'a parent chain cannot collect past the ceiling', LINT_MAPS,
         """            if not findings.room:
                 break
             if budget is not None and not budget.spend(1):
@@ -2158,7 +2164,7 @@ GUARDS = [
         'the ceiling was on the outer `for start in infos`, so one MapInfos that is a single cycle through every entry reached this loop once and appended a finding per entry',
     ),
     Guard(
-        'the map tree collects into one bounded list', LINT,
+        'the map tree collects into one bounded list', LINT_MAPS,
         '    _parent_cycles(infos, findings, budget)\n    return findings.items',
         '    return findings.items + _parent_cycles(infos, None, budget)',
         [SCOPEALLOW + "test_a_parent_chain_cannot_collect_past_the_ceiling"],
