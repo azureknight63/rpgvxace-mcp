@@ -177,15 +177,29 @@ class _Charset:
 # rather than assumed, because assuming a literal might match any category made
 # every literal a bridge between the atoms either side of it -- which is how an
 # ordinary `item\s*=\s*\d+` came to be scored as five competing parts.
-_CATEGORY_TESTS = {
-    "CATEGORY_DIGIT": lambda c: c.isdigit(),
-    "CATEGORY_NOT_DIGIT": lambda c: not c.isdigit(),
-    "CATEGORY_SPACE": lambda c: c.isspace(),
-    "CATEGORY_NOT_SPACE": lambda c: not c.isspace(),
-    "CATEGORY_WORD": lambda c: c.isalnum() or c == "_",
-    "CATEGORY_NOT_WORD": lambda c: not (c.isalnum() or c == "_"),
-    "CATEGORY_LINEBREAK": lambda c: c == "\n",
-    "CATEGORY_NOT_LINEBREAK": lambda c: c != "\n",
+# Each character category this module models: how to test a character for
+# membership, and one representative character of it.
+#
+# One table rather than two keyed by the same eight names. The sample is
+# what builds a subject out of a pattern's own alphabet -- a homogeneous run
+# of the characters a pattern mentions is what makes its atoms compete, and
+# a subject of anything else makes even a fatal pattern fail fast, which is
+# how a fixed list of subjects came to miss five live bypasses. Both readers
+# fail open in the refuse-more direction, so a ninth category in one table
+# and not the other would have degraded quietly on the path that decides
+# whether a pattern is safe to run at all.
+#
+# `TestTheTablesKeyedOffOneListAgree` checks that every sample is a
+# character its own test accepts, which two tables could not express.
+_CATEGORIES = {
+    "CATEGORY_DIGIT": (lambda c: c.isdigit(), "1"),
+    "CATEGORY_NOT_DIGIT": (lambda c: not c.isdigit(), "a"),
+    "CATEGORY_SPACE": (lambda c: c.isspace(), " "),
+    "CATEGORY_NOT_SPACE": (lambda c: not c.isspace(), "a"),
+    "CATEGORY_WORD": (lambda c: c.isalnum() or c == "_", "a"),
+    "CATEGORY_NOT_WORD": (lambda c: not (c.isalnum() or c == "_"), "!"),
+    "CATEGORY_LINEBREAK": (lambda c: c == "\n", "\n"),
+    "CATEGORY_NOT_LINEBREAK": (lambda c: c != "\n", "a"),
 }
 
 
@@ -199,9 +213,10 @@ def _literals_meet_categories(literals: "set[int]",
     if not literals or not categories:
         return False
     for name in categories:
-        test = _CATEGORY_TESTS.get(name)
-        if test is None:
+        known = _CATEGORIES.get(name)
+        if known is None:
             return True
+        test = known[0]
         for point in literals:
             if 0 <= point < 0x110000 and test(chr(point)):
                 return True
@@ -257,18 +272,6 @@ PREFLIGHT_SUBJECT_CHARS = 2000
 # wide alphabet cannot push a dangerous character out of the measurement --
 # which selecting the first eight by code point allowed.
 MAX_SINGLE_CHARACTER_SUBJECTS = 8
-
-# One representative character per character category, for building a subject
-# out of a pattern's own alphabet. A homogeneous run of the characters a
-# pattern mentions is what makes its atoms compete; a subject of anything else
-# makes even a fatal pattern fail fast, which is how a fixed list of subjects
-# came to miss five live bypasses.
-_CATEGORY_SAMPLES = {
-    "CATEGORY_DIGIT": "1", "CATEGORY_NOT_DIGIT": "a",
-    "CATEGORY_SPACE": " ", "CATEGORY_NOT_SPACE": "a",
-    "CATEGORY_WORD": "a", "CATEGORY_NOT_WORD": "!",
-    "CATEGORY_LINEBREAK": "\n", "CATEGORY_NOT_LINEBREAK": "a",
-}
 
 # What the child runs. Kept as one string rather than a module, so there is no
 # import path to get wrong and nothing of this project in the child.
@@ -350,6 +353,31 @@ def check_pattern(pattern: str) -> None:
     measure_cost(pattern)
 
 
+def _children(name: str, av: Any) -> "list[Any]":
+    """The sub-patterns a parsed node holds, whatever kind of node it is.
+
+    Where each kind keeps its body is knowledge the parser owns and this
+    module has to know: a SUBPATTERN's is `av[-1]`, a repeat's is `av[2]`,
+    an ATOMIC_GROUP *is* its body, and a BRANCH holds a list of them at
+    `av[1]`. `_alphabet` and `_flatten` each encoded all four, and
+    `_repeat_atom` and `_branch_atom` encoded two of them again -- four
+    copies of a fact that changes when CPython changes its parser, which it
+    did between 3.10 and 3.11 (`sre_parse` became `re._parser`).
+
+    A kind with no sub-patterns gets an empty list, so a caller can walk
+    the result without asking which kind it had.
+    """
+    if name == "SUBPATTERN":
+        return [av[-1]]
+    if name in _REPEATS:
+        return [av[2]]
+    if name == "ATOMIC_GROUP":
+        return [av]
+    if name == "BRANCH":
+        return list(av[1])
+    return []
+
+
 def _alphabet(parsed: Any, depth: int = 0) -> "set[str]":
     """Characters worth building a subject out of, taken from the pattern.
 
@@ -375,18 +403,15 @@ def _alphabet(parsed: Any, depth: int = 0) -> "set[str]":
                     low, high = inner_av
                     found.update(chr(c) for c in (low, high) if 0 < c < 0x110000)
                 elif inner == "CATEGORY":
-                    found.add(_CATEGORY_SAMPLES.get(str(inner_av), "a"))
+                    known = _CATEGORIES.get(str(inner_av))
+                    found.add(known[1] if known else "a")
                 elif inner == "NEGATE":
                     found.add("\x00")
-        elif name == "SUBPATTERN":
-            found |= _alphabet(av[-1], depth + 1)
-        elif name in _REPEATS:
-            found |= _alphabet(av[2], depth + 1)
-        elif name == "BRANCH":
-            for branch in av[1]:
-                found |= _alphabet(branch, depth + 1)
-        elif name == "ATOMIC_GROUP":
-            found |= _alphabet(av, depth + 1)
+        else:
+            # Every kind that holds sub-patterns, through the one function
+            # that knows where each keeps them.
+            for child in _children(name, av):
+                found |= _alphabet(child, depth + 1)
     return found
 
 
@@ -646,14 +671,16 @@ def _flatten(parsed: Any) -> "list[_Atom]":
             atoms.append(_Atom(1, _ANYTHING))
         elif name == "IN":
             atoms.append(_Atom(1, _charset_of_in(av)))
-        elif name == "SUBPATTERN":
-            atoms.extend(_flatten(av[-1]))
-        elif name == "ATOMIC_GROUP":
-            atoms.extend(_flatten(av))
+        elif name in ("SUBPATTERN", "ATOMIC_GROUP"):
+            # Flattened into the parent rather than charged as one atom,
+            # which is what the docstring above is about. A repeat and a
+            # branch are charged instead, below.
+            for child in _children(name, av):
+                atoms.extend(_flatten(child))
         elif name in _REPEATS:
             atoms.append(_repeat_atom(av))
         elif name == "BRANCH":
-            atoms.append(_branch_atom(av[1]))
+            atoms.append(_branch_atom(_children(name, av)))
         elif name in ("GROUPREF_EXISTS", "ASSERT", "ASSERT_NOT"):
             # A lookaround or conditional runs its own match at every
             # position. Refused outright rather than modelled: these are rare

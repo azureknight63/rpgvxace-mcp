@@ -11,7 +11,12 @@ from typing import Any
 from ..convert import TABLE_MODES, new_walk, to_json
 from ..project import MAX_MAP_ID, ProjectError
 from ..rubytypes import RubyHash, RubyObject, RubyString, Table, as_list
-from ..schema import TILE_ID_RANGES, TRIGGER_NAMES, unreadable_events_note
+from ..schema import (
+    PAGE_CONDITION_FLAGS,
+    TILE_ID_RANGES,
+    TRIGGER_NAMES,
+    unreadable_events_note,
+)
 from .map_common import MAX_CELLS_PER_WALK, _check_budget
 from .registry import (
     BOOL,
@@ -425,24 +430,37 @@ def _event_summaries(ctx: Context, game_map: RubyObject
     return out, cut_short
 
 
+def _self_switch_letter(letter: Any) -> str:
+    """The self-switch channel as text. A, B, C or D in every real file."""
+    if isinstance(letter, RubyString):
+        return letter.data.decode("ascii", "replace")
+    return str(letter)
+
+
+# One sentence per page-condition flag, keyed by the flag. Each condition
+# names a different companion field -- `switch1_id`, `variable_id` with
+# `variable_value`, `self_switch_ch` -- so the sentences cannot be derived;
+# the six names and the six-ness can be, and were not.
+#
+# `PAGE_CONDITION_FLAGS` says in its own comment that it exists so the field
+# docs, the constructor and the validate rule agree. This was the fourth
+# reader and the one that agreed by coincidence: a seventh flag would have
+# been documented, constructed and validated, and not described.
+_CONDITION_SENTENCES = {
+    "switch1_valid": lambda c: "switch %s is ON" % c.get("switch1_id"),
+    "switch2_valid": lambda c: "switch %s is ON" % c.get("switch2_id"),
+    "variable_valid": lambda c: "variable %s >= %s" % (
+        c.get("variable_id"), c.get("variable_value")),
+    "self_switch_valid": lambda c: "self switch %s is ON" % (
+        _self_switch_letter(c.get("self_switch_ch"))),
+    "item_valid": lambda c: "party has item %s" % c.get("item_id"),
+    "actor_valid": lambda c: "actor %s is in the party" % c.get("actor_id"),
+}
+
+
 def _conditions(condition: Any) -> list[str]:
+    """What a page's conditions say, in the order the flags are declared."""
     if not isinstance(condition, RubyObject):
         return []
-    out = []
-    if condition.get("switch1_valid"):
-        out.append("switch %s is ON" % condition.get("switch1_id"))
-    if condition.get("switch2_valid"):
-        out.append("switch %s is ON" % condition.get("switch2_id"))
-    if condition.get("variable_valid"):
-        out.append("variable %s >= %s" % (condition.get("variable_id"),
-                                          condition.get("variable_value")))
-    if condition.get("self_switch_valid"):
-        letter = condition.get("self_switch_ch")
-        text = letter.data.decode("ascii", "replace") if isinstance(letter, RubyString) \
-            else str(letter)
-        out.append("self switch %s is ON" % text)
-    if condition.get("item_valid"):
-        out.append("party has item %s" % condition.get("item_id"))
-    if condition.get("actor_valid"):
-        out.append("actor %s is in the party" % condition.get("actor_id"))
-    return out
+    return [_CONDITION_SENTENCES[flag](condition)
+            for flag in PAGE_CONDITION_FLAGS if condition.get(flag)]

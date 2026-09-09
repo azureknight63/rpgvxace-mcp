@@ -1404,3 +1404,65 @@ class TestTwoClaimsAreChecked(ToolTest):
         out = brief("A" * 5000)
         self.assertIn("5000", out)
         self.assertLess(len(out), 500)
+
+
+class TestAPageFieldCanBeReadBackAfterWriting(ToolTest):
+    """`event_edit` may patch a page field, so `event_get` shows it.
+
+    `move_route` was the exception, and the only one of the thirteen
+    `RPG::Event::Page` fields it applied to: `event_edit` accepts a patch to
+    it because `refuse_unknown_fields` is keyed off the documented field
+    list, and `_page_view` named eleven fields by hand and did not name that
+    one. So a model could set a custom move route, be told the edit
+    succeeded, read the page back, and see no move route -- which reads
+    exactly like a write that silently did nothing.
+
+    Derived from the schema rather than listed, because a list here is how
+    the other one went wrong. `list` and `id` are excluded: `list` is the
+    command list, which the reply carries as `script` and `command_count`
+    and which `_check_page_patch` refuses to patch wholesale, and `id` is
+    not a page field.
+    """
+
+    NOT_A_VIEW_FIELD = {
+        # Answered as `script` plus `command_count`, and refused as a patch.
+        "list",
+    }
+
+    def page_fields(self):
+        from rpgvxace_mcp.schema import SHARED_CLASS_FIELDS
+        return (set(SHARED_CLASS_FIELDS["RPG::Event::Page"])
+                - self.NOT_A_VIEW_FIELD)
+
+    def test_every_documented_page_field_is_in_the_view(self):
+        out = self.call("event_get", map_id=1)
+        page = out["events"][0]["pages"][0]
+        missing = sorted(self.page_fields() - set(page))
+        self.assertEqual(
+            missing, [],
+            "`event_edit` accepts a patch to these and `event_get` does not "
+            "answer them, so a write reads back as if it had not happened: "
+            + ", ".join(missing))
+
+    def test_the_view_invents_no_page_field(self):
+        """The other direction, so this cannot pass by answering everything."""
+        out = self.call("event_get", map_id=1)
+        page = out["events"][0]["pages"][0]
+        # The keys a reply adds that are not fields of the object: the page
+        # index, the rendered script, the counts, and the raw echo.
+        REPLY_ONLY = {"page", "script", "command_count", "commands",
+                      "trigger_code", "not_read"}
+        invented = sorted(set(page) - self.page_fields() - REPLY_ONLY)
+        self.assertEqual(invented, [],
+                         "these are neither page fields nor named reply "
+                         "keys: " + ", ".join(invented))
+
+    def test_a_move_route_written_is_a_move_route_read(self):
+        """End to end, on the field that was missing."""
+        self.call("event_edit", map_id=1,
+                  ops=[{"op": "set_page", "event_id": 1, "page": 0,
+                        "patch": {"move_type": 3}}])
+        out = self.call("event_get", map_id=1, event_ids=[1], page=0)
+        page = out["events"][0]["pages"][0]
+        self.assertIn("move_route", page)
+        self.assertEqual(page["move_type"], 3)

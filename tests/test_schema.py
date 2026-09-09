@@ -825,6 +825,66 @@ class TestImportBlocksAreInOrder(unittest.TestCase):
         self.assertEqual(out, [], "; ".join(out))
 
 
+class TestTheTablesKeyedOffOneListAgree(unittest.TestCase):
+    """A second table of the same keys is a second thing to keep in step.
+
+    Three of these, each found by reading and each silent when wrong:
+
+    `_conditions` in `map_read_tools` hand-wrote the six page-condition
+    flags as a run of `if`s. `PAGE_CONDITION_FLAGS` exists, its own comment
+    says it is there so "the field docs, the constructor and the validate
+    rule agree", and this was the fourth reader -- the one that agreed by
+    coincidence. A seventh flag would have been documented, constructed and
+    validated, and not described.
+
+    `SUMMARY_FIELDS` in `db_tools` is keyed by table name beside
+    `ALL_DATABASE_TABLES`, which is derived from the file registry. Its
+    read is `SUMMARY_FIELDS.get(table, [])`, so a table the schema gains
+    lists with no summary columns and says nothing.
+
+    `pattern_safety` keys three tables by the same eight regex category
+    names, and both readers fail open in the refuse-more direction -- so a
+    ninth category in one table and not the others degrades quietly, on the
+    path that decides whether a pattern is safe to run.
+    """
+
+    def test_every_page_condition_flag_has_a_sentence(self):
+        from rpgvxace_mcp.schema import PAGE_CONDITION_FLAGS
+        from rpgvxace_mcp.tools.map_read_tools import _CONDITION_SENTENCES
+        self.assertEqual(sorted(_CONDITION_SENTENCES),
+                         sorted(PAGE_CONDITION_FLAGS))
+
+    def test_every_summary_table_is_a_table(self):
+        from rpgvxace_mcp.schema import ALL_DATABASE_TABLES
+        from rpgvxace_mcp.tools.db_tools import SUMMARY_FIELDS
+        self.assertEqual(sorted(SUMMARY_FIELDS), sorted(ALL_DATABASE_TABLES),
+                         "a table with no summary columns lists with none "
+                         "and says nothing about it")
+
+    def test_every_regex_category_is_in_every_table(self):
+        from rpgvxace_mcp.tools import pattern_safety
+        names = sorted(pattern_safety._CATEGORIES)
+        self.assertEqual(len(names), 8, names)
+        for pair in pattern_safety._CATEGORY_DISJOINT:
+            with self.subTest(pair=sorted(pair)):
+                self.assertEqual(sorted(set(pair) - set(names)), [],
+                                 "this pair names a category no table has")
+
+    def test_each_category_test_and_sample_agree(self):
+        """The sample has to be a character its own test accepts.
+
+        Two tables meant `CATEGORY_SPACE` could have had a sample that is
+        not a space, and the shape budget would have measured the wrong
+        alphabet with nothing failing.
+        """
+        from rpgvxace_mcp.tools import pattern_safety
+        for name, (test, sample) in pattern_safety._CATEGORIES.items():
+            with self.subTest(category=name):
+                self.assertTrue(test(sample),
+                                "%s samples %r, which it rejects"
+                                % (name, sample))
+
+
 # Last in the file, deliberately. It used to sit mid-module,
 # and module statements run in order -- so `python tests/test_schema.py`
 # called `unittest.main()` (which exits) before the classes below

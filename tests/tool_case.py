@@ -162,32 +162,41 @@ class ValidateTest(ToolTest):
         return game_map, event_id, event
 
 
-class SharedObjectMap:
-    """Builds a map whose objects share children, for the walk-bound tests.
+class CraftedMap:
+    """One builder for the maps whose objects share children.
 
-    A mixin rather than a base class: two suites need this map and only this
-    map, and a second copy of the builder would be a second thing to keep in
-    step with the RPG::Event::Page field list.
+    `SharedObjectMap` and `EmptyPageMap` below were this builder written
+    twice: the nine-field page loop, the event, the events hash, the write
+    and the reopen were byte-identical, and `assert_bounded` differed only
+    in the sentence it prints on failure. `SharedObjectMap`'s own docstring
+    argued against exactly that -- "a second copy of the builder would be a
+    second thing to keep in step with the RPG::Event::Page field list" --
+    while the file held the second copy, and both copies had to be edited
+    when a page field moved.
+
+    A mixin rather than a base class: the suites that need one of these maps
+    need only the map, and `ToolTest` is already their base.
     """
 
-    # Small enough to build quickly, large enough that an unbounded walk is
-    # unmistakable: 2000 x 50 x 50 is five million command visits.
-    LIST_LEN, PAGES, EVENTS = 2000, 50, 50
-
-    # Far below the 13-36 seconds measured without a bound, and far above what
-    # any of the bounded walks costs.
+    # Far below the 13-36 seconds measured without a bound, and far above
+    # what any of the bounded walks costs. One value, because the two copies
+    # of it were the same number written twice.
     BUDGET_SECONDS = 10.0
 
-    def craft_shared_map(self):
-        """Rewrite map 1 so every command, page and event is one shared object."""
-        game_map = self.project.load_map(1)
-        command = RubyObject("RPG::EventCommand")
-        command.set("code", 108)
-        command.set("indent", 0)
-        command.set("parameters", [self.project.codec.make_string("x")])
+    def craft_page_map(self, commands, pages, events, max_bytes, what,
+                       condition=None):
+        """Rewrite map 1 as `events` copies of one event of `pages` pages.
 
+        One page object, one command object, one event object, shared into
+        every slot -- which is what makes the file small and the walk large.
+        `commands` is the list every page carries; `condition` is the page's
+        condition object, or None for a bare one.
+        """
         page = RubyObject("RPG::Event::Page")
-        page.set("condition", RubyObject("RPG::Event::Page::Condition"))
+        page.set("condition",
+                 condition if condition is not None
+                 else RubyObject("RPG::Event::Page::Condition"))
+        # Empty, so the asset checker returns before it collects.
         page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
         for name, value in (("trigger", 0), ("priority_type", 0),
                             ("move_type", 0), ("move_speed", 3),
@@ -195,38 +204,60 @@ class SharedObjectMap:
                             ("step_anime", False), ("direction_fix", False),
                             ("through", False)):
             page.set(name, value)
-        page.set("list", [command] * self.LIST_LEN)
+        page.set("list", commands)
 
         event = RubyObject("RPG::Event")
         event.set("id", 1)
         event.set("name", self.project.codec.make_string("E"))
         event.set("x", 0)
         event.set("y", 0)
-        event.set("pages", [page] * self.PAGES)
+        event.set("pages", [page] * pages)
 
-        events = RubyHash()
-        for event_id in range(1, self.EVENTS + 1):
-            events.set(event_id, event)
-        game_map.set("events", events)
+        hash_of_events = RubyHash()
+        for event_id in range(1, events + 1):
+            hash_of_events.set(event_id, event)
+        game_map = self.project.load_map(1)
+        game_map.set("events", hash_of_events)
 
         path = self.project.path_for(self.project.map_file(1))
         path.write_bytes(marshal_rb.dump(game_map))
         # Small on disk is the whole point of the finding.
-        self.assertLess(path.stat().st_size, 64 * 1024)
+        self.assertLess(path.stat().st_size, max_bytes,
+                        "%s is meant to be small and is %d bytes"
+                        % (what, path.stat().st_size))
         self.ctx = self.reopen()
 
     def assert_bounded(self, tool_name, **arguments):
+        """Call a tool and require it to finish. `WHAT` names the map."""
         import time
         start = time.perf_counter()
         out = self.call(tool_name, **arguments)
         elapsed = time.perf_counter() - start
         self.assertLess(elapsed, self.BUDGET_SECONDS,
-                        "%s took %.1fs on a 7 KB crafted map"
-                        % (tool_name, elapsed))
+                        "%s took %.1fs on %s"
+                        % (tool_name, elapsed, self.WHAT))
         return out
 
 
-class EmptyPageMap:
+class SharedObjectMap(CraftedMap):
+    """A map whose objects share children, for the walk-bound tests."""
+
+    # Small enough to build quickly, large enough that an unbounded walk is
+    # unmistakable: 2000 x 50 x 50 is five million command visits.
+    LIST_LEN, PAGES, EVENTS = 2000, 50, 50
+    WHAT = "a 7 KB crafted map"
+
+    def craft_shared_map(self):
+        """Every command, page and event one shared object."""
+        command = RubyObject("RPG::EventCommand")
+        command.set("code", 108)
+        command.set("indent", 0)
+        command.set("parameters", [self.project.codec.make_string("x")])
+        self.craft_page_map([command] * self.LIST_LEN, self.PAGES,
+                            self.EVENTS, 64 * 1024, self.WHAT)
+
+
+class EmptyPageMap(CraftedMap):
     """A map whose amplification is entirely in (events x pages).
 
     Every page holds an empty @list, so every charge of the form
@@ -240,51 +271,13 @@ class EmptyPageMap:
     # 4,000,000 pairs from ~18 KB. Large enough that an unbounded walk is
     # unmistakable, small enough to build in a test.
     PAGES, EVENTS = 2000, 2000
-
-    BUDGET_SECONDS = 10.0
+    WHAT = "a map of empty pages"
 
     def craft_empty_page_map(self):
-        page = RubyObject("RPG::Event::Page")
         condition = RubyObject("RPG::Event::Page::Condition")
         # Truthy, so the page is not unconditional and the shadowing rule
         # keeps looking without ever collecting.
         condition.set("switch1_valid", True)
         condition.set("switch1_id", 1)
-        page.set("condition", condition)
-        # Empty, so the asset checker returns before it collects.
-        page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
-        for name, value in (("trigger", 0), ("priority_type", 0),
-                            ("move_type", 0), ("move_speed", 3),
-                            ("move_frequency", 3), ("walk_anime", True),
-                            ("step_anime", False), ("direction_fix", False),
-                            ("through", False)):
-            page.set(name, value)
-        page.set("list", [])          # the bypass
-
-        event = RubyObject("RPG::Event")
-        event.set("id", 1)
-        event.set("name", self.project.codec.make_string("E"))
-        event.set("x", 0)
-        event.set("y", 0)
-        event.set("pages", [page] * self.PAGES)
-
-        events = RubyHash()
-        for event_id in range(1, self.EVENTS + 1):
-            events.set(event_id, event)
-        game_map = self.project.load_map(1)
-        game_map.set("events", events)
-        path = self.project.path_for(self.project.map_file(1))
-        path.write_bytes(marshal_rb.dump(game_map))
-        self.assertLess(path.stat().st_size, 128 * 1024,
-                        "the point of the finding is that it is small")
-        self.ctx = self.reopen()
-
-    def assert_bounded(self, tool_name, **arguments):
-        import time
-        start = time.perf_counter()
-        out = self.call(tool_name, **arguments)
-        elapsed = time.perf_counter() - start
-        self.assertLess(elapsed, self.BUDGET_SECONDS,
-                        "%s took %.1fs on a map of empty pages"
-                        % (tool_name, elapsed))
-        return out
+        self.craft_page_map([], self.PAGES, self.EVENTS, 128 * 1024,
+                            self.WHAT, condition=condition)

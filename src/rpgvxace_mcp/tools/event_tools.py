@@ -28,6 +28,7 @@ from ..project import MAX_MAP_ID
 from ..rubytypes import RubyHash, RubyObject, as_list
 from ..schema import (
     COMMON_EVENT_TRIGGER_NAMES,
+    PAGE_FIELDS,
     TRIGGER_NAMES,
     new_event,
     new_event_command,
@@ -238,27 +239,35 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
         # lines, and fifty links to that page renders a hundred thousand.
         return {"page": index, "command_count": len(commands),
                 "not_read": "the command walk stopped before this page"}
-    condition = page.get("condition")
-    graphic = page.get("graphic")
     view: dict[str, Any] = {
         "page": index,
+        # The trigger twice: the name for a reader and the code for a
+        # caller that means to write it back.
         "trigger": TRIGGER_NAMES.get(page.get("trigger"), page.get("trigger")),
         "trigger_code": page.get("trigger"),
-        "priority_type": page.get("priority_type"),
-        "move_type": page.get("move_type"),
-        "move_speed": page.get("move_speed"),
-        "move_frequency": page.get("move_frequency"),
-        "walk_anime": page.get("walk_anime"),
-        "step_anime": page.get("step_anime"),
-        "direction_fix": page.get("direction_fix"),
-        "through": page.get("through"),
-        "condition": (to_json(condition, ctx.codec, TABLE_MODES[0], walk)
-                      if condition is not None else None),
-        "graphic": (to_json(graphic, ctx.codec, TABLE_MODES[0], walk)
-                    if graphic is not None else None),
         "command_count": len(commands),
         "script": render_script(commands, ctx.codec),
     }
+    # And every other field of the class, from the list that documents it.
+    # These were eleven keys written out by hand, of the thirteen fields
+    # `event_edit` accepts a patch to -- and `move_route` was one of the two
+    # missing. So a model could set a custom move route, be told the edit
+    # had been applied, read the page back, and see no move route at all,
+    # which reads exactly like a write that silently did nothing.
+    #
+    # `list` is excluded because it is answered as `script` and
+    # `command_count` above, and `_check_page_patch` refuses to patch it
+    # wholesale. Nothing else is: a field this engine's files do not carry
+    # simply comes back absent, as it does everywhere else in this layer.
+    for field in sorted(PAGE_FIELDS):
+        if field in view or field == "list":
+            continue
+        value = page.get(field)
+        # A nested object goes through the conversion budget, as `condition`
+        # and `graphic` always did; a plain value is already JSON.
+        view[field] = (to_json(value, ctx.codec, TABLE_MODES[0], walk)
+                       if isinstance(value, (RubyObject, RubyHash, list))
+                       else value)
     if include_raw:
         # The caller's budget, so a read of two hundred events cannot spend
         # two hundred budgets. The number of commands on a page comes out of

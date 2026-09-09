@@ -23,6 +23,9 @@ from rpgvxace_mcp.tools.search_tools import (  # noqa: E402
 from rpgvxace_mcp.tools import pattern_safety  # noqa: E402
 from rpgvxace_mcp.tools.pattern_safety import (  # noqa: E402
     PatternTooCostly,
+    _REPEATS,
+    _children,
+    _sre_parse,
     check_pattern,
     check_shape,
 )
@@ -721,3 +724,74 @@ class TestTheMeasurementFailsClosedOnEveryAbnormalExit(unittest.TestCase):
         self.safety.check_pattern("Gold[0-9]+")
         with self.assertRaises(self.safety.PatternTooCostly):
             self.safety.check_pattern("(a+)+$")
+
+
+class TestWhereANodeKeepsItsBody(unittest.TestCase):
+    """`_children` is this module's only claim about CPython's parser.
+
+    Where each kind of parsed node keeps its sub-patterns -- `av[-1]`,
+    `av[2]`, `av[1]`, or the node itself -- was written in four places
+    across `_alphabet`, `_flatten`, and the two atom builders. It is one
+    function now, and it is the one thing here that a Python upgrade can
+    break: `sre_parse` became `re._parser` between 3.10 and 3.11, and this
+    module already carries a shim for that import.
+
+    So it is checked against the parser rather than against a fixture. If a
+    future version moves a body, these fail here -- in a test that says
+    what broke -- rather than in the shape budget, where a body read as
+    empty makes a fatal pattern measure as safe.
+    """
+
+    def parsed(self, pattern):
+        return list(_sre_parse.parse(pattern))
+
+    def kinds(self, pattern):
+        return [(str(op), av) for op, av in self.parsed(pattern)]
+
+    def test_a_group_body_is_found(self):
+        (name, av), = self.kinds("(ab)")
+        self.assertEqual(name, "SUBPATTERN")
+        body, = _children(name, av)
+        self.assertEqual([str(op) for op, _ in body], ["LITERAL", "LITERAL"])
+
+    def test_a_repeat_body_is_found(self):
+        (name, av), = self.kinds("a+")
+        self.assertIn(name, _REPEATS)
+        body, = _children(name, av)
+        self.assertEqual([str(op) for op, _ in body], ["LITERAL"])
+
+    def test_every_branch_is_found(self):
+        (name, av), = self.kinds("(?:a|bb|ccc)")
+        # A bare alternation parses as a BRANCH; a group of one wraps it.
+        if name == "SUBPATTERN":
+            inner, = _children(name, av)
+            name, av = [(str(op), value) for op, value in inner][0]
+        self.assertEqual(name, "BRANCH")
+        self.assertEqual([len(b) for b in _children(name, av)], [1, 2, 3])
+
+    def test_a_node_with_no_body_says_so(self):
+        """So a caller can walk the result without asking which kind it had."""
+        (name, av), = self.kinds("a")
+        self.assertEqual(name, "LITERAL")
+        self.assertEqual(_children(name, av), [])
+
+    def test_the_kinds_that_hold_a_body_are_the_ones_that_do(self):
+        """Both directions: nothing claims a body it has not got.
+
+        Written because the alternative -- a list of kinds in a comment --
+        is what this replaced four copies of.
+        """
+        # `(?:ab|cd)` and not `(?:a|b)`: CPython folds an alternation
+        # of single characters into a character class, so the second parses
+        # as IN and holds no sub-pattern at all. Found by this test against
+        # my own expectation, which is the reason to check `_children`
+        # against the parser rather than against a fixture.
+        holds = {"(a)": True, "a+": True, "a*": True, "a{2,3}": True,
+                 "(?:ab|cd)": True, "a": False, "[ab]": False,
+                 ".": False, "^": False, "(?:a|b)": False,
+                 "\\w": False}
+        for pattern, expected in holds.items():
+            with self.subTest(pattern=pattern):
+                got = any(_children(str(op), av)
+                          for op, av in self.parsed(pattern))
+                self.assertEqual(got, expected, self.kinds(pattern))

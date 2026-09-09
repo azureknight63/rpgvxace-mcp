@@ -41,15 +41,10 @@ from typing import Any, Literal
 
 from .rubytypes import (
     RubyData,
-    RubyExtended,
     RubyHash,
-    RubyIvars,
     RubyObject,
     RubyString,
     RubyStruct,
-    RubySymbol,
-    RubyUClass,
-    RubyUserDef,
     RubyUserMarshal,
     Table,
     _bare_name,
@@ -327,6 +322,13 @@ SHARED_CLASS_FIELDS: dict[str, dict[str, str]] = {
         "list": "Array of RPG::EventCommand",
     },
 }
+
+
+# The fields of one event page, from the list that documents them.
+# Named because `_page_view` answered eleven of the thirteen by hand and
+# `move_route` was one of the two it missed -- so `event_edit` accepted a
+# patch to a field `event_get` would not read back.
+PAGE_FIELDS = tuple(sorted(SHARED_CLASS_FIELDS["RPG::Event::Page"]))
 
 
 _MAP_FIELDS_SHARED = {

@@ -48,6 +48,13 @@ from .registry import (
 )
 
 # Extra fields worth showing beside the name when listing a table.
+#
+# One entry per table, and which columns matter is an editorial choice that
+# cannot be derived -- but the *set of tables* can be, and this ran beside
+# `ALL_DATABASE_TABLES` with nothing holding the two in step. The read below
+# is `.get(table, [])`, so a table the schema gained would have listed with
+# no summary columns and said nothing about it.
+# `TestTheTablesKeyedOffOneListAgree` is what now refuses that.
 SUMMARY_FIELDS: dict[str, list[str]] = {
     "actors": ["class_id", "initial_level", "character_name", "face_name"],
     "classes": ["position"],
