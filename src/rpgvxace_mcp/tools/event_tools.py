@@ -34,6 +34,7 @@ from ..schema import (
 )
 from .map_tools import unreadable_events_note
 from .registry import (
+    write_reply,
     MAX_OPS,
     check_op_args,
     echo,
@@ -523,7 +524,8 @@ def _apply_event_ops(ctx: Context, map_id: int, filename: str,
         filename, dry_run=dry_run, tool="event_edit",
         summary="; ".join(str(a.get("summary", a.get("op"))) for a in applied),
     )
-    return {"map_id": map_id, "applied": applied, "write": write}
+    return write_reply({"map_id": map_id, "applied": applied,
+                        "write": write}, dry_run)
 
 
 def _range_text(ids: list[int]) -> str:
@@ -913,7 +915,8 @@ def _apply_common_ops(ctx: Context, common_id: int, common: RubyObject,
         filename, dry_run=dry_run, tool="event_edit",
         summary="edited common event %d" % common_id,
     )
-    return {"common_event_id": common_id, "applied": applied, "write": write}
+    return write_reply({"common_event_id": common_id, "applied": applied,
+                        "write": write}, dry_run)
 
 
 def _write_commands(ctx: Context, holder: RubyObject, entries: list[Any],

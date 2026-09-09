@@ -157,6 +157,9 @@ NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
 BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
 INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
 AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
+PREVIEW = ("tests/test_tools.py::TestEveryPreviewReadsAsAPreview::")
+NARROW = ("tests/test_tools.py::TestNarrowingValidateActuallyNarrowsIt::")
+TILEBUF = ("tests/test_tools.py::TestATileTallyUsesTheBuffer::")
 SPENDS = ("tests/test_tools.py::TestEveryWalkSpendsItsAllowance::")
 NOPAGES = ("tests/test_tools.py::TestAnEventWithNoPagesStillCostsARow::")
 EMPTYPAGE = ("tests/test_tools.py::TestAnEmptyPageStillCostsSomething::")
@@ -1626,18 +1629,6 @@ GUARDS = [
         '"total" on a reply filtered by event_ids, name_contains or page reads as the number of events on the map, so a filtered read looks like the whole of a much emptier map -- the rename db_list and map_list already carry',
     ),
     Guard(
-        'a dry run is not phrased as a confirmation', DB_TOOLS,
-        """    if not dry_run:
-        return {"table": table, "applied": applied, "warnings": warnings,
-                "write": write}""",
-        """    if True:
-        return {"table": table, "applied": applied, "warnings": warnings,
-                "write": write}""",
-        [DRYRUN + "test_a_preview_does_not_claim_to_have_applied_anything",
-         DRYRUN + "test_a_previewed_change_is_named_in_the_conditional"],
-        'a preview answered `applied: [{"changes": [...]}]`, every word past tense, with the one field saying otherwise nested a level down -- so a model read the op rows, concluded the change had landed, and did not retry it',
-    ),
-    Guard(
         'the events scope is claimed only once it reads one', SEARCH_TOOLS,
         """        if not read_something:
             read_something = True
@@ -1811,6 +1802,32 @@ GUARDS = [
         [CALLABLE + "test_a_bare_bytes_value_converts",
          CALLABLE + "test_it_agrees_with_the_ruby_string_branch"],
         'the branch passed two of four required arguments, so it raised TypeError if reached -- reported to the model as "an argument was not the shape the tool expected", a diagnosis about the caller for a defect in the converter',
+    ),
+    Guard(
+        'a preview is phrased as a preview by every tool that writes', REGISTRY,
+        """    if not dry_run:
+        return body""",
+        """    if True:
+        return body""",
+        # The seven-tool tests, plus the two db_edit-specific ones that used
+        # to guard `_edit_reply` before its rule moved here. A guard is
+        # identified by the line it reverts, so folding them in beats a
+        # second guard on the same line.
+        [PREVIEW + "test_every_preview_says_so_at_the_top_level",
+         PREVIEW + "test_no_preview_uses_a_past_tense_key",
+         PREVIEW + "test_no_row_inside_a_preview_uses_one_either",
+         DRYRUN + "test_a_preview_does_not_claim_to_have_applied_anything",
+         DRYRUN + "test_a_previewed_change_is_named_in_the_conditional"],
+        'five of the seven writing tools answered a dry run in the past tense with the one field saying otherwise nested a level down -- and map_edit disagreed with itself, its create and delete paths saying would_delete while its update and resize paths said changes',
+    ),
+    Guard(
+        'narrowing a validate narrows what it reads', ANALYSIS,
+        '    map_sizes = _MapSizes(project)',
+        """    map_sizes = {map_id: (_int(m.get("width")), _int(m.get("height")))
+                 for map_id, m in iter_maps(project)}""",
+        [NARROW + "test_a_narrowed_run_does_not_parse_every_map",
+         NARROW + "test_a_transfer_to_an_undersized_map_is_still_caught"],
+        'the map-size lookup was built from every map on disk, so validate map_ids=[5] cost 74% of a whole-project run and the argument that exists to make a run cheap bought nothing -- measured on the real 39-map project, now 23%',
     ),
 ]
 

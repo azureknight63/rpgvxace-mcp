@@ -2468,7 +2468,8 @@ class TestInapplicableArgumentsAreRefused(ToolTest):
         out = self.call("map_edit", op="resize", map_id=1, width=21,
                         patch={"encounter_step": 9}, name="Renamed",
                         dry_run=True)
-        self.assertIn("resized from 20x15 to 21x15", out["changes"])
+        # `would_change` on a dry run -- see TestEveryPreviewReadsAsAPreview.
+        self.assertIn("resized from 20x15 to 21x15", out["would_change"])
 
     def test_every_op_in_the_schema_has_a_table_entry(self):
         """A new op must not be able to land without declaring what it reads.
@@ -3004,7 +3005,7 @@ class TestGrowingAMapIsBoundedToo(ToolTest):
     def test_an_ordinary_resize_still_works(self):
         out = self.call("map_edit", op="resize", map_id=1, width=25,
                         height=20, dry_run=True)
-        self.assertIn("resized from 20x15 to 25x20", out["changes"])
+        self.assertIn("resized from 20x15 to 25x20", out["would_change"])
 
 
 class TestDiscardedTileCountIsRight(ToolTest):
@@ -3368,7 +3369,7 @@ class TestOpArgumentsAreGatedEverywhere(ToolTest):
     def test_map_tiles_still_fills(self):
         out = self.call("map_tiles", map_id=1, op="fill", tile_id=5, x=0, y=0,
                         width=2, height=2, dry_run=True)
-        self.assertIn("filled", out["changed"])
+        self.assertIn("filled", out["would_change"])
 
     def test_raw_data_refuses_a_value_it_would_not_write(self):
         """`op` defaults to "get", which is the dangerous half.
@@ -3390,7 +3391,7 @@ class TestOpArgumentsAreGatedEverywhere(ToolTest):
         out = self.call("raw_data", op="set", table="system",
                         path="party_members", value={"value": [1]},
                         dry_run=True)
-        self.assertEqual(out["after"], [1])
+        self.assertEqual(out["would_become"], [1])
 
     def test_scripts_refuses_code_on_a_read(self):
         with self.assertRaises(ToolError) as caught:
@@ -3430,7 +3431,7 @@ class TestCommonEventOpsAreGatedToo(ToolTest):
     def test_a_real_common_event_edit_still_works(self):
         out = self.call("event_edit", common_event_id=1, dry_run=True, ops=[
             {"op": "set_commands", "commands": [{"text": "hi"}]}])
-        self.assertEqual(out["applied"][0]["op"], "set_commands")
+        self.assertEqual(out["would_apply"][0]["op"], "set_commands")
 
 
 class TestOneBudgetForAWholeResponse(ToolTest):
@@ -5916,3 +5917,249 @@ class TestAnEventWithNoPagesStillCostsARow(ToolTest):
         out = self.call("event_get", map_id=1)
         self.assertLess(len(out["events"]),
                         map_tools.MAX_EVENT_SUMMARY_ROWS * 3)
+
+
+class TestEveryPreviewReadsAsAPreview(ToolTest):
+    """A dry run says so at the top level, in the conditional, everywhere.
+
+    One call per writing tool, chosen to reach the branch that actually
+    builds a reply -- not the argument checks in front of it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # A slot that exists, for the scripts case.
+        self.slot = self.call("scripts", op="list")["scripts"][0]["index"]
+
+    def previews(self):
+        """One dry-run call per tool that writes, as (tool name, reply)."""
+        return [
+            ("db_edit", dict(table="items", dry_run=True,
+                             ops=[{"op": "update", "id": 1,
+                                   "patch": {"name": "Zap"}}])),
+            ("event_edit", dict(map_id=1, dry_run=True,
+                                ops=[{"op": "update", "event_id": 1,
+                                      "name": "Renamed"}])),
+            ("map_edit", dict(op="update", map_id=1, dry_run=True,
+                              name="Renamed")),
+            ("map_tiles", dict(op="fill", map_id=1, x=0, y=0, width=2,
+                               height=2, z=0, tile_id=0, dry_run=True)),
+            ("scripts", dict(op="set", index=self.slot, name="Renamed",
+                             dry_run=True)),
+            ("raw_data", dict(op="set", table="system", path="game_title",
+                              value={"value": "Renamed"}, dry_run=True)),
+            ("backups", dict(op="create", label="preview", dry_run=True)),
+        ]
+
+    # Words that mean "this happened". A preview must not use them at the top
+    # level of its reply or in the rows it carries.
+    PAST_TENSE = ("applied", "changes", "changed", "renamed_to", "deleted",
+                  "removed", "restored", "created", "after")
+
+    def test_every_writing_tool_is_covered(self):
+        """So a tool added later cannot quietly skip this rule."""
+        writing = {name for name, tool in REGISTRY.items()
+                   if getattr(tool, "writes", False)}
+        covered = {name for name, _ in self.previews()}
+        self.assertEqual(sorted(writing - covered), [],
+                         "these tools write and are not checked here")
+
+    def test_every_preview_says_so_at_the_top_level(self):
+        for name, arguments in self.previews():
+            with self.subTest(tool=name):
+                out = self.call(name, **arguments)
+                self.assertTrue(
+                    out.get("dry_run"),
+                    "%s's preview does not say at the top level that nothing "
+                    "was written: %s" % (name, sorted(out)))
+
+    def test_no_preview_uses_a_past_tense_key(self):
+        for name, arguments in self.previews():
+            with self.subTest(tool=name):
+                out = self.call(name, **arguments)
+                found = [key for key in out if key in self.PAST_TENSE]
+                self.assertEqual(
+                    found, [],
+                    "%s's preview reports %s, which reads as a completed "
+                    "write" % (name, found))
+
+    def test_no_row_inside_a_preview_uses_one_either(self):
+        """Where a model actually reads what happened."""
+        for name, arguments in self.previews():
+            with self.subTest(tool=name):
+                out = self.call(name, **arguments)
+                for key, value in out.items():
+                    if not isinstance(value, list):
+                        continue
+                    for row in value:
+                        if not isinstance(row, dict):
+                            continue
+                        found = [k for k in row if k in self.PAST_TENSE]
+                        self.assertEqual(
+                            found, [],
+                            "a row under %s[%r] reports %s"
+                            % (name, key, found))
+
+    def test_a_preview_still_says_what_would_change(self):
+        """Renaming the keys must not remove the information."""
+        out = self.call("db_edit", table="items", dry_run=True,
+                        ops=[{"op": "update", "id": 1,
+                              "patch": {"name": "Zap"}}])
+        self.assertIn('"Potion" -> "Zap"', str(out))
+
+    def test_nothing_reached_the_disk(self):
+        """The claim the whole shape exists to make."""
+        for name, arguments in self.previews():
+            with self.subTest(tool=name):
+                before = self.data_bytes("Items")
+                self.call(name, **arguments)
+                self.assertEqual(self.data_bytes("Items"), before)
+
+    def test_a_real_write_still_reads_as_done(self):
+        out = self.call("db_edit", table="items",
+                        ops=[{"op": "update", "id": 1,
+                              "patch": {"name": "Zap"}}])
+        self.assertNotIn("dry_run", out)
+        self.assertIn("applied", out)
+        self.assertIn("changes", out["applied"][0])
+
+
+class TestNarrowingValidateActuallyNarrowsIt(ToolTest):
+    """`map_ids` exists to make a run cheap, and bought almost nothing.
+
+    `check_commands` built its `map_sizes` lookup from `iter_maps(project)`
+    with no ids, so every map file in the project was loaded and Marshal-
+    parsed even when the caller asked about one map. Parsing the maps is most
+    of what a validate costs, so `validate map_ids=[5] scopes=["events"]`
+    measured at 74% of a whole-project run.
+
+    The comment above it was right that the *check* cannot be narrowed -- a
+    transfer on map 1 can target any map -- but that is an argument about
+    which maps may be *looked up*, not about loading them all up front. A
+    lookup that parses a map the first time a Transfer Player names it
+    satisfies both.
+    """
+
+    def loaded_maps(self, **arguments):
+        """Which map files a validate run actually parsed.
+
+        Watched on `self.ctx.project`, which is the object the tool uses. It
+        was `self.project` -- a different object after a `reopen()` -- so the
+        spy saw nothing, `seen` came back empty, and the assertion passed
+        whatever the code did. Proving the guard is what surfaced that.
+        """
+        seen = []
+        project = self.ctx.project
+        original = project.load_map
+
+        def spy(map_id, refresh=False):
+            seen.append(map_id)
+            return original(map_id, refresh)
+
+        project.load_map = spy
+        self.addCleanup(setattr, project, "load_map", original)
+        self.call("validate", **arguments)
+        self.assertTrue(seen, "the spy observed no map loads at all, so this "
+                              "test cannot decide anything")
+        return seen
+
+    def test_a_narrowed_run_does_not_parse_every_map(self):
+        """A map nothing points at must not be read.
+
+        The fixture's two maps do not settle this: map 1 transfers to map 2,
+        so "loads every map" and "loads the maps its transfers name" are the
+        same set. A third map nobody references tells them apart.
+        """
+        spare = self.call("map_edit", op="create", name="Unreferenced",
+                          width=20, height=15)["map_id"]
+        self.ctx = self.reopen()
+
+        loaded = set(self.loaded_maps(map_ids=[1], scopes=["events"]))
+        self.assertNotIn(
+            spare, loaded,
+            "a run narrowed to map 1 parsed map %d, which nothing transfers "
+            "to, so map_ids bought nothing: parsed %s"
+            % (spare, sorted(loaded)))
+
+    def test_a_whole_run_still_checks_every_map(self):
+        """Narrowing the loading must not narrow the checking."""
+        out = self.call("validate", scopes=["events"])
+        self.assertNotIn("command_walk_stopped", out)
+
+    def test_a_transfer_to_an_undersized_map_is_still_caught(self):
+        """The finding the eager lookup existed to produce.
+
+        A Transfer Player on map 1 targeting a map that is too small must be
+        reported even though that map is outside `map_ids` -- which is the
+        whole reason the lookup covers every map.
+        """
+        target = None
+        for map_id, _ in self.project.entries("map_infos"):
+            if map_id != 1 and self.project.exists(self.project.map_file(map_id)):
+                target = map_id
+                break
+        if target is None:
+            self.skipTest("the fixture has only one map file")
+
+        small = self.project.load_map(target)
+        width, height = small.get("width"), small.get("height")
+        game_map = self.project.load_map(1)
+        event = game_map.get("events").sorted_items()[0][1]
+        command = RubyObject("RPG::EventCommand")
+        command.set("code", 201)
+        command.set("indent", 0)
+        # Well outside the target map, whatever size it is.
+        command.set("parameters", [0, target, width + 50, height + 50, 0, 0])
+        event.get("pages")[0].set("list", [command])
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+
+        out = self.call("validate", map_ids=[1], scopes=["events"])
+        rules = [f["rule"] for f in out["findings"]]
+        self.assertIn("transfer_outside_map", rules,
+                      "the transfer check stopped seeing maps outside the "
+                      "scope, which is what the eager lookup was for: %s"
+                      % rules)
+
+
+class TestATileTallyUsesTheBuffer(ToolTest):
+    """`_tile_counts` walked cell by cell; its own sibling proves the fast form.
+
+    `_cells_outside` in the same file counts over slices of the flat buffer,
+    and its docstring says why: "the per-cell version made two Python calls
+    for each of up to four million cells on a single-threaded server".
+    `_tile_counts` runs under the same four-million-cell budget and did the
+    per-cell version.
+    """
+
+    def test_the_tally_matches_a_cell_by_cell_count(self):
+        """The fast form has to agree with the slow one, layer by layer."""
+        from collections import Counter
+        data = self.project.load_map(1).get("data")
+        counts = map_tools._tile_counts(data)
+        for z in range(data.zsize):
+            slow: Counter = Counter()
+            for y in range(data.ysize):
+                for x in range(data.xsize):
+                    slow[data.get(x, y, z)] += 1
+            layer = counts[str(z)]
+            self.assertEqual(layer["distinct_tile_ids"], len(slow))
+            top = {row["tile_id"]: row["count"] for row in layer["most_common"]}
+            for tile_id, count in top.items():
+                self.assertEqual(count, slow[tile_id],
+                                 "layer %d tile %d" % (z, tile_id))
+
+    def test_a_tally_of_a_painted_map_finds_what_was_painted(self):
+        data = self.project.load_map(1).get("data")
+        data.set(0, 0, 0, 4242)
+        data.set(1, 0, 0, 4242)
+        counts = map_tools._tile_counts(data)
+        top = {row["tile_id"]: row["count"]
+               for row in counts["0"]["most_common"]}
+        self.assertEqual(top.get(4242), 2)
+
+    def test_every_layer_is_reported(self):
+        data = self.project.load_map(1).get("data")
+        counts = map_tools._tile_counts(data)
+        self.assertEqual(sorted(counts), sorted(str(z) for z in range(data.zsize)))

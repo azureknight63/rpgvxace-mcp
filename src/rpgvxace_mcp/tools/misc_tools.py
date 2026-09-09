@@ -28,6 +28,7 @@ from ..schema import (
     TILE_ID_RANGES_NOTE,
 )
 from .registry import (
+    write_reply,
     check_op_args,
     str_list,
     int_list,
@@ -335,7 +336,8 @@ def _set_script(ctx: Context, args: dict[str, Any], index: int) -> dict[str, Any
         out["renamed_to"] = name
     if code is not None:
         out["code_characters"] = len(code)
-    return out
+    # `renamed_to` reads as done, which on a preview it is not.
+    return write_reply(out, dry_run)
 
 
 @tool(

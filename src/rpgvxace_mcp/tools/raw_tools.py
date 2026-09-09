@@ -32,6 +32,7 @@ from ..rubytypes import (
 from ..schema import ALL_TABLE_KEYS
 from .map_tools import STRUCTURAL_MAP_FIELDS
 from .registry import (
+    write_reply,
     Context,
     named,
     DRY_RUN,
@@ -186,8 +187,12 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         write = write_landed.save(filename, dry_run=dry_run,
                                   tool="raw_data",
                                   summary="set %s" % "/".join(path))
-    return {"file": filename, "path": "/".join(path), "before": before,
-            "after": to_json(new_value, ctx.codec, "summary"), "write": write}
+    # `after` becomes `would_become` on a preview: it read as the value now
+    # on disk, which is the one thing a dry run guarantees it is not.
+    return write_reply(
+        {"file": filename, "path": "/".join(path), "before": before,
+         "after": to_json(new_value, ctx.codec, "summary"), "write": write},
+        dry_run)
 
 def _check_structural(path: list[str]) -> None:
     """Refuse any path into a map field the rest of the map has to agree with.

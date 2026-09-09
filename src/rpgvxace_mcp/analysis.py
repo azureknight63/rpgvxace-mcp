@@ -1124,11 +1124,16 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
     existing = {name: ids for name in REFERENCE_RULES if name != MAP_TARGET
                 for ids in [tables.ids(name)] if ids is not None}
 
-    # Every map, not just the scoped ones: a transfer on map 1 can target any
-    # map in the project, so narrowing this would make the check wrong rather
-    # than faster.
-    map_sizes = {map_id: (_int(m.get("width")), _int(m.get("height")))
-                 for map_id, m in iter_maps(project)}
+    # Every map is *reachable*, because a transfer on map 1 can target any
+    # map in the project -- but reachable is not the same as loaded. This was
+    # a dict comprehension over `iter_maps(project)` with no ids, so it
+    # parsed every Map### file even when the caller had narrowed the run, and
+    # parsing the maps is most of what a validate costs: `validate
+    # map_ids=[5] scopes=["events"]` measured at 74% of a whole-project run,
+    # which is the argument buying nothing. `_MapSizes` parses a map the
+    # first time a Transfer Player actually names it, so the check sees the
+    # same answers and a narrow run stays narrow.
+    map_sizes = _MapSizes(project)
     on_disk = set(project.map_ids_on_disk())
     check_parameters = project.command_layouts_modelled
 
@@ -1201,8 +1206,50 @@ def _labels_in(project: Project, commands: list[Any]) -> set[str]:
     }
 
 
+class _MapSizes:
+    """Map id to (width, height), parsed on first ask and remembered.
+
+    A dict was wrong for one reason only: building it read every map file in
+    the project. The rules that ask this reach for a handful of ids -- the
+    targets of the Transfer Player commands actually present -- so almost all
+    of that reading was for entries nobody looked up.
+
+    A map that will not parse answers (None, None), the same as a map with no
+    width: `check_maps` reports an unreadable file, and answering "unknown
+    size" here keeps this from reporting a second finding about it.
+    """
+
+    __slots__ = ("project", "_sizes")
+
+    def __init__(self, project: Project):
+        self.project = project
+        self._sizes: dict[int, tuple["int | None", "int | None"]] = {}
+
+    def get(self, map_id: int,
+            default: "tuple[int | None, int | None] | None" = None
+            ) -> "tuple[int | None, int | None]":
+        """The size of one map, parsed on first ask.
+
+        Named `get` with a default because that is how `_check_transfer` asks,
+        and because every id is answerable here: a map that will not parse
+        answers (None, None) rather than being absent, so the caller's default
+        is only reached when it passes an id and this returns nothing -- which
+        it does not. Kept in the signature so the call site reads unchanged.
+        """
+        if map_id not in self._sizes:
+            try:
+                game_map = self.project.load_map(map_id)
+            except (ProjectError, ValueError, OSError):
+                self._sizes[map_id] = (None, None)
+            else:
+                self._sizes[map_id] = (
+                    (_int(game_map.get("width")), _int(game_map.get("height")))
+                    if isinstance(game_map, RubyObject) else (None, None))
+        return self._sizes[map_id]
+
+
 def _check_transfer(map_id: int, params: list[Any], on_disk: AbstractSet[int],
-                    map_sizes: dict[int, tuple[int | None, int | None]],
+                    map_sizes: "_MapSizes",
                     here: Location) -> list[Finding]:
     """Transfer Player: does the target map exist, and are the coordinates on it?
 

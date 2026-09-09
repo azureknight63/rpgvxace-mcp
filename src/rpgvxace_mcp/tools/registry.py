@@ -242,6 +242,65 @@ ARR = "array"
 OBJ = "object"
 
 DRY_RUN = prop(BOOL, "Report what would change without writing anything to disk.")
+
+# What a preview calls each key a completed write would name in the past
+# tense.
+#
+# One table, because seven tools write and this fix used to live in exactly
+# one of them. The diagnosis, from the tool that had it: a preview answered
+# `applied: [{"op": "update", "id": 1, "changes": [...]}]`, every word of it
+# past tense, with the one field saying otherwise -- `write.dry_run` --
+# nested a level down, and a model reading the op rows concluded the change
+# had landed and did not retry it.
+#
+# `map_edit` is why this belongs here rather than in each tool: its create and
+# delete paths already said `dry_run` at the top level and used `would_write`
+# and `would_delete`, while its update and resize paths said `changes`. One
+# tool, two conventions, nothing for a caller to learn.
+PREVIEW_NAMES = {
+    "applied": "would_apply",
+    "changes": "would_change",
+    "changed": "would_change",
+    "created": "would_create",
+    "deleted": "would_delete",
+    "removed": "would_remove",
+    "restored": "would_restore",
+    "renamed_to": "would_rename_to",
+    "code_characters": "would_write_characters",
+    "after": "would_become",
+}
+
+
+def preview_row(row: dict[str, Any]) -> dict[str, Any]:
+    """One op row of a preview, renamed. Where a model reads what happened."""
+    return {PREVIEW_NAMES.get(key, key): value for key, value in row.items()}
+
+
+def write_reply(body: dict[str, Any], dry_run: bool) -> dict[str, Any]:
+    """One writing tool's reply, phrased for what actually happened.
+
+    A completed write keeps its own words -- `applied`, `changes` -- because
+    they are true. A preview says `dry_run` first, before the rows it carries,
+    and renames every key that would otherwise read as a completed change.
+    The descriptions either side of the rename are identical, which is the
+    point: a preview and the act have to be the same sentence, or the preview
+    is not one.
+
+    Idempotent, so a tool whose branch already phrased itself correctly can be
+    passed through without changing.
+    """
+    if not dry_run:
+        return body
+    out: dict[str, Any] = {"dry_run": True}
+    for key, value in body.items():
+        if key == "dry_run":
+            continue
+        if isinstance(value, list):
+            value = [preview_row(item) if isinstance(item, dict) else item
+                     for item in value]
+        out[PREVIEW_NAMES.get(key, key)] = value
+    return out
+
 REFRESH = prop(BOOL, "Re-read the file from disk instead of using the copy already "
                      "in memory. Use after the RPG Maker editor has saved.")
 

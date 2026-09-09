@@ -17,6 +17,7 @@ from ..project import ProjectError
 from ..rubytypes import RubyObject, RubyString
 from ..schema import ALL_DATABASE_TABLES, ALL_TABLE_KEYS, ARRAY, HASH, SCRIPTS, SINGLE
 from .registry import (
+    write_reply,
     bare_name,
     check_op_args,
     MAX_OPS,
@@ -440,38 +441,11 @@ def db_edit(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         summary = "; ".join("%s %s" % (item["op"], item["id"]) for item in applied)
         write = write_landed.save(filename, dry_run=dry_run, tool="db_edit",
                                   summary=summary)
-    return _edit_reply(table, applied, warnings, write, dry_run)
-
-
-def _edit_reply(table: str, applied: list[dict[str, Any]],
-                warnings: list[str], write: dict[str, Any],
-                dry_run: bool) -> dict[str, Any]:
-    """One db_edit reply, phrased for what actually happened.
-
-    A preview used to answer `applied: [{"op": "update", "id": 1, "changes":
-    [...]}]`, every word of it past tense, with the one field saying otherwise
-    -- `write.dry_run` -- nested a level down. A model reading the op rows
-    concluded the change had landed and did not retry it. So the mode is said
-    at the top level, and the two mode-dependent names follow the `would_*`
-    convention this file already uses for `would_write` and `would_delete`.
-
-    The descriptions are identical either way, which is the point: the preview
-    and the act have to be the same sentence, or the preview is not one.
-    """
-    if not dry_run:
-        return {"table": table, "applied": applied, "warnings": warnings,
-                "write": write}
-    return {
-        "table": table,
-        # First, so it is read before the rows are.
-        "dry_run": True,
-        "would_apply": [
-            {("would_change" if key == "changes" else key): value
-             for key, value in row.items()}
-            for row in applied],
-        "warnings": warnings,
-        "write": write,
-    }
+    # `write_reply` rather than a copy of the rule here: this file had the
+    # only correct version of it, and five of the other six writing tools
+    # phrased a preview as a completed write.
+    return write_reply({"table": table, "applied": applied,
+                        "warnings": warnings, "write": write}, dry_run)
 
 
 def _apply_db_ops(ctx: Context, table: str,

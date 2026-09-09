@@ -17,6 +17,7 @@ from ..project import MAX_MAP_ID, ProjectError
 from ..rubytypes import CELL_MASK, RubyHash, RubyObject, RubyString, Table
 from ..schema import TILE_ID_RANGES, TRIGGER_NAMES, new_map_info
 from .registry import (
+    write_reply,
     refuse_unknown_fields,
     check_op_args,
     known_fields,
@@ -351,12 +352,25 @@ def _tile_counts(data: Table) -> dict[str, Any]:
                "smaller window to ask for and map_tiles cannot count either. "
                "Read the layers you care about in pieces with map_tiles and "
                "count those.")
+    # One Counter per layer over a slice of the flat buffer, rather than a
+    # `data.get(x, y, z)` per cell -- two Python calls plus a bounds check and
+    # an index multiply, for up to the four million cells `_check_budget`
+    # allows. `_cells_outside` in this file already counts this way and its
+    # docstring gives this same reason; this walk simply had not been changed
+    # with it.
+    #
+    # It produces byte-identical results, which is the point and also why it
+    # carries no entry in `prove_guards`: reverting it changes nothing a
+    # correctness test can see, and a timing test would be a race.
+    # `TestATileTallyUsesTheBuffer.test_the_tally_matches_a_cell_by_cell_count`
+    # is what protects it -- it pins this form against the slow one, layer by
+    # layer -- and that is the honest description of a change with no
+    # observable behaviour of its own.
     out = {}
+    plane = data.xsize * data.ysize
+    buffer = data.data
     for z in range(data.zsize):
-        counter: Counter[int] = Counter()
-        for y in range(data.ysize):
-            for x in range(data.xsize):
-                counter[data.get(x, y, z)] += 1
+        counter: Counter[int] = Counter(buffer[z * plane:(z + 1) * plane])
         out[str(z)] = {
             "distinct_tile_ids": len(counter),
             "most_common": [{"tile_id": tile, "count": count,
@@ -665,7 +679,12 @@ def _apply_map_edit(ctx: Context, op: str, args: dict[str, Any], map_id: int,
                 "the rename did not land, so the map keeps its old name in "
                 "the editor's tree. Close the editor and run the rename "
                 "again; the map edit itself does not need repeating."))
-    return {"map_id": map_id, "op": op, "changes": changes, "writes": writes}
+    # Through `write_reply`, so these two ops say what create and delete
+    # already said. This is the tool that disagreed with itself: create and
+    # delete answered `dry_run` plus `would_write`/`would_delete`, and update
+    # and resize answered `changes: ["resized from 20x15 to 30x20"]`.
+    return write_reply({"map_id": map_id, "op": op, "changes": changes,
+                        "writes": writes}, dry_run)
 
 
 
@@ -1195,4 +1214,7 @@ def map_tiles(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                                   tool="map_tiles", summary=summary)
     region["changed"] = summary
     region["write"] = write
-    return region
+    # `changed` becomes `would_change`: "filled 5x5 at (0, 0) with tile 12"
+    # is a sentence about something that happened, and on a dry run it did
+    # not.
+    return write_reply(region, dry_run)
