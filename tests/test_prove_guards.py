@@ -260,6 +260,10 @@ class GuardTableTest(unittest.TestCase):
         idle = sorted(
             name for name, value in vars(guard_table).items()
             if (name.isupper() and isinstance(value, str)
+                # A file, not a prefix: `_SRC` is the shared
+                # "src/rpgvxace_mcp/" that thirty aliases are built from,
+                # and a directory is watched by no guard by definition.
+                and value.endswith(".py")
                 and (value.startswith("src/") or value.startswith("scripts/"))
                 and value not in used))
         self.assertEqual(idle, [],

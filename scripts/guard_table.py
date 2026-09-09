@@ -26,36 +26,48 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-CODEC = "src/rpgvxace_mcp/marshal_rb.py"
-SCHEMA = "src/rpgvxace_mcp/schema.py"
-DOCS = "src/rpgvxace_mcp/docs.py"
-MAP_COMMON = "src/rpgvxace_mcp/tools/map_common.py"
-MAP_READ = "src/rpgvxace_mcp/tools/map_read_tools.py"
-MAP_EDIT = "src/rpgvxace_mcp/tools/map_edit_tools.py"
-MAP_TILE = "src/rpgvxace_mcp/tools/map_tile_tools.py"
-MISC_TOOLS = "src/rpgvxace_mcp/tools/misc_tools.py"
-PROJECT = "src/rpgvxace_mcp/project.py"
-BACKUPS = "src/rpgvxace_mcp/backups.py"
-SERVER = "src/rpgvxace_mcp/server.py"
-WALK = "src/rpgvxace_mcp/analysis/walk.py"
-REFERENCES = "src/rpgvxace_mcp/analysis/references.py"
-LINT_FINDINGS = "src/rpgvxace_mcp/analysis/lint/findings.py"
-LINT_MAPS = "src/rpgvxace_mcp/analysis/lint/maps.py"
-LINT_PAGES = "src/rpgvxace_mcp/analysis/lint/pages.py"
-LINT_COMMANDS = "src/rpgvxace_mcp/analysis/lint/command_rules.py"
-LINT_ASSETS = "src/rpgvxace_mcp/analysis/lint/assets.py"
-LINT_DATABASE = "src/rpgvxace_mcp/analysis/lint/database.py"
-LINT_REPORT = "src/rpgvxace_mcp/analysis/lint/report.py"
-REGISTRY = "src/rpgvxace_mcp/tools/registry.py"
-DB_TOOLS = "src/rpgvxace_mcp/tools/db_tools.py"
-EVENT_TOOLS = "src/rpgvxace_mcp/tools/event_tools.py"
-COMMAND_DOCS = "src/rpgvxace_mcp/tools/command_docs_tools.py"
-CONVERT = "src/rpgvxace_mcp/convert.py"
-SAFETY = "src/rpgvxace_mcp/tools/pattern_safety.py"
-SEARCH_TOOLS = "src/rpgvxace_mcp/tools/search_tools.py"
-RAW_TOOLS = "src/rpgvxace_mcp/tools/raw_tools.py"
-COMMANDS = "src/rpgvxace_mcp/commands.py"
-RUBYTYPES = "src/rpgvxace_mcp/rubytypes.py"
+# Every source file a guard watches. `_SRC` is written once because the
+# prefix was repeated thirty times, and a typo in one of thirty is a
+# STALE verdict about a file that is fine.
+_SRC = "src/rpgvxace_mcp/"
+
+
+LINT_ASSETS = _SRC + "analysis/lint/assets.py"
+LINT_COMMANDS = _SRC + "analysis/lint/command_rules.py"
+LINT_DATABASE = _SRC + "analysis/lint/database.py"
+LINT_FINDINGS = _SRC + "analysis/lint/findings.py"
+LINT_MAPS = _SRC + "analysis/lint/maps.py"
+LINT_PAGES = _SRC + "analysis/lint/pages.py"
+LINT_REPORT = _SRC + "analysis/lint/report.py"
+
+
+REFERENCES = _SRC + "analysis/references.py"
+WALK = _SRC + "analysis/walk.py"
+
+
+BACKUPS = _SRC + "backups.py"
+COMMANDS = _SRC + "commands.py"
+CONVERT = _SRC + "convert.py"
+DOCS = _SRC + "docs.py"
+CODEC = _SRC + "marshal_rb.py"
+PROJECT = _SRC + "project.py"
+RUBYTYPES = _SRC + "rubytypes.py"
+SCHEMA = _SRC + "schema.py"
+SERVER = _SRC + "server.py"
+
+
+COMMAND_DOCS = _SRC + "tools/command_docs_tools.py"
+DB_TOOLS = _SRC + "tools/db_tools.py"
+EVENT_TOOLS = _SRC + "tools/event_tools.py"
+MAP_COMMON = _SRC + "tools/map_common.py"
+MAP_EDIT = _SRC + "tools/map_edit_tools.py"
+MAP_READ = _SRC + "tools/map_read_tools.py"
+MAP_TILE = _SRC + "tools/map_tile_tools.py"
+MISC_TOOLS = _SRC + "tools/misc_tools.py"
+SAFETY = _SRC + "tools/pattern_safety.py"
+RAW_TOOLS = _SRC + "tools/raw_tools.py"
+REGISTRY = _SRC + "tools/registry.py"
+SEARCH_TOOLS = _SRC + "tools/search_tools.py"
 
 
 class Guard:
@@ -91,138 +103,200 @@ class Guard:
         return list(zip(self.present, self.reverted))
 
 
-T = "tests/test_marshal.py::TestHostileInput::"
-L = "tests/test_marshal.py::TestLosslessEdgeCases::"
-PROF = "tests/test_schema.py::TestEngineProfiles::"
-OBS = "tests/test_schema.py::TestSchemaObservation::"
-SAFE = "tests/test_schema.py::TestResponseTextSafety::"
-UNMOD = "tests/test_schema.py::TestUnmodelledEngine::"
-PROV = "tests/test_schema.py::TestSchemaReportProvenance::"
-PATH = "tests/test_guards_writes.py::TestPathContainment::"
-PATHRO = "tests/test_guards_writes.py::TestPathContainmentReadOnly::"
-PRUNE = "tests/test_guards_writes.py::TestBackupPruning::"
-BOMB = "tests/test_guards_response.py::TestScriptInflateLimit::"
-STALE = "tests/test_guards_writes.py::TestStalenessDetection::"
-LOG = "tests/test_guards_writes.py::TestDeletionIsLogged::"
-FORM = "tests/test_guards_writes.py::TestScriptNameStringForm::"
-HOSTILE = "tests/test_guards_writes.py::TestHostileDataFolder::"
-RESTORE = "tests/test_guards_writes.py::TestRestoreValidatesBeforeActing::"
-RTP = "tests/test_guards_replies.py::TestRtpOverrideIsHonest::"
-HARD = "tests/test_protocol.py::TestTransportHardening::"
-VRTP = "tests/test_guards_replies.py::TestValidateRespectsTheRtp::"
-VTBL = "tests/test_guards_replies.py::TestValidateTellsUnreadableFromEmpty::"
-VPAGE = "tests/test_guards_replies.py::TestValidatePageNumbersMatchTheTools::"
-VMISS = "tests/test_guards_replies.py::TestValidateDistinguishesMissingFromBroken::"
-VHOST = "tests/test_guards_findings.py::TestValidateSurvivesHostileData::"
-VSCOPE = "tests/test_guards_replies.py::TestValidateScoping::"
-VSTART = "tests/test_guards_replies.py::TestValidateChecksTheStartPosition::"
-STAGE = "tests/test_guards_writes.py::TestNothingIsStaged::"
-DBID = "tests/test_guards_arguments.py::TestDatabaseIdsAreChecked::"
-COERCE = "tests/test_guards_arguments.py::TestArgumentsAreNotCoerced::"
-MAPW = "tests/test_guards_writes.py::TestMapWritesStayConsistent::"
-RAWD = "tests/test_guards_arguments.py::TestRawDataRefusesBreakage::"
-SEARCHED = "tests/test_guards_replies.py::TestSearchReportsWhatItSearched::"
-READ = "tests/test_guards_replies.py::TestSearchDoesNotClaimToHaveRead::"
-CREATE = "tests/test_guards_writes.py::TestMapCreateIsStaged::"
-SCRIPTAT = "tests/test_guards_replies.py::TestScriptHitsSayWhere::"
-SHAPE = "tests/test_guards_arguments.py::TestArgumentShapeIsEnforced::"
-ATFIELD = "tests/test_guards_fields.py::TestAtPrefixedFieldsAreRefused::"
-EVERY = "tests/test_guards_arguments.py::TestGuardsRunOnEveryPath::"
-TALLY = "tests/test_guards_replies.py::TestFindingCountsAreTrustworthy::"
-REDOS = "tests/test_guards_patterns.py::TestSearchRefusesTheHangingPattern::"
-DELSTALE = "tests/test_guards_writes.py::TestDeletingRespectsStaleness::"
-CANON = "tests/test_guards_arguments.py::TestMapIdsAreCanonical::"
-FIELD = "tests/test_guards_fields.py::TestAPatchCannotInventAField::"
-PERFILE = "tests/test_guards_writes.py::TestStagingIsPerFile::"
-BOUND = "tests/test_guards_walk_budget.py::TestCollectionIsBounded::"
-OPARG = "tests/test_guards_arguments.py::TestInapplicableArgumentsAreRefused::"
-NESTED = "tests/test_guards_fields.py::TestANestedPatchCannotInventAField::"
-ADDPAGE = "tests/test_guards_arguments.py::TestAddPageRefusesInsteadOfCrashing::"
-FAST = "tests/test_guards_patterns.py::TestSearchPatternsStayFast::"
-CLIP = "tests/test_guards_replies.py::TestSearchSaysWhatItDidNotRead::"
-MAPEV = "tests/test_guards_writes.py::TestAMapPatchCannotMoveAnEvent::"
-LAYOUT = "tests/test_guards_replies.py::TestCommandReferenceSaysWhoseLayoutsTheseAre::"
-RAWSCR = "tests/test_guards_arguments.py::TestRawDataWillNotHandBackCompressedScripts::"
-EMPTYC = "tests/test_guards_arguments.py::TestAnEmptyCommandListIsRefusedEverywhere::"
-PAGES = "tests/test_guards_findings.py::TestDamagedPagesAreRefusedNotCrashedOn::"
-REFCNT = "tests/test_guards_replies.py::TestReferenceCountsDoNotUnderstate::"
-DBARG = "tests/test_guards_arguments.py::TestDbGetArgumentsAreHonoured::"
-EMPTYT = "tests/test_guards_arguments.py::TestMapTilesNamesAnEmptyTable::"
-GROW = "tests/test_guards_walk_budget.py::TestGrowingAMapIsBoundedToo::"
-DROPPED = "tests/test_guards_writes.py::TestDiscardedTileCountIsRight::"
-LISTCAP = "tests/test_guards_walk_budget.py::TestOneCommandListHasACeiling::"
-SNAPDRY = "tests/test_guards_writes.py::TestSnapshotPreviewMatchesTheSnapshot::"
-BUDGET = "tests/test_guards_walk_budget.py::TestReadingManyEntriesSharesOneBudget::"
-AREAID = "tests/test_guards_arguments.py::TestHashTablesThatCarryTheirOwnId::"
-GATES = "tests/test_guards_arguments.py::TestEveryOpSelectingToolHasATable::"
-GATED = "tests/test_guards_arguments.py::TestOpArgumentsAreGatedEverywhere::"
-COMMON = "tests/test_guards_arguments.py::TestCommonEventOpsAreGatedToo::"
-BUDGETONE = "tests/test_guards_walk_budget.py::TestOneBudgetForAWholeResponse::"
-TILETALLY = "tests/test_guards_replies.py::TestTileTallySaysWhatItLeftOut::"
-MAPREFS = "tests/test_guards_replies.py::TestMapReferenceCountsDoNotUnderstate::"
-LOOKAROUND = "tests/test_guards_patterns.py::TestLookaroundIsRefusedByName::"
-CLOSED = "tests/test_guards_patterns.py::TestTheShapeGateFailsClosed::"
-WHOLE = "tests/test_guards_fields.py::TestAWholesaleObjectCannotInventFields::"
-NOOP = "tests/test_guards_arguments.py::TestNoOpSlipsPastTheGate::"
-READDROP = "tests/test_guards_arguments.py::TestReadToolsDropNoArgumentsEither::"
-FILTERED = "tests/test_guards_replies.py::TestAFilteredListSaysItWasFiltered::"
-UNREAD = "tests/test_guards_replies.py::TestUnreadableStructuresAreNotReportedAsEmpty::"
-TILESNONE = "tests/test_guards_arguments.py::TestMapGetHonoursTilesWithoutATable::"
-PAGEARG = "tests/test_guards_arguments.py::TestEventGetChecksThePageItWasGiven::"
-DELPREV = "tests/test_guards_writes.py::TestADeletePreviewMatchesTheDelete::"
-NILFILL = "tests/test_guards_arguments.py::TestRawDataCanFillANilField::"
-BOUNDED = "tests/test_guards_response.py::TestRefusalsAreBounded::"
-INERT = "tests/test_guards_arguments.py::TestSearchRefusesAnInertRegexFlag::"
-AMPLIFY = "tests/test_guards_walk_budget.py::TestSharedChildrenCannotAmplifyAWalk::"
-TYPED = "tests/test_guards_arguments.py::TestADeclaredTypeIsChecked::"
-BEFOREWORK = "tests/test_guards_arguments.py::TestARefusalComesBeforeTheWork::"
-SLOTID = "tests/test_guards_replies.py::TestAScriptSlotIdIsCalledAnId::"
-CACHEBOUND = "tests/test_guards_response.py::TestTheFileCacheIsBounded::"
-FOREIGN = "tests/test_guards_writes.py::TestAForeignBackupDirectoryIsSkipped::"
-ONCE = "tests/test_guards_arguments.py::TestAMapEditResolvesEachArgumentOnce::"
-CRAFTED = "tests/test_guards_replies.py::TestACraftedNameIsBoundedInAReplyToo::"
-ASSETSTALE = "tests/test_guards_writes.py::TestAnAssetAddedMidSessionIsSeen::"
-SPELLINGS = "tests/test_guards_arguments.py::TestTwoSpellingsOfOneArgumentAgree::"
-MAPSCOPE = "tests/test_guards_findings.py::TestTheMapScopeStopsCollecting::"
-DOCSAGREE = ("tests/test_schema.py::TestTheReferenceAgreesWithTheTables::")
-PREVIEW = "tests/test_guards_writes.py::TestEveryPreviewReadsAsAPreview::"
-NARROW = "tests/test_guards_findings.py::TestNarrowingValidateActuallyNarrowsIt::"
-TILEBUF = "tests/test_guards_response.py::TestATileTallyUsesTheBuffer::"
-SPENDS = "tests/test_guards_walk_budget.py::TestEveryWalkSpendsItsAllowance::"
-NOPAGES = "tests/test_guards_walk_budget.py::TestAnEventWithNoPagesStillCostsARow::"
-EMPTYPAGE = "tests/test_guards_walk_budget.py::TestAnEmptyPageStillCostsSomething::"
-BATCH = "tests/test_guards_walk_budget.py::TestOneBatchGetsOneWalkAllowance::"
-FAILCLOSED2 = ("tests/test_guards_patterns.py::TestTheMeasurementFailsClosedOnEveryAbnormalExit::")
-LENGTHS = "tests/test_guards_arguments.py::TestEveryDeclaredLengthLimitIsEnforced::"
-DSLINT = "tests/test_guards_arguments.py::TestTheDslRefusesACoercibleId::"
-DSLCHOICE = "tests/test_guards_arguments.py::TestAChoiceBranchIsNeverDropped::"
-CALLABLE = "tests/test_guards_fields.py::TestEveryConversionBranchIsCallable::"
-COUNTS = "tests/test_guards_replies.py::TestACountIsNamedForWhatItCounted::"
-DRYRUN = "tests/test_guards_writes.py::TestADryRunDoesNotReadAsDone::"
-SCOPECLAIM = "tests/test_guards_replies.py::TestAScopeIsClaimedOnlyOnceRead::"
-SUMMARY = "tests/test_guards_response.py::TestMapGetBoundsItsEventSummary::"
-BYTES = "tests/test_guards_response.py::TestARenderedCommandLineIsBoundedInBytes::"
-SLOTS = "tests/test_guards_walk_budget.py::TestASkippedPageSlotIsStillCountedForReading::"
-EVERYPATH = "tests/test_guards_replies.py::TestATruncatedSummarySaysSoOnEveryPath::"
-LISTEDNAME = "tests/test_guards_replies.py::TestAListedNameIsCappedLikeEveryOtherName::"
-RAWPATH = "tests/test_guards_response.py::TestARawPathCannotBeUnboundedlyLong::"
-SCOPEALLOW = "tests/test_guards_findings.py::TestEveryScopeSpendsTheSameAllowance::"
-DSLIDS = "tests/test_guards_arguments.py::TestEveryIdInTheDslRefusesACoercibleValue::"
-CRAFTEDCOMMON = "tests/test_guards_arguments.py::TestACraftedCommonEventIsReportedNotCrashed::"
-CHILD = "tests/test_guards_patterns.py::TestTheMeasurementReachesItsChild::"
-REMEMBERS = "tests/test_guards_patterns.py::TestWhatTheMeasurementRemembers::"
-SHAPECLOSED = "tests/test_guards_patterns.py::TestTheShapeGateFailsClosedThroughout::"
-NAMES = "tests/test_guards_fields.py::TestEveryNameFromJsonIsChecked::"
-HIDDEN = "tests/test_guards_fields.py::TestAnInventedFieldCannotHideInAContainer::"
-WRITEPATH = "tests/test_guards_walk_budget.py::TestEveryWalkOnAWritePathIsBounded::"
-CEILING = "tests/test_guards_findings.py::TestNoWalkCollectsPastTheCeiling::"
-CEILWALK = "tests/test_guards_findings.py::TestTheCeilingStopsTheWalkingToo::"
-SUBJECTS = "tests/test_guards_patterns.py::TestEveryNamedCharacterIsMeasured::"
-SEARCHWORK = "tests/test_guards_walk_budget.py::TestSearchBoundsItsTotalWork::"
-FAILCLOSED = "tests/test_guards_patterns.py::TestTheMeasurementFailsClosed::"
-ALPHABET = "tests/test_guards_patterns.py::TestTheAlphabetFailsClosed::"
-RIGHTCMD = "tests/test_guards_findings.py::TestAFindingNamesTheRightCommand::"
-ONETRUTH = "tests/test_guards_walk_budget.py::TestTheMapListingHasOneTruth::"
+# Every test class a guard names, grouped by the file it lives in and
+# alphabetical within the group. This block was ordered by line *width*,
+# so the thirty aliases for one suite were scattered across all 132 lines
+# and two carried gratuitous parentheses to satisfy the sort. The per-file
+# census is now visible by eye, which is what makes a future `tests/` split
+# a contiguous edit rather than a 132-line scan.
+
+
+def _at(module: str, cls: str) -> str:
+    """One test class, as `prove_guards` names it."""
+    return "tests/%s.py::%s::" % (module, cls)
+
+
+# test_guards_arguments
+DSLCHOICE = _at("test_guards_arguments", "TestAChoiceBranchIsNeverDropped")
+CRAFTEDCOMMON = _at(
+    "test_guards_arguments", "TestACraftedCommonEventIsReportedNotCrashed")
+TYPED = _at("test_guards_arguments", "TestADeclaredTypeIsChecked")
+ONCE = _at("test_guards_arguments", "TestAMapEditResolvesEachArgumentOnce")
+BEFOREWORK = _at("test_guards_arguments", "TestARefusalComesBeforeTheWork")
+ADDPAGE = _at("test_guards_arguments", "TestAddPageRefusesInsteadOfCrashing")
+EMPTYC = _at(
+    "test_guards_arguments", "TestAnEmptyCommandListIsRefusedEverywhere")
+SHAPE = _at("test_guards_arguments", "TestArgumentShapeIsEnforced")
+COERCE = _at("test_guards_arguments", "TestArgumentsAreNotCoerced")
+COMMON = _at("test_guards_arguments", "TestCommonEventOpsAreGatedToo")
+DBID = _at("test_guards_arguments", "TestDatabaseIdsAreChecked")
+DBARG = _at("test_guards_arguments", "TestDbGetArgumentsAreHonoured")
+PAGEARG = _at("test_guards_arguments", "TestEventGetChecksThePageItWasGiven")
+LENGTHS = _at(
+    "test_guards_arguments", "TestEveryDeclaredLengthLimitIsEnforced")
+DSLIDS = _at(
+    "test_guards_arguments", "TestEveryIdInTheDslRefusesACoercibleValue")
+GATES = _at("test_guards_arguments", "TestEveryOpSelectingToolHasATable")
+EVERY = _at("test_guards_arguments", "TestGuardsRunOnEveryPath")
+AREAID = _at("test_guards_arguments", "TestHashTablesThatCarryTheirOwnId")
+OPARG = _at("test_guards_arguments", "TestInapplicableArgumentsAreRefused")
+TILESNONE = _at("test_guards_arguments", "TestMapGetHonoursTilesWithoutATable")
+CANON = _at("test_guards_arguments", "TestMapIdsAreCanonical")
+EMPTYT = _at("test_guards_arguments", "TestMapTilesNamesAnEmptyTable")
+NOOP = _at("test_guards_arguments", "TestNoOpSlipsPastTheGate")
+GATED = _at("test_guards_arguments", "TestOpArgumentsAreGatedEverywhere")
+NILFILL = _at("test_guards_arguments", "TestRawDataCanFillANilField")
+RAWD = _at("test_guards_arguments", "TestRawDataRefusesBreakage")
+RAWSCR = _at(
+    "test_guards_arguments", "TestRawDataWillNotHandBackCompressedScripts")
+READDROP = _at("test_guards_arguments", "TestReadToolsDropNoArgumentsEither")
+INERT = _at("test_guards_arguments", "TestSearchRefusesAnInertRegexFlag")
+DSLINT = _at("test_guards_arguments", "TestTheDslRefusesACoercibleId")
+SPELLINGS = _at("test_guards_arguments", "TestTwoSpellingsOfOneArgumentAgree")
+
+
+# test_guards_fields
+NESTED = _at("test_guards_fields", "TestANestedPatchCannotInventAField")
+FIELD = _at("test_guards_fields", "TestAPatchCannotInventAField")
+WHOLE = _at("test_guards_fields", "TestAWholesaleObjectCannotInventFields")
+HIDDEN = _at("test_guards_fields", "TestAnInventedFieldCannotHideInAContainer")
+ATFIELD = _at("test_guards_fields", "TestAtPrefixedFieldsAreRefused")
+CALLABLE = _at("test_guards_fields", "TestEveryConversionBranchIsCallable")
+NAMES = _at("test_guards_fields", "TestEveryNameFromJsonIsChecked")
+
+
+# test_guards_findings
+RIGHTCMD = _at("test_guards_findings", "TestAFindingNamesTheRightCommand")
+PAGES = _at("test_guards_findings", "TestDamagedPagesAreRefusedNotCrashedOn")
+SCOPEALLOW = _at(
+    "test_guards_findings", "TestEveryScopeSpendsTheSameAllowance")
+NARROW = _at("test_guards_findings", "TestNarrowingValidateActuallyNarrowsIt")
+CEILING = _at("test_guards_findings", "TestNoWalkCollectsPastTheCeiling")
+CEILWALK = _at("test_guards_findings", "TestTheCeilingStopsTheWalkingToo")
+MAPSCOPE = _at("test_guards_findings", "TestTheMapScopeStopsCollecting")
+VHOST = _at("test_guards_findings", "TestValidateSurvivesHostileData")
+
+
+# test_guards_patterns
+SUBJECTS = _at("test_guards_patterns", "TestEveryNamedCharacterIsMeasured")
+LOOKAROUND = _at("test_guards_patterns", "TestLookaroundIsRefusedByName")
+FAST = _at("test_guards_patterns", "TestSearchPatternsStayFast")
+REDOS = _at("test_guards_patterns", "TestSearchRefusesTheHangingPattern")
+ALPHABET = _at("test_guards_patterns", "TestTheAlphabetFailsClosed")
+FAILCLOSED = _at("test_guards_patterns", "TestTheMeasurementFailsClosed")
+FAILCLOSED2 = _at(
+    "test_guards_patterns", "TestTheMeasurementFailsClosedOnEveryAbnormalExit")
+CHILD = _at("test_guards_patterns", "TestTheMeasurementReachesItsChild")
+CLOSED = _at("test_guards_patterns", "TestTheShapeGateFailsClosed")
+SHAPECLOSED = _at(
+    "test_guards_patterns", "TestTheShapeGateFailsClosedThroughout")
+REMEMBERS = _at("test_guards_patterns", "TestWhatTheMeasurementRemembers")
+
+
+# test_guards_replies
+COUNTS = _at("test_guards_replies", "TestACountIsNamedForWhatItCounted")
+CRAFTED = _at("test_guards_replies", "TestACraftedNameIsBoundedInAReplyToo")
+FILTERED = _at("test_guards_replies", "TestAFilteredListSaysItWasFiltered")
+LISTEDNAME = _at(
+    "test_guards_replies", "TestAListedNameIsCappedLikeEveryOtherName")
+SCOPECLAIM = _at("test_guards_replies", "TestAScopeIsClaimedOnlyOnceRead")
+SLOTID = _at("test_guards_replies", "TestAScriptSlotIdIsCalledAnId")
+EVERYPATH = _at(
+    "test_guards_replies", "TestATruncatedSummarySaysSoOnEveryPath")
+LAYOUT = _at(
+    "test_guards_replies", "TestCommandReferenceSaysWhoseLayoutsTheseAre")
+TALLY = _at("test_guards_replies", "TestFindingCountsAreTrustworthy")
+MAPREFS = _at("test_guards_replies", "TestMapReferenceCountsDoNotUnderstate")
+REFCNT = _at("test_guards_replies", "TestReferenceCountsDoNotUnderstate")
+RTP = _at("test_guards_replies", "TestRtpOverrideIsHonest")
+SCRIPTAT = _at("test_guards_replies", "TestScriptHitsSayWhere")
+READ = _at("test_guards_replies", "TestSearchDoesNotClaimToHaveRead")
+SEARCHED = _at("test_guards_replies", "TestSearchReportsWhatItSearched")
+CLIP = _at("test_guards_replies", "TestSearchSaysWhatItDidNotRead")
+TILETALLY = _at("test_guards_replies", "TestTileTallySaysWhatItLeftOut")
+UNREAD = _at(
+    "test_guards_replies", "TestUnreadableStructuresAreNotReportedAsEmpty")
+VSTART = _at("test_guards_replies", "TestValidateChecksTheStartPosition")
+VMISS = _at(
+    "test_guards_replies", "TestValidateDistinguishesMissingFromBroken")
+VPAGE = _at("test_guards_replies", "TestValidatePageNumbersMatchTheTools")
+VRTP = _at("test_guards_replies", "TestValidateRespectsTheRtp")
+VSCOPE = _at("test_guards_replies", "TestValidateScoping")
+VTBL = _at("test_guards_replies", "TestValidateTellsUnreadableFromEmpty")
+
+
+# test_guards_response
+RAWPATH = _at("test_guards_response", "TestARawPathCannotBeUnboundedlyLong")
+BYTES = _at("test_guards_response", "TestARenderedCommandLineIsBoundedInBytes")
+TILEBUF = _at("test_guards_response", "TestATileTallyUsesTheBuffer")
+SUMMARY = _at("test_guards_response", "TestMapGetBoundsItsEventSummary")
+BOUNDED = _at("test_guards_response", "TestRefusalsAreBounded")
+BOMB = _at("test_guards_response", "TestScriptInflateLimit")
+CACHEBOUND = _at("test_guards_response", "TestTheFileCacheIsBounded")
+
+
+# test_guards_walk_budget
+SLOTS = _at(
+    "test_guards_walk_budget", "TestASkippedPageSlotIsStillCountedForReading")
+EMPTYPAGE = _at(
+    "test_guards_walk_budget", "TestAnEmptyPageStillCostsSomething")
+NOPAGES = _at(
+    "test_guards_walk_budget", "TestAnEventWithNoPagesStillCostsARow")
+BOUND = _at("test_guards_walk_budget", "TestCollectionIsBounded")
+WRITEPATH = _at(
+    "test_guards_walk_budget", "TestEveryWalkOnAWritePathIsBounded")
+SPENDS = _at("test_guards_walk_budget", "TestEveryWalkSpendsItsAllowance")
+GROW = _at("test_guards_walk_budget", "TestGrowingAMapIsBoundedToo")
+BATCH = _at("test_guards_walk_budget", "TestOneBatchGetsOneWalkAllowance")
+BUDGETONE = _at("test_guards_walk_budget", "TestOneBudgetForAWholeResponse")
+LISTCAP = _at("test_guards_walk_budget", "TestOneCommandListHasACeiling")
+BUDGET = _at(
+    "test_guards_walk_budget", "TestReadingManyEntriesSharesOneBudget")
+SEARCHWORK = _at("test_guards_walk_budget", "TestSearchBoundsItsTotalWork")
+AMPLIFY = _at(
+    "test_guards_walk_budget", "TestSharedChildrenCannotAmplifyAWalk")
+ONETRUTH = _at("test_guards_walk_budget", "TestTheMapListingHasOneTruth")
+
+
+# test_guards_writes
+DELPREV = _at("test_guards_writes", "TestADeletePreviewMatchesTheDelete")
+DRYRUN = _at("test_guards_writes", "TestADryRunDoesNotReadAsDone")
+FOREIGN = _at("test_guards_writes", "TestAForeignBackupDirectoryIsSkipped")
+MAPEV = _at("test_guards_writes", "TestAMapPatchCannotMoveAnEvent")
+ASSETSTALE = _at("test_guards_writes", "TestAnAssetAddedMidSessionIsSeen")
+PRUNE = _at("test_guards_writes", "TestBackupPruning")
+DELSTALE = _at("test_guards_writes", "TestDeletingRespectsStaleness")
+LOG = _at("test_guards_writes", "TestDeletionIsLogged")
+DROPPED = _at("test_guards_writes", "TestDiscardedTileCountIsRight")
+PREVIEW = _at("test_guards_writes", "TestEveryPreviewReadsAsAPreview")
+HOSTILE = _at("test_guards_writes", "TestHostileDataFolder")
+CREATE = _at("test_guards_writes", "TestMapCreateIsStaged")
+MAPW = _at("test_guards_writes", "TestMapWritesStayConsistent")
+STAGE = _at("test_guards_writes", "TestNothingIsStaged")
+PATH = _at("test_guards_writes", "TestPathContainment")
+PATHRO = _at("test_guards_writes", "TestPathContainmentReadOnly")
+RESTORE = _at("test_guards_writes", "TestRestoreValidatesBeforeActing")
+FORM = _at("test_guards_writes", "TestScriptNameStringForm")
+SNAPDRY = _at("test_guards_writes", "TestSnapshotPreviewMatchesTheSnapshot")
+PERFILE = _at("test_guards_writes", "TestStagingIsPerFile")
+STALE = _at("test_guards_writes", "TestStalenessDetection")
+
+# test_marshal
+T = _at("test_marshal", "TestHostileInput")
+L = _at("test_marshal", "TestLosslessEdgeCases")
+
+
+# test_protocol
+HARD = _at("test_protocol", "TestTransportHardening")
+
+
+# test_schema
+PROF = _at("test_schema", "TestEngineProfiles")
+SAFE = _at("test_schema", "TestResponseTextSafety")
+OBS = _at("test_schema", "TestSchemaObservation")
+PROV = _at("test_schema", "TestSchemaReportProvenance")
+DOCSAGREE = _at("test_schema", "TestTheReferenceAgreesWithTheTables")
+UNMOD = _at("test_schema", "TestUnmodelledEngine")
 
 
 GUARDS = [

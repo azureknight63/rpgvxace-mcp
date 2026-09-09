@@ -1809,3 +1809,73 @@ class TestEveryDeclaredOpLeadsItsReply(unittest.TestCase):
         self.assertTrue(sampled, "read no sampled ops, so this checked none")
         self.assertEqual(sorted(set(sampled) - declared), [],
                          "these are sampled and no schema declares them")
+
+
+class TestEveryDeclaredTypeIsInTheTable(unittest.TestCase):
+    """`_check_declared` enforces every type the schemas actually declare.
+
+    It was four `elif declared == X and not isinstance(...)` branches, and
+    the comment above the table that replaced them said a fifth declared
+    type "was enforced only if someone remembered to add a fifth branch".
+    That is still true of the table -- a table is not self-completing --
+    so this is the direction that matters: a type a schema declares and the
+    table does not hold is a type nothing checks, and the argument would
+    read as closed while the hole stayed open.
+
+    `INT` is deliberately outside the table: it delegates to `as_int`,
+    which refuses a bool and a non-integral float in words of its own.
+    """
+
+    def declared(self):
+        """Every `"type"` any registered tool's schema names, at any depth."""
+        found = set()
+
+        def walk(node):
+            if isinstance(node, dict):
+                kind = node.get("type")
+                if isinstance(kind, str):
+                    found.add(kind)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        for tool in REGISTRY.values():
+            walk(tool.schema)
+        self.assertGreater(len(found), 3, "read almost no declared types")
+        return found
+
+    def test_every_declared_type_is_enforced(self):
+        from rpgvxace_mcp.tools.registry import INT, _DECLARED_TYPES
+        held = set(_DECLARED_TYPES) | {INT}
+        # "object" appears as the schema envelope's own type rather than as
+        # an argument's, and an argument declared OBJ is in the table.
+        missing = sorted(self.declared() - held - {"object"})
+        self.assertEqual(
+            missing, [],
+            "these types are declared by a tool schema and "
+            "`_check_declared` holds none of them, so nothing checks "
+            "them: " + ", ".join(missing))
+
+    def test_nothing_in_the_table_is_undeclared(self):
+        """The other direction: an entry for a type nothing uses is dead."""
+        from rpgvxace_mcp.tools.registry import _DECLARED_TYPES
+        idle = sorted(set(_DECLARED_TYPES) - self.declared())
+        self.assertEqual(idle, [],
+                         "the table holds these and no schema declares "
+                         "them: " + ", ".join(idle))
+
+    def test_each_entry_refuses_the_wrong_shape(self):
+        """So an entry cannot be a name with no enforcement behind it."""
+        from rpgvxace_mcp.tools.registry import (
+            STR, ToolError, _check_declared,
+        )
+        wrong = {str: 1, bool: "yes", list: {}, dict: []}
+        from rpgvxace_mcp.tools.registry import _DECLARED_TYPES
+        for declared, (kind, said) in _DECLARED_TYPES.items():
+            with self.subTest(declared=declared):
+                with self.assertRaises(ToolError) as caught:
+                    _check_declared("k", wrong[kind], {"type": declared})
+                self.assertIn(said, str(caught.exception))
+        self.assertIn(STR, _DECLARED_TYPES)
