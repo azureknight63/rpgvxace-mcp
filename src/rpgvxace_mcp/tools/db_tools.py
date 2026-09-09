@@ -270,12 +270,28 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         "table": prop(STR, "Which table to read from. Not scripts -- a slot "
                            "body is compressed Ruby, so the scripts tool "
                            "reads those.", enum=READABLE_DATABASE_TABLES),
-        "ids": prop(ARR, "Entry ids to read; at most %d per call."
-                    % MAX_IDS_PER_CALL, items={"type": INT},
+        # The same bound `id` declares below, and deliberately no maximum:
+        # asking about an id that does not exist is a legitimate question, and
+        # the answer -- "missing_ids", with a note on whether db_edit could
+        # create it -- is more use than a refusal. MAX_ENTRY_ID is the ceiling
+        # on what this server will *create*, which is a different question.
+        #
+        # The two used to disagree: `ids=[999999999]` was accepted and
+        # `id=999999999` refused, one request with two spellings and two
+        # answers about what is legal.
+        "ids": prop(ARR, "Entry ids to read; at most %d per call. An id with "
+                         "no entry comes back under \"missing_ids\" rather "
+                         "than as an error." % MAX_IDS_PER_CALL,
+                    items={"type": INT, "minimum": 0},
                     maxItems=MAX_IDS_PER_CALL),
-        "id": prop(INT, "A single entry id, if you only want one. Ids run "
-                        "from 1 to %d." % MAX_ENTRY_ID, minimum=0,
-                   maximum=MAX_ENTRY_ID),
+        # No maximum, matching `ids` above: this reads, and a read of an id
+        # that is not there is answered rather than refused. It used to carry
+        # `maximum=MAX_ENTRY_ID` -- the *create* ceiling -- while `ids` had
+        # none, so the same request refused or succeeded depending on how it
+        # was spelled.
+        "id": prop(INT, "A single entry id, if you only want one. The editor "
+                        "numbers entries from 1; an id with no entry comes "
+                        "back under \"missing_ids\".", minimum=0),
         "tables": prop(STR, "How to render RGSS Table fields such as parameter "
                             "curves: summary (shape only, the default) or full "
                             "(every cell).", enum=list(TABLE_MODES)),
@@ -303,7 +319,10 @@ def db_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         return {"table": table, "entry": to_json(value, ctx.codec, mode)}
 
     ids = int_list(args, "ids", MAX_IDS_PER_CALL, minimum=0)
-    single = opt_int(args, "id", minimum=0, maximum=MAX_ENTRY_ID)
+    # No maximum, matching `ids` above. MAX_ENTRY_ID is the create ceiling,
+    # and this reads: an id with no entry is answered under "missing_ids",
+    # with a note on whether db_edit could fill it in.
+    single = opt_int(args, "id", minimum=0)
     if single is not None:
         ids.append(single)
     if not ids:

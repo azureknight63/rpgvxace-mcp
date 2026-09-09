@@ -581,15 +581,13 @@ class EngineProfile:
         return _TABLE_ABSENCE_HINTS.get(
             key, "It belongs to a different engine in the VX family.")
 
-    def filename_for(self, key: str) -> str:
-        return self.data_file(key).filename(self.extension)
-
-    def map_filename(self, map_id: int) -> str:
-        return map_filename(map_id, self.extension)
-
-    def database_tables(self) -> list[str]:
-        return sorted(k for k, f in self.data_files.items()
-                      if f.container in (ARRAY, HASH))
+    # Three methods used to sit here -- `filename_for`, `map_filename` and
+    # `database_tables` -- and nothing in the project or its tests called any
+    # of them. `Project` answers the first two for the open project (and is
+    # what every caller uses), and the tools build their table lists from
+    # `ALL_DATABASE_TABLES`, which is a union across engines because a schema
+    # is built before a project is open. A public method with no caller is
+    # something a reader has to understand and cannot check.
 
     # -- objects --------------------------------------------------------------
     def new_audio_file(self, kind: str = "bgm", name: str = "",

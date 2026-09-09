@@ -276,7 +276,15 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
                                  "maximum": MAX_EVENT_ID},
                           maxItems=MAX_EVENT_IDS_PER_CALL),
         "name_contains": prop(STR, "Only events whose name contains this text."),
-        "page": prop(INT, "Only this page index (0-based)."),
+        # The negative case is said out loud because a caller who learned
+        # `-1` from raw_data's paths -- where it does mean the last element --
+        # will try it here. This module's own comment further down calls that
+        # silence "the one reading a caller could not check".
+        "page": prop(INT, "Only this page index (0-based). A negative "
+                          "index such as -1 is refused rather than "
+                          "counted from the end: "
+                          "raw_data's paths do count from the end, and these "
+                          "two tools differ on that.", minimum=0),
         "include_raw": prop(BOOL, "Include raw command objects as well as the "
                                   "readable script."),
         "refresh": REFRESH,
@@ -435,7 +443,11 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                              "maximum": MAX_EVENT_ID,
                              "description": "Which event to act on, 1 to %d."
                                             % MAX_EVENT_ID},
-                "page": {"type": INT, "description": "Page index, 0-based (default 0)."},
+                "page": {"type": INT, "minimum": 0, "description":
+                         "Page index, 0-based (default 0). A negative "
+                         "index such as -1 is refused rather than "
+                         "counted from the end, unlike raw_data's "
+                         "paths."},
                 "name": {"type": STR, "description": "Event name, for create/update."},
                 "x": {"type": INT, "minimum": 0, "description":
                       "Tile X, for create, update and move."},

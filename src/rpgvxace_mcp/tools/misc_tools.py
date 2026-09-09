@@ -225,16 +225,39 @@ def _schema_report(ctx: Context, refresh: bool) -> dict[str, Any]:
                         items={"type": INT}, maxItems=MAX_MAP_IDS),
         "limit": prop(INT, "Maximum findings to return (default %d)."
                       % DEFAULT_LIMIT, minimum=1, maximum=MAX_FINDINGS),
+        # Named here rather than shared as REFRESH, because for this tool it
+        # means one thing more than it does elsewhere: it also forgets the
+        # remembered asset listings, which is the only way a graphic added
+        # after the last run stops being reported as missing.
+        "refresh": prop(BOOL, "Re-read the project from disk instead of using "
+                              "the copies already in memory, and look at the "
+                              "asset folders again. Use this after adding a "
+                              "graphic or audio file that a previous run "
+                              "reported as missing, or after the editor has "
+                              "saved."),
     }),
 )
 def validate(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
-    """Run the cross-reference checks. Reads only."""
+    """Run the cross-reference checks. Reads only.
+
+    `refresh` drops both caches. Without it the asset listings are remembered
+    for the life of the process -- an RTP folder holds hundreds of files and
+    the asset walk asks for the same kinds repeatedly -- so a developer who
+    followed this tool's advice and added the missing graphic was told it was
+    still missing, every run, until the server restarted.
+    """
     scopes = scopes_arg(args, "scopes", VALIDATE_SCOPES)
     # int_list, so a map id here is read exactly as it is everywhere else:
     # the local reader this replaced refused the integral 2.0 that every other
     # tool accepts, so sibling tools answered the same JSON differently.
     map_ids = int_list(args, "map_ids", MAX_MAP_IDS,
                        minimum=1, maximum=MAX_MAP_ID) or None
+    if opt_bool(args, "refresh"):
+        # Both caches: the data files are re-read by the checks themselves on
+        # a cleared cache, and the asset listings have to be dropped
+        # explicitly because nothing else ever invalidates them.
+        ctx.project.forget_cached()
+        ctx.project.forget_assets()
     return run_validate(ctx.project, scopes, map_ids,
                         opt_int(args, "limit", DEFAULT_LIMIT) or DEFAULT_LIMIT)
 

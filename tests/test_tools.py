@@ -6311,3 +6311,204 @@ class TestTheMapScopeStopsCollecting(ToolTest):
         found = self.analysis.check_maps(self.project, [1], tables)
         self.assertTrue(any("999" in f.message for f in found),
                         [f.message for f in found])
+
+
+class TestTwoSpellingsOfOneArgumentAgree(ToolTest):
+    """`db_get id=N` and `db_get ids=[N]` are the same request.
+
+    `id` declares and enforces `minimum=0, maximum=MAX_ENTRY_ID`; `ids`
+    declared `items: {"type": "integer"}` with no bounds and enforced only a
+    minimum. So `db_get ids=[999999999]` was accepted and `db_get
+    id=999999999` refused -- one request, two spellings, two answers about
+    what is a legal id. `event_get`'s `event_ids` already shows the correct
+    pattern: declared item bounds matching the `int_list` call.
+    """
+
+    HUGE = 999999999
+
+    def test_both_spellings_answer_a_high_id_the_same_way(self):
+        """Agreement is the property; which verdict is a separate question.
+
+        They now agree on answering rather than refusing, because reading an
+        id that is not there is a legitimate question and `missing_ids` plus a
+        note on whether db_edit could create it is more use than an error.
+        MAX_ENTRY_ID is the ceiling on what this server will *create*.
+        """
+        one = self.call("db_get", table="items", id=self.HUGE)
+        many = self.call("db_get", table="items", ids=[self.HUGE])
+        self.assertEqual(one["missing_ids"], [self.HUGE])
+        self.assertEqual(one["missing_ids"], many["missing_ids"])
+
+    def test_both_spellings_accept_a_legal_id(self):
+        one = self.call("db_get", table="items", id=1)
+        many = self.call("db_get", table="items", ids=[1])
+        self.assertEqual(one["entries"], many["entries"])
+
+    def test_the_schema_declares_the_same_bound_on_both(self):
+        """A caller reads the schema before calling, not the source."""
+        properties = REGISTRY["db_get"].schema["properties"]
+        self.assertEqual(properties["ids"]["items"].get("minimum"),
+                         properties["id"].get("minimum"))
+        self.assertEqual(properties["ids"]["items"].get("maximum"),
+                         properties["id"].get("maximum"),
+                         "one spelling declares a ceiling the other does not, "
+                         "so the same request is legal or not depending on "
+                         "how it is written")
+
+    def test_a_high_id_still_gets_advice_about_creating_it(self):
+        """The reason the looser bound is the right agreement.
+
+        db_get tells a caller which missing ids db_edit could fill in. With a
+        maximum on both spellings that advice was unreachable, because the
+        request never got past the argument check.
+        """
+        out = self.call("db_get", table="items", ids=[1, 500000])
+        self.assertIn("500000", str(out["missing_ids"]))
+        self.assertIn("500000", out["note"])
+
+
+class TestTheNegativeIndexConventionIsDeclared(ToolTest):
+    """`-1` means "the last one" in raw_data and is refused by both event tools.
+
+    `event_get`'s own source says so -- "`event_edit` refuses the same value
+    while `raw_data` gives -1 the opposite meaning, so silence here was the
+    one reading a caller could not check" -- and then neither event tool's
+    description mentions it. A model that learned `-1` from `raw_data` tries
+    it on `event_edit` and gets "event 3 has pages 0, 1, not -1", a refusal
+    that never says the convention differs by tool.
+    """
+
+    def descriptions_of(self, tool_name, argument):
+        return REGISTRY[tool_name].schema["properties"][argument]["description"]
+
+    def test_raw_data_still_counts_from_the_end(self):
+        out = self.call("raw_data", table="system", path="party_members/-1")
+        self.assertIn("value", out)
+
+    def test_both_event_tools_still_refuse_it(self):
+        with self.assertRaises(ToolError):
+            self.call("event_get", map_id=1, page=-1)
+        with self.assertRaises(ToolError):
+            self.call("event_edit", map_id=1, dry_run=True, ops=[
+                {"op": "set_page", "event_id": 1, "page": -1, "patch": {}}])
+
+    def test_event_get_says_the_convention_does_not_apply(self):
+        text = self.descriptions_of("event_get", "page")
+        self.assertIn("-1", text,
+                      "the description does not mention the value a caller "
+                      "will try after reading raw_data's: %r" % text)
+
+    def test_event_edit_says_it_too(self):
+        page = REGISTRY["event_edit"].schema["properties"]["ops"]["items"][
+            "properties"]["page"]["description"]
+        self.assertIn("-1", page,
+                      "the description does not mention it: %r" % page)
+
+    def test_raw_data_still_documents_its_own(self):
+        """The tool that does support it must keep saying so."""
+        self.assertIn("-1", self.descriptions_of("raw_data", "path"))
+
+
+class TestNoDeadPublicApi(unittest.TestCase):
+    """A public method nothing calls is a method a reader has to understand.
+
+    Four were never referenced from src or tests: `EngineProfile.filename_for`
+    (duplicating `Project.filename_for`, which is the one that is used),
+    `EngineProfile.database_tables`, `EngineProfile.map_filename`, and
+    `Project.forget_assets` -- whose own sibling docstring instructs callers
+    to call it.
+    """
+
+    # `Project.forget_assets` is deliberately not here. It looked dead too,
+    # and turned out to be the only cure for a live bug -- see
+    # TestAnAssetAddedMidSessionIsSeen. Unreferenced is a reason to ask why,
+    # not a reason to delete.
+    GONE = ("EngineProfile.filename_for", "EngineProfile.database_tables",
+            "EngineProfile.map_filename")
+
+    def test_they_are_gone(self):
+        from rpgvxace_mcp.project import Project
+        from rpgvxace_mcp.schema import EngineProfile
+        owners = {"EngineProfile": EngineProfile, "Project": Project}
+        still_here = []
+        for dotted in self.GONE:
+            owner, method = dotted.split(".")
+            if hasattr(owners[owner], method):
+                still_here.append(dotted)
+        self.assertEqual(still_here, [],
+                         "these are unreferenced from src and tests; remove "
+                         "them or give them a caller")
+
+    def test_nothing_calls_one_on_a_profile(self):
+        """A call site left behind is worse than the method.
+
+        Matched on the receiver, not the bare name: `filename_for` and
+        `map_filename` are live and correct on `Project` and as a module
+        function in `schema`, and only the `EngineProfile` methods went. A
+        grep for the bare names flags all three of those, which is how a test
+        ends up describing something other than what it checks.
+        """
+        root = Path(__file__).resolve().parent.parent / "src"
+        calls = []
+        for path in sorted(root.rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            for dotted in self.GONE:
+                method = dotted.split(".")[1]
+                for receiver in ("profile.", "PROFILE.", "_profile."):
+                    if receiver + method in text:
+                        calls.append("%s calls %s%s"
+                                     % (path.name, receiver, method))
+        self.assertEqual(calls, [], "; ".join(calls))
+
+
+class TestAnAssetAddedMidSessionIsSeen(ToolTest):
+    """validate says a graphic is missing; the developer adds it; validate agrees.
+
+    The asset listing is cached per folder for the life of the process, and
+    nothing invalidated it, so the second validate reported the same missing
+    graphic as the first -- and would have gone on doing so until the server
+    was restarted. `Project.forget_assets` fixes it and had no caller; every
+    other read tool already takes `refresh` for this exact reason.
+    """
+
+    def point_an_enemy_at(self, name):
+        enemy = self.project.get_entry("enemies", 1)
+        enemy.set("battler_name", self.project.codec.make_string(name))
+        self.project.save_file(self.project.filename_for("enemies"),
+                               tool="test", summary="battler")
+
+    def rules(self, **arguments):
+        out = self.call("validate", scopes=["assets"], **arguments)
+        return sorted({f["rule"] for f in out["findings"]})
+
+    def add_battler(self, name):
+        folder = self.tmp / "project" / "Graphics" / "Battlers"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / ("%s.png" % name)).write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def test_validate_takes_refresh(self):
+        """Every other read tool does, and this is the tool that needs it."""
+        self.assertIn("refresh", REGISTRY["validate"].schema["properties"])
+
+    def test_an_added_graphic_stops_being_reported(self):
+        self.point_an_enemy_at("BrandNew")
+        self.assertIn("missing_graphic", self.rules())
+
+        self.add_battler("BrandNew")
+        self.assertEqual(
+            self.rules(refresh=True), [],
+            "the graphic is on disk and validate still reports it missing, "
+            "so the developer has no way to confirm the fix short of "
+            "restarting the server")
+
+    def test_without_refresh_the_cached_answer_is_kept(self):
+        """The cache is deliberate: refresh is the way to say "look again"."""
+        self.point_an_enemy_at("BrandNew")
+        self.assertIn("missing_graphic", self.rules())
+        self.add_battler("BrandNew")
+        self.assertIn("missing_graphic", self.rules())
+
+    def test_refresh_does_not_invent_findings(self):
+        out = self.call("validate", refresh=True)
+        plain = self.call("validate")
+        self.assertEqual(out["counts"], plain["counts"])

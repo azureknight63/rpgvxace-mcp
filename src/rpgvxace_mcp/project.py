@@ -1080,8 +1080,10 @@ class Project:
         and the engine accepts several formats per kind.
 
         Listed once per run and remembered: an RTP folder holds hundreds of
-        files, and `validate` asks for the same kinds repeatedly. Call
-        :meth:`forget_assets` after adding files to a project mid-session.
+        files, and `validate` asks for the same kinds repeatedly.
+        :meth:`forget_assets` drops them, and `validate refresh=true` is what
+        calls it -- without which a graphic added after a run that reported it
+        missing went on being reported missing until the server restarted.
         """
         cached = self._assets.get(kind)
         if cached is not None:
@@ -1113,6 +1115,15 @@ class Project:
     def forget_assets(self) -> None:
         """Drop the remembered asset listings, so the next check re-reads them."""
         self._assets.clear()
+
+    def forget_cached(self) -> None:
+        """Drop the decoded files, so the next read comes from disk.
+
+        The per-file `refresh` argument does this one file at a time, which is
+        right for a tool that names its file. `validate` reads most of the
+        project and cannot name them all, so it drops the lot.
+        """
+        self._cache.clear()
 
     def describe(self) -> dict[str, Any]:
         files = []

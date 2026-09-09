@@ -158,6 +158,8 @@ NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
 BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
 INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
 AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
+ASSETSTALE = ("tests/test_tools.py::TestAnAssetAddedMidSessionIsSeen::")
+SPELLINGS = ("tests/test_tools.py::TestTwoSpellingsOfOneArgumentAgree::")
 MAPSCOPE = ("tests/test_tools.py::TestTheMapScopeStopsCollecting::")
 DOCSAGREE = ("tests/test_schema.py::TestTheReferenceAgreesWithTheTables::")
 PREVIEW = ("tests/test_tools.py::TestEveryPreviewReadsAsAPreview::")
@@ -1854,6 +1856,22 @@ GUARDS = [
         "  5 modulo. Operand types: 0 constant, 1 variable, 2 random range.",""",
         [DOCSAGREE + "test_the_ace_document_does_not_claim_the_unknown_operands"],
         'six live tables were hand-typed into the document as prose and one had already drifted into contradicting the module it describes: it stated the Control Variables operand types as a closed set while commands.py records that VX Ace reorganised everything above 2 into a layout this server does not model -- in the one section of an engine-keyed document that was not engine-aware',
+    ),
+    Guard(
+        'validate can be told to look at the disk again', MISC_TOOLS,
+        """    if opt_bool(args, "refresh"):""",
+        """    if False:""",
+        [ASSETSTALE + "test_an_added_graphic_stops_being_reported"],
+        "the asset listings are remembered for the life of the process and nothing invalidated them, so a developer who followed this tool's advice and added the missing graphic was told it was still missing on every later run until the server restarted -- demonstrated on a copy of the real 39-map project",
+    ),
+    Guard(
+        'two spellings of one id agree about what is legal', DB_TOOLS,
+        """                        "back under \\"missing_ids\\".", minimum=0),""",
+        """                        "back under \\"missing_ids\\".", minimum=0,
+                   maximum=MAX_ENTRY_ID),""",
+        [SPELLINGS + "test_both_spellings_answer_a_high_id_the_same_way",
+         SPELLINGS + "test_the_schema_declares_the_same_bound_on_both"],
+        'db_get ids=[999999999] was accepted while db_get id=999999999 was refused -- one request, two spellings, two answers about what is a legal entry id',
     ),
 ]
 
