@@ -48,6 +48,7 @@ a number that does not predict the cost.
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import sys
 from typing import Any
 
@@ -279,14 +280,23 @@ _CATEGORY_SAMPLES = {
 # and `measure_cost` did the right thing with the wrong question, refusing an
 # ordinary Japanese search as unsafe. RPG Maker is Japanese software; that is
 # not an edge case. stdin has no such limit.
+# The one exit code that is not a refusal. Chosen so it cannot be confused
+# with an ordinary interpreter exit (0 success, 1 traceback, 2 bad usage) or
+# with a signal death, and reported by the child rather than guessed at by the
+# parent -- see `measure_cost`.
+COMPILE_FAILED_EXIT = 17
+
 _CHILD = (
     "import base64, re, sys\n"
     "lines = sys.stdin.read().split()\n"
     "pattern = base64.b64decode(lines[0]).decode('utf-8')\n"
-    "compiled = re.compile(pattern, re.IGNORECASE)\n"
+    "try:\n"
+    "    compiled = re.compile(pattern, re.IGNORECASE)\n"
+    "except re.error:\n"
+    "    sys.exit(%d)\n"
     "for encoded in lines[1:]:\n"
     "    compiled.search(base64.b64decode(encoded).decode('utf-8'))\n"
-    "print('ok')\n")
+    "print('ok')\n") % COMPILE_FAILED_EXIT
 
 # Patterns already measured and passed, in this process. A model searching for
 # the same thing across several scopes would otherwise pay for a child each
@@ -299,15 +309,18 @@ _CHILD = (
 # the other direction: a pattern that finished in milliseconds against subjects
 # built from its own characters will do so again, and `search`'s deadline
 # bounds it in use regardless.
-# A set, not a map of pattern to verdict, so that "passes only" is a fact
-# about the type rather than a rule a future edit can break: `measure_cost`
-# returns on any hit here, so a refusal that ever got stored would be served
-# as a pass. There is nowhere to put one.
+# Patterns that passed, and nothing else. `measure_cost` returns on any hit
+# here, so a refusal that ever got stored would be served as a pass -- which
+# is why only `_remember` writes to this, and only on a pass.
+#
+# A dict whose values are never read, rather than a set, purely for the
+# insertion order: eviction has to be oldest-first. An earlier version of this
+# comment claimed it was a set and that "there is nowhere to put" a refusal,
+# directly above a `dict[str, None]`, and the sentence about insertion order
+# sat on MAX_MEASURED_CACHED where it described neither.
 _PASSED: "dict[str, None]" = {}
 
-# And a ceiling, since a caller can supply endlessly many distinct patterns.
-# A dict rather than a set only for the insertion order, which makes eviction
-# oldest-first; the values are never read.
+# A ceiling, since a caller can supply endlessly many distinct patterns.
 MAX_MEASURED_CACHED = 512
 
 
@@ -431,24 +444,43 @@ def measure_cost(pattern: str) -> None:
 
     encode = (lambda text:
               base64.b64encode(text.encode("utf-8")).decode("ascii"))
-    command = [sys.executable, "-c", _CHILD]
+    # -I isolates: it drops '' -- the process's current working directory --
+    # from the child's sys.path, and ignores PYTHONPATH, sitecustomize and
+    # usercustomize. Without it, `python -c` puts the CWD first, so a `re.py`
+    # or `base64.py` sitting in the directory the server was started in would
+    # be imported and executed by the first regex search of the session. The
+    # CWD is routinely the project folder -- the README's own invocation makes
+    # it so -- and the project folder is the one thing this server's threat
+    # model treats as untrusted. The child needs nothing but the stdlib, so
+    # isolation costs it nothing. `cwd` is set as well, so the answer does not
+    # depend on how the client happened to launch us.
+    command = [sys.executable, "-I", "-c", _CHILD]
     payload = "\n".join([encode(pattern)]
                         + [encode(subject) for subject in _subjects(pattern)])
     verdict: "str | None" = None
     try:
         done = subprocess.run(command, capture_output=True, text=True,
-                              timeout=PREFLIGHT_SECONDS, input=payload)
-        if done.returncode != 0 and "error" not in (done.stderr or "").lower():
-            # A child that died for a reason other than a bad pattern: killed
-            # by a signal, out of memory, or a `sys.executable` that is not an
-            # interpreter. Refused, because this is the bound -- and `verdict
-            # = None` sat here under this same comment, which is a no-op on a
-            # variable already None, so an unmeasured pattern was recorded as
-            # a measured pass and then run in-process.
+                              timeout=PREFLIGHT_SECONDS, input=payload,
+                              cwd=tempfile.gettempdir())
+        if done.returncode == COMPILE_FAILED_EXIT:
+            # The one carve-out, deliberately: the caller's own `re.compile`
+            # reports a syntax error far better than this could, and
+            # `_matcher` turns that into a ToolError. Returned rather than
+            # remembered -- nothing was measured, so there is no pass to cache.
+            return
+        if done.returncode != 0:
+            # A child that died for any other reason: killed by a signal, out
+            # of memory, or a `sys.executable` that is not an interpreter.
+            # Refused, because this is the bound.
             #
-            # A compile failure is the one exception, deliberately: the
-            # caller's own `re.compile` reports a syntax error far better than
-            # this could, and `_matcher` turns that into a ToolError.
+            # This condition used to read `and "error" not in stderr.lower()`,
+            # a substring test standing in for "was this a compile error?".
+            # It matched MemoryError, RecursionError, ImportError and the
+            # `error: unknown option -c` of a non-interpreter -- so four of
+            # six abnormal exits skipped the refusal AND reached `_remember`,
+            # caching an unmeasured pattern as a measured pass for the life of
+            # the process. Measured, not theorised. The child now says which
+            # case it is, because only the child knows.
             verdict = (
                 "this server's safety check on that pattern exited abnormally "
                 "(code %d), so it will not run the pattern either -- a match "

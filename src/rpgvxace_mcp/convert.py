@@ -310,7 +310,13 @@ def _to_json_value(value: Any, codec: TextCodec, tables: str, walk: _Walk) -> An
     if isinstance(value, RubyString):
         return _string_to_json(value, codec, tables, walk)
     if isinstance(value, (bytes, bytearray)):
-        return _string_to_json(RubyString(bytes(value)), codec)
+        # All four arguments. This read as a handled case and passed two of
+        # them, so any bare `bytes` reaching here raised TypeError -- which
+        # server.py reports to the model as "an argument was not the shape the
+        # tool expected", a diagnosis about the caller for a defect in here.
+        # Nothing in the reader produces a bare `bytes` today, so the line had
+        # never run; a branch that crashes when reached is not a handled case.
+        return _string_to_json(RubyString(bytes(value)), codec, tables, walk)
     if isinstance(value, list):
         return [_to_json(v, codec, tables, walk) for v in value]
     if isinstance(value, RubyHash):
@@ -792,6 +798,16 @@ def refuse_invented_in_replacement(existing: Any, replacement: Any,
                     old_values[key], item, "%s[%r]" % (path, key), depth + 1)
         return
     if isinstance(replacement, list) and isinstance(existing, list):
+        # One pass over `existing` to find the first object of each class,
+        # rather than a fresh scan per replacement element. The scan
+        # short-circuited only on a match, so its worst case was an existing
+        # list with no objects in it at all: a field holding a million
+        # integers patched with ten thousand objects is 10^10 isinstance calls
+        # on the write path, before anything is written.
+        first_of_class: dict[str, RubyObject] = {}
+        for old in existing:
+            if isinstance(old, RubyObject) and old.cls not in first_of_class:
+                first_of_class[old.cls] = old
         for index, item in enumerate(replacement):
             here = "%s[%d]" % (path, index)
             if isinstance(item, (list, RubyHash)):
@@ -805,9 +821,7 @@ def refuse_invented_in_replacement(existing: Any, replacement: Any,
                 continue
             if not isinstance(item, RubyObject):
                 continue
-            twin = next((old for old in existing
-                         if isinstance(old, RubyObject) and old.cls == item.cls),
-                        None)
+            twin = first_of_class.get(item.cls)
             if twin is not None:
                 refuse_invented_in_replacement(twin, item, here, depth + 1)
 

@@ -23,7 +23,7 @@ from ..convert import (
     normalize_strings,
     to_json,
 )
-from ..analysis import CommandBudget
+from ..analysis import WalkBudget
 from ..project import MAX_MAP_ID
 from ..rubytypes import RubyHash, RubyObject, RubyString
 from ..schema import (
@@ -220,7 +220,7 @@ def _text(ctx: Context, value: Any) -> str:
 
 def _page_view(ctx: Context, page: RubyObject, index: int,
                include_raw: bool, walk: Any,
-               budget: "CommandBudget | None" = None) -> dict[str, Any]:
+               budget: "WalkBudget | None" = None) -> dict[str, Any]:
     commands = page.get("list") or []
     if budget is not None and not budget.spend(len(commands)):
         # Charged before rendering, because rendering is the cost: a page whose
@@ -306,7 +306,7 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         # `take` rather than `spend`: one list has no surrounding loop, so a
         # prefix is worth more than nothing. `command_count` stays the real
         # length either way -- what was rendered is a separate fact.
-        command_budget = CommandBudget()
+        command_budget = WalkBudget()
         walk = new_walk()
         shown = commands[:command_budget.take(len(commands))]
         triggers = {0: "none", 1: "autorun", 2: "parallel"}
@@ -335,11 +335,15 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     # And one allowance for the commands themselves, which is a different
     # budget from the JSON one: `new_walk` bounds how much a value expands
     # into a reply, and this bounds how many commands are visited at all.
-    command_budget = CommandBudget()
+    command_budget = WalkBudget()
     events = game_map.get("events")
     unreadable = unreadable_events_note(events)
     if unreadable:
-        return {"map_id": map_id, "events": [], "events_note": unreadable}
+        # `matching_events` on every path, including this one: two of the
+        # three returns carried it and this one did not, so a caller reading
+        # the count had to know which shape it had been given.
+        return {"map_id": map_id, "events": [], "matching_events": 0,
+                "events_note": unreadable}
     if events is None:
         return {"map_id": map_id, "events": [], "matching_events": 0}
 
@@ -355,6 +359,11 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 
     out = []
     for event_id, event in events.sorted_items():
+        # One step per event before anything about it is read. `_page_view`
+        # spends the same budget per page, but an event with no pages reached
+        # none of that -- and the events hash's size comes out of the file.
+        if not command_budget.spend(1):
+            break
         if not isinstance(event, RubyObject):
             continue
         if wanted and event_id not in wanted:

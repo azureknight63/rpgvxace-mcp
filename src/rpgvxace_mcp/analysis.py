@@ -243,17 +243,25 @@ def _text(project: Project, value: Any) -> str:
     return text
 
 
-# How many event commands one call may visit. A real project's largest map has
-# a few thousand across all its pages; this is far above that. It exists
-# because a file's *rendered* size is not its size on disk: Ruby Marshal has
-# object links, so one command, a list of two thousand links to it, fifty
-# links to that page and fifty links to that event is 7 KB describing five
-# million command visits -- measured at 36 seconds in event_get.
-MAX_COMMANDS_WALKED = 200_000
+# How many nodes one call may visit on the event walk -- events, pages and
+# commands alike. A real project's largest map is a few thousand all told;
+# this is far above that. It exists because a file's *rendered* size is not
+# its size on disk: Ruby Marshal has object links, so one command, a list of
+# two thousand links to it, fifty links to that page and fifty links to that
+# event is 7 KB describing five million visits -- measured at 36 seconds in
+# event_get.
+#
+# Nodes, not commands, and the name says so because the first version of this
+# counted only commands: every charge was `spend(len(commands))`, which is
+# zero for a page holding an empty list, so an 18.4 KB map describing four
+# million (event, page) pairs was walked in full -- `search` taking 5.7s and
+# reporting no stop signal at all, because the deadline it does have is only
+# tested inside the command loop that never ran.
+MAX_WALK_STEPS = 200_000
 
 
-class CommandBudget:
-    """How much of the command walk one call has left, and whether it ran out.
+class WalkBudget:
+    """How much of the event walk one call has left, and whether it ran out.
 
     Passed in by the caller rather than started per traversal, so a tool that
     walks several times -- validate runs a command check and an asset check --
@@ -269,15 +277,23 @@ class CommandBudget:
 
     __slots__ = ("remaining", "exhausted")
 
-    def __init__(self, limit: int = MAX_COMMANDS_WALKED):
+    def __init__(self, limit: int = MAX_WALK_STEPS):
         self.remaining = limit
         self.exhausted = False
 
-    def spend(self, commands: int) -> bool:
-        """Charge for one command list. False once there is nothing left."""
+    def spend(self, steps: int) -> bool:
+        """Charge for one visit. False once there is nothing left.
+
+        At least one step, whatever ``steps`` says. A caller inside a loop
+        that charges nothing per iteration has no bound at all, and every
+        charge in this project was `spend(len(commands))` -- zero for a page
+        holding an empty list. Enforced here rather than at each call site for
+        the same reason the finding ceiling lives on `_AssetChecker`: the one
+        call site that carried a guard is the one that got it wrong.
+        """
         if self.exhausted:
             return False
-        self.remaining -= commands
+        self.remaining -= max(1, steps)
         if self.remaining < 0:
             self.exhausted = True
             return False
@@ -306,16 +322,16 @@ class CommandBudget:
         """What to tell the caller, or None if the walk finished."""
         if not self.exhausted:
             return None
-        return ("this project's event commands number more than the %d %s "
-                "reads in one call, so the walk stopped early and this answer "
-                "is incomplete. That happens when a file shares objects by "
-                "reference far more than the editor does -- run validate, and "
-                "narrow the request (fewer maps, or one event) to see the "
-                "rest." % (MAX_COMMANDS_WALKED, what))
+        return ("this project's events, pages and commands together number "
+                "more than the %d %s visits in one call, so the walk stopped "
+                "early and this answer is incomplete. That happens when a "
+                "file shares objects by reference far more than the editor "
+                "does -- run validate, and narrow the request (fewer maps, or "
+                "one event) to see the rest." % (MAX_WALK_STEPS, what))
 
 
 def iter_command_lists(project: Project, map_ids: list[int] | None = None,
-                       budget: "CommandBudget | None" = None
+                       budget: "WalkBudget | None" = None
                        ) -> Iterator[tuple[Location, list[Any]]]:
     """Every event command list in the project, with where it came from.
 
@@ -329,17 +345,26 @@ def iter_command_lists(project: Project, map_ids: list[int] | None = None,
     ``budget`` bounds how many commands the walk visits in total. Without one
     it is unbounded, which is right for a caller that has already bounded
     itself and wrong for anything reading a file it did not write -- see
-    :class:`CommandBudget`.
+    :class:`WalkBudget`.
     """
     for map_id, game_map in iter_maps(project, map_ids):
         events = game_map.get("events")
         if not isinstance(events, RubyHash):
             continue
         for event_id, event in events.sorted_items():
+            # One step for the event, and one for every page slot, before
+            # anything about them is read. This is where the product is
+            # bought: charging only for commands meant a map of empty pages
+            # cost nothing, and skipping a slot that is not an RPG::Event::Page
+            # would leave a list of four million integers free as well.
+            if budget is not None and not budget.spend(1):
+                return
             if not isinstance(event, RubyObject):
                 continue
             name = _text(project, event.get("name"))
             for page_index, page in enumerate(_seq(event.get("pages"))):
+                if budget is not None and not budget.spend(1):
+                    return
                 if isinstance(page, RubyObject):
                     commands = _seq(page.get("list"))
                     if budget is not None and not budget.spend(len(commands)):
@@ -538,7 +563,8 @@ class ReferencePreview:
 
 
 def reference_preview(project: Project, table: str, entry_id: int,
-                      what: str) -> ReferencePreview:
+                      what: str,
+                      budget: "WalkBudget | None" = None) -> ReferencePreview:
     """Ask what points at ``entry_id``, bounded, with the answer's own limits.
 
     ``what`` names the scan in the note a stopped walk produces, so the
@@ -548,7 +574,11 @@ def reference_preview(project: Project, table: str, entry_id: int,
     steps has been got wrong in one copy and not the other. See
     `find_references` for why the budget is not optional.
     """
-    budget = CommandBudget()
+    # The caller's allowance when it has one, so a db_edit carrying two
+    # hundred deletes gets one walk allowance and not two hundred. `validate`
+    # states the rule for itself -- "One allowance for every command walk this
+    # call makes" -- and this is the same rule one tool over.
+    budget = WalkBudget() if budget is None else budget
     # One past the preview, so a full page can be told from a page that
     # happens to be exactly full.
     found = find_references(project, table, entry_id, budget,
@@ -559,7 +589,7 @@ def reference_preview(project: Project, table: str, entry_id: int,
 
 
 def find_references(project: Project, table: str, entry_id: int,
-                    budget: CommandBudget,
+                    budget: WalkBudget,
                     limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
     """Find event commands that mention ``entry_id`` from ``table``.
 
@@ -763,13 +793,13 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
     # One allowance for every command walk this call makes. A file that
     # shares objects by reference can render as millions of commands from a few
     # kilobytes, and neither the Marshal reader nor MAX_FINDINGS bounds that.
-    walk_budget = CommandBudget()
+    walk_budget = WalkBudget()
     if "events" in scopes and len(findings) < MAX_FINDINGS:
         ran.append("event command structure and references (plus every common "
                    "event and troop page, which belong to the project rather "
                    "than to a map)")
         findings += check_commands(project, ids, tables, walk_budget)
-        findings += check_event_pages(project, ids)
+        findings += check_event_pages(project, ids, walk_budget)
     if "assets" in scopes and len(findings) < MAX_FINDINGS:
         ran.append("graphic and audio file references")
         findings += check_assets(project, ids, walk_budget)
@@ -1081,11 +1111,11 @@ def check_tilesets(project: Project, map_ids: list[int],
 
 
 def check_commands(project: Project, map_ids: list[int], tables: _Tables,
-                   budget: "CommandBudget | None" = None) -> list[Finding]:
+                   budget: "WalkBudget | None" = None) -> list[Finding]:
     """Every event command list: structure, and the ids the commands name.
 
     ``budget`` is shared with the asset walk, so one validate call spends one
-    allowance across both -- see :class:`CommandBudget`.
+    allowance across both -- see :class:`WalkBudget`.
     """
     findings = []
     # A table absent from this mapping is one that could not be read, so
@@ -1226,7 +1256,8 @@ def check_list_terminator(location: Location, commands: list[Any]) -> list[Findi
     return []
 
 
-def check_event_pages(project: Project, map_ids: list[int]) -> list[Finding]:
+def check_event_pages(project: Project, map_ids: list[int],
+                      budget: "WalkBudget | None" = None) -> list[Finding]:
     """Page-level rules: pages a later page hides, and autoruns that never end.
 
     Both turn on the same engine fact: RPG Maker runs the *last* page whose
@@ -1245,9 +1276,18 @@ def check_event_pages(project: Project, map_ids: list[int]) -> list[Finding]:
             # forty thousand slots produced forty thousand findings here.
             if len(findings) >= MAX_FINDINGS:
                 return findings
+            # And a ceiling on findings cannot bound a walk that finds
+            # nothing: this rule collects only for an *unconditional* page, so
+            # one condition flag set on a crafted page made it walk every page
+            # of every event for free. This walk does not go through
+            # `iter_command_lists`, so it needs its own charge.
+            if budget is not None and not budget.spend(1):
+                return findings
             if not isinstance(event, RubyObject):
                 continue
             pages = _seq(event.get("pages"))
+            if budget is not None and not budget.spend(len(pages)):
+                return findings
             name = _text(project, event.get("name"))
             findings += _check_shadowing(map_id, event_id, name, pages)
             findings += _check_autorun(map_id, event_id, name, pages)
@@ -1424,7 +1464,7 @@ class _AssetChecker:
 
 
 def check_assets(project: Project, map_ids: list[int],
-                 budget: "CommandBudget | None" = None) -> list[Finding]:
+                 budget: "WalkBudget | None" = None) -> list[Finding]:
     """Graphic and audio names, against the files present.
 
     Covers what an agent is most likely to break: map parallaxes and
@@ -1445,14 +1485,23 @@ def check_assets(project: Project, map_ids: list[int],
     ones this looks at".
     """
     checker = _AssetChecker(project)
-    _check_map_assets(project, checker, map_ids)
+    _check_map_assets(project, checker, map_ids, budget)
     _check_command_assets(project, checker, map_ids, budget)
     _check_database_assets(project, checker)
     return checker.findings
 
 
 def _check_map_assets(project: Project, checker: _AssetChecker,
-                      map_ids: list[int]) -> None:
+                      map_ids: list[int],
+                      budget: "WalkBudget | None" = None) -> None:
+    """Map, event and page graphic and audio references.
+
+    Takes the budget `_check_command_assets` has always taken. Without it the
+    only bound here was the collector's finding ceiling, and a page whose
+    graphic name is empty produces no finding at all -- `_AssetChecker.check`
+    returns before it counts anything -- so a crafted map of empty graphics
+    walked events x pages for nothing.
+    """
     for map_id, game_map in iter_maps(project, map_ids):
         # The collector refuses past its ceiling on its own; this stops the
         # loading and decoding too. One crafted map is events x pages, and
@@ -1481,11 +1530,15 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
         for event_id, event in events.sorted_items():
             if checker.full:
                 return
+            if budget is not None and not budget.spend(1):
+                return
             if not isinstance(event, RubyObject):
                 continue
             name = _text(project, event.get("name"))
             for page_index, page in enumerate(_seq(event.get("pages"))):
                 if checker.full:
+                    return
+                if budget is not None and not budget.spend(1):
                     return
                 if not isinstance(page, RubyObject):
                     continue
@@ -1497,7 +1550,7 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
 
 def _check_command_assets(project: Project, checker: _AssetChecker,
                           map_ids: list[int],
-                          budget: "CommandBudget | None" = None) -> None:
+                          budget: "WalkBudget | None" = None) -> None:
     if not project.command_layouts_modelled:
         # An unmodelled engine's parameter layouts are different: XP's Show
         # Text keeps the message where Ace keeps the face graphic, so these

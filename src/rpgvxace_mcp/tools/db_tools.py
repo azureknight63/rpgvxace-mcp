@@ -9,6 +9,7 @@ from ..analysis import (
     REFERENCE_PREVIEW,
     REFERENCE_RULES,
     ReferencePreview,
+    WalkBudget,
     reference_preview,
 )
 from ..convert import TABLE_MODES, apply_patch, new_walk, to_json
@@ -500,7 +501,7 @@ class _DbRequest:
     Also collects the warnings, which several ops add to.
     """
 
-    __slots__ = ("ctx", "table", "container", "kind", "warnings")
+    __slots__ = ("ctx", "table", "container", "kind", "warnings", "walk")
 
     def __init__(self, ctx: Context, table: str, container: Any, kind: str):
         self.ctx = ctx
@@ -508,6 +509,13 @@ class _DbRequest:
         self.container = container
         self.kind = kind
         self.warnings: list[str] = []
+        # One allowance for every reference scan this call makes. A delete
+        # asks what still points at the entry, and that walk returns early
+        # only when it finds hits -- so `ops` carrying two hundred deletes of
+        # unreferenced entries used to get two hundred separate allowances,
+        # two hundred whole-project traversals in one uninterruptible call.
+        # `validate` states the same rule for itself one module over.
+        self.walk = WalkBudget()
 
     def entry_id(self, raw_op: dict[str, Any], op: str,
                  existing: bool) -> int:
@@ -647,8 +655,8 @@ def _op_delete(request: _DbRequest, raw_op: dict[str, Any],
     # traversal. `reference_preview` carries all three facts, because each of
     # them used to be derived here and again in map_edit.
     preview = (reference_preview(ctx.project, table, entry_id,
-                                 "a delete's reference scan") if scanned
-               else ReferencePreview([], False, None))
+                                 "a delete's reference scan", request.walk)
+               if scanned else ReferencePreview([], False, None))
     references, more_than_shown = preview.rows, preview.truncated
     incomplete = preview.incomplete
     if kind == ARRAY:

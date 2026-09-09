@@ -164,6 +164,72 @@ class GuardTableTest(unittest.TestCase):
                          "these guards watch the same line, so merge them "
                          "and keep both test lists")
 
+    def test_every_named_test_exists(self):
+        """A guard whose test cannot be collected is a guard proving nothing.
+
+        The full run reports these as BROKEN, which is correct but costs forty
+        minutes. `--check` cannot see them at all: it counts anchor
+        occurrences in the *source* and never looks at the test side. Four
+        guards were in this state at once, three of them naming methods that
+        had been renamed and one naming a class it never belonged to -- the
+        result of two module-level aliases sharing a name, so the second
+        assignment silently redirected the first's guards.
+        """
+        import ast
+
+        root = Path(__file__).resolve().parent.parent
+        methods: dict[str, set[str]] = {}
+        for path in sorted((root / "tests").glob("test_*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    key = "%s::%s" % (path.name, node.name)
+                    methods[key] = {
+                        child.name for child in node.body
+                        if isinstance(child, (ast.FunctionDef,
+                                              ast.AsyncFunctionDef))}
+
+        def inherited(file_name: str, class_name: str) -> set[str]:
+            """Methods on a class, including those it inherits in-file.
+
+            A suite that shares a fixture through a mixin -- SharedObjectMap,
+            EmptyPageMap -- keeps its test methods on the subclass, but a
+            guard may legitimately name one defined on a base.
+            """
+            found = set(methods.get("%s::%s" % (file_name, class_name), ()))
+            for key, names in methods.items():
+                if key.endswith("::%s" % class_name):
+                    found |= names
+            return found
+
+        missing = []
+        for guard in prove_guards.GUARDS:
+            for test in guard.tests:
+                parts = test.split("::")
+                file_name = parts[0].rsplit("/", 1)[-1]
+                if not (root / "tests" / file_name).exists():
+                    missing.append("%s -> no such file: %s"
+                                   % (guard.name, test))
+                    continue
+                if len(parts) < 2:
+                    continue
+                class_name = parts[1]
+                if not any(key.endswith("::%s" % class_name)
+                           for key in methods):
+                    missing.append("%s -> no such class: %s"
+                                   % (guard.name, test))
+                    continue
+                if len(parts) < 3:
+                    continue
+                if parts[2] not in inherited(file_name, class_name):
+                    missing.append("%s -> no such test: %s"
+                                   % (guard.name, test))
+        self.assertEqual(
+            missing, [],
+            "these guards name tests that cannot be collected, so a full run "
+            "reports them BROKEN and --check reports nothing:\n  "
+            + "\n  ".join(missing))
+
     def test_reverting_a_guard_actually_changes_the_file(self):
         """A guard whose reverted text equals its present text reverts nothing."""
         for guard in prove_guards.GUARDS:

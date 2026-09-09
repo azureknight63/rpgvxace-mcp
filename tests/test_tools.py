@@ -16,6 +16,7 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from build_project import build  # noqa: E402
 
 from rpgvxace_mcp import marshal_rb  # noqa: E402
+from rpgvxace_mcp.commands import CommandError  # noqa: E402
 from rpgvxace_mcp.analysis import (  # noqa: E402
     MAX_FINDINGS,
     REFERENCE_PREVIEW,
@@ -4156,9 +4157,29 @@ class TestTheMeasurementFailsClosed(unittest.TestCase):
             self.run_with_child("silent-failure", returncode=1, stderr="")
 
     def test_a_compile_error_is_still_left_to_re_compile(self):
-        """`re` reports a syntax error better than this could."""
-        self.run_with_child("(unclosed", returncode=1,
-                            stderr="re.error: missing ), unterminated subpattern")
+        """`re` reports a syntax error better than this could.
+
+        Signalled by the exit code the child chooses, not by its stderr. This
+        test used to pass `returncode=1, stderr="re.error: ..."`, which was
+        the old contract -- and that contract is what let MemoryError,
+        RecursionError, ImportError and a non-interpreter `sys.executable`
+        through as measured passes, because all four put "error" in stderr
+        too. See TestTheMeasurementFailsClosedOnEveryAbnormalExit.
+        """
+        self.run_with_child("(unclosed",
+                            returncode=pattern_safety.COMPILE_FAILED_EXIT,
+                            stderr="")
+
+    def test_a_child_that_merely_mentions_an_error_is_refused(self):
+        """The old contract, now the case it was hiding.
+
+        Exiting 1 with "re.error" in stderr is no longer evidence of anything:
+        our child reports a compile failure by its exit code, so a 1 means
+        something else went wrong and the pattern was never measured.
+        """
+        with self.assertRaises(PatternTooCostly):
+            self.run_with_child("Potion", returncode=1,
+                                stderr="re.error: something surprising")
 
     def test_a_clean_child_still_passes(self):
         self.run_with_child("Potion", returncode=0)
@@ -4303,7 +4324,7 @@ class TestSearchBoundsItsTotalWork(ToolTest):
 
 
 class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
-    """`CommandBudget` says it is the only thing between a crafted file and a
+    """`WalkBudget` says it is the only thing between a crafted file and a
     walk the user must kill the server to escape. Three walks never got one.
 
     `find_references` is the worst of them, because it is reached from
@@ -4371,7 +4392,7 @@ class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
         command.set("code", 108)
         command.set("indent", 0)
         command.set("parameters", [self.project.codec.make_string("x")])
-        # Above MAX_COMMANDS_WALKED, so a budget must stop it.
+        # Above MAX_WALK_STEPS, so a budget must stop it.
         common.set("list", [command] * 250_000)
         self.project.save_file(self.project.filename_for("common_events"),
                                tool="test", summary="one shared command")
@@ -4775,6 +4796,33 @@ class TestTheMeasurementReachesItsChild(unittest.TestCase):
                     "the command line is %d characters, which is within reach "
                     "of the %d Windows allows" % (total, self.ARGV_LIMIT))
 
+    def test_the_child_cannot_import_from_the_working_directory(self):
+        """`python -c` puts the process's CWD first on sys.path.
+
+        So a `re.py` or `base64.py` in the directory the server was started
+        in would be imported and executed by the first regex search of the
+        session -- and that directory is routinely the game project, which is
+        the one thing this server's threat model treats as untrusted. `-I`
+        drops it, and also ignores PYTHONPATH, sitecustomize and
+        usercustomize.
+        """
+        seen = self.command_for("Gold[0-9]+")
+        self.assertIn("-I", seen["command"],
+                      "the child is spawned without import isolation, so the "
+                      "server's working directory is on its sys.path")
+
+    def test_the_child_runs_somewhere_neutral(self):
+        """So the answer does not depend on how the client launched us."""
+        import subprocess as sp
+        import sys as _sys
+        import tempfile
+        done = sp.run([_sys.executable, "-I", "-c",
+                       "import sys; print(sys.path[0])"],
+                      capture_output=True, text=True,
+                      cwd=tempfile.gettempdir())
+        self.assertNotEqual(done.stdout.strip(), tempfile.gettempdir(),
+                            "the working directory is still on sys.path")
+
     def test_the_subjects_travel_on_stdin(self):
         seen = self.command_for("Gold[0-9]+")
         self.assertIsNotNone(seen["input"],
@@ -5041,7 +5089,7 @@ class TestMapGetBoundsItsEventSummary(SharedObjectMap, ToolTest):
     """`_event_summaries` walks events x pages and both come from the file.
 
     Every other whole-file walk in map_tools goes through `_check_budget` or a
-    CommandBudget. This one built a row per page of every event, so the shared
+    WalkBudget. This one built a row per page of every event, so the shared
     -object map -- fifty events of fifty pages, all one object -- produced
     2500 rows from 7 KB, and nothing in the reply said the list was long
     because the file was crafted rather than because the map is big.
@@ -5269,3 +5317,602 @@ class TestBothDatabaseToolsRefuseATableTheSameWay(ToolTest):
         """Allowing the table must not start ignoring the ids."""
         message = self.refusal("db_get", table="system", ids=[1, 2])
         self.assertIn("not a table of entries", message)
+
+
+class TestTheMeasurementFailsClosedOnEveryAbnormalExit(unittest.TestCase):
+    """"error" in stderr is not "the pattern would not compile".
+
+    `measure_cost`'s docstring promises that every way the check can fail to
+    produce an answer is a refusal, and names three: a child that cannot be
+    started, one that times out, and one killed by a signal or the OOM killer.
+    The code decided "was this a compile error?" with
+
+        if done.returncode != 0 and "error" not in (done.stderr or "").lower():
+
+    -- a substring test that matches MemoryError, RecursionError, OSError,
+    ImportError, and `error: unknown option -c` from a `sys.executable` that
+    is not an interpreter. Every one of those skipped the refusal AND reached
+    `_remember(pattern, None)`, so an unmeasured pattern was cached as a
+    measured pass and then run in-process for the life of the server. That is
+    the entire ReDoS bound, bypassed by a child that happens to print "error".
+
+    Measured before the fix: 4 of 6 abnormal exits allowed and cached.
+    """
+
+    def setUp(self):
+        self.safety = pattern_safety
+        self.real_run = pattern_safety.subprocess.run
+        self.addCleanup(setattr, pattern_safety.subprocess, "run", self.real_run)
+        pattern_safety._PASSED.clear()
+        self.addCleanup(pattern_safety._PASSED.clear)
+
+    def child(self, returncode, stderr=""):
+        """Make the measurement's child exit however this test needs."""
+        class Done:
+            def __init__(self):
+                self.returncode, self.stderr, self.stdout = returncode, stderr, ""
+        self.safety.subprocess.run = lambda *a, **k: Done()
+
+    # Every abnormal exit the docstring names, and the stderr each really
+    # produces. None of these is a pattern this server could measure.
+    ABNORMAL = (
+        ("killed by a signal", -9, ""),
+        ("out of memory", 1, "MemoryError: cannot allocate"),
+        ("recursion blowout", 1, "RecursionError: maximum recursion depth"),
+        ("not an interpreter", 2, "error: unknown option -c"),
+        ("import failure", 1, "ImportError: no module named re"),
+        ("stderr in another language", 1, "Fehler: unbekannte Option"),
+    )
+
+    def test_every_abnormal_exit_is_refused(self):
+        for label, returncode, stderr in self.ABNORMAL:
+            with self.subTest(label):
+                self.safety._PASSED.clear()
+                self.child(returncode, stderr)
+                with self.assertRaises(self.safety.PatternTooCostly,
+                                       msg="%s was allowed" % label):
+                    self.safety.measure_cost("some-pattern")
+
+    def test_an_abnormal_exit_is_never_cached_as_a_pass(self):
+        """The half that outlives the call: a cached pass skips the gate."""
+        for label, returncode, stderr in self.ABNORMAL:
+            with self.subTest(label):
+                self.safety._PASSED.clear()
+                self.child(returncode, stderr)
+                try:
+                    self.safety.measure_cost("some-pattern")
+                except self.safety.PatternTooCostly:
+                    pass
+                self.assertNotIn(
+                    "some-pattern", self.safety._PASSED,
+                    "%s was recorded as a measured pass, so the next use of "
+                    "this pattern runs unmeasured in-process" % label)
+
+    def test_a_pattern_that_will_not_compile_is_left_to_re(self):
+        """The one deliberate carve-out, decided exactly rather than guessed.
+
+        `re.compile` reports a syntax error far better than this can, and
+        `_matcher` turns that into a ToolError. So a compile failure must not
+        be refused here -- but it must not be cached as a pass either.
+        """
+        self.child(self.safety.COMPILE_FAILED_EXIT, "re.error: bad range")
+        self.safety.measure_cost("[z-a]")
+        self.assertNotIn("[z-a]", self.safety._PASSED,
+                         "a pattern that never ran was cached as measured")
+
+    def test_the_carve_out_is_a_code_the_child_chooses(self):
+        """Not a substring of stderr, which is not evidence of anything."""
+        self.assertIsInstance(self.safety.COMPILE_FAILED_EXIT, int)
+        self.assertNotIn(self.safety.COMPILE_FAILED_EXIT, (0, 1, 2),
+                         "the carve-out code collides with an ordinary "
+                         "interpreter exit code")
+
+    def test_a_clean_child_still_passes(self):
+        self.child(0, "")
+        self.safety.measure_cost("Gold[0-9]+")
+        self.assertIn("Gold[0-9]+", self.safety._PASSED)
+
+    def test_a_real_child_still_measures_a_real_pattern(self):
+        """End to end, with no fake: the fix must not break the gate."""
+        self.safety.subprocess.run = self.real_run
+        self.safety.check_pattern("Gold[0-9]+")
+        with self.assertRaises(self.safety.PatternTooCostly):
+            self.safety.check_pattern("(a+)+$")
+
+
+class TestEveryDeclaredLengthLimitIsEnforced(ToolTest):
+    """`query` is declared "at most 512 characters" and enforced for one mode.
+
+    `_matcher` returns from the substring branch before the length check, and
+    no maxLength is declared, so `check_args` does not catch it either: a
+    megabyte-long substring query is accepted while the same string as a
+    regex is refused. Two spellings of one argument, one limit, one of them
+    enforced.
+
+    `TestEveryCallerFacingCeilingIsDeclared` passes on this because 512
+    appears in the description -- it checks that a ceiling is *declared*, not
+    that it is *applied*, which is the gap this closes.
+    """
+
+    def test_a_long_substring_query_is_refused(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("search", query="x" * 5000)
+        self.assertIn("512", str(caught.exception))
+
+    def test_a_long_regex_query_is_still_refused(self):
+        with self.assertRaises(ToolError):
+            self.call("search", query="x" * 5000, regex=True)
+
+    def test_both_modes_refuse_at_the_same_length(self):
+        from rpgvxace_mcp.tools.search_tools import MAX_PATTERN_CHARS
+        at_limit = "x" * MAX_PATTERN_CHARS
+        over = "x" * (MAX_PATTERN_CHARS + 1)
+        for regex in (False, True):
+            with self.subTest(regex=regex):
+                self.call("search", query=at_limit, regex=regex)
+                with self.assertRaises(ToolError):
+                    self.call("search", query=over, regex=regex)
+
+    def test_the_schema_declares_it_so_a_caller_can_see_it_first(self):
+        """A ceiling in prose only is one the caller learns by being refused."""
+        from rpgvxace_mcp.tools.search_tools import MAX_PATTERN_CHARS
+        query = REGISTRY["search"].schema["properties"]["query"]
+        self.assertEqual(query.get("maxLength"), MAX_PATTERN_CHARS)
+
+
+class TestTheDslRefusesACoercibleId(ToolTest):
+    """`{"variable": 2.9}` wrote game variable 2 and reported success.
+
+    `registry.as_int` exists for exactly this and says so: "int(True) is 1 and
+    int(2.9) is 2, so a wrong-typed id used to address a different entry than
+    the caller named -- and quietly, because the tool then reported success
+    against the id it had coerced to." The compiler applies `_needs_int` to
+    switch, self_switch, face_index and indent, and bare `int()` to every
+    variable id -- the field that selects which game variable a command
+    writes.
+    """
+
+    def refuse(self, entry):
+        with self.assertRaises((ToolError, CommandError)) as caught:
+            self.call("event_edit", map_id=1, ops=[{
+                "op": "set_commands", "event_id": 1, "page": 0,
+                "commands": [entry]}], dry_run=True)
+        return str(caught.exception)
+
+    def test_a_float_variable_id_is_refused(self):
+        self.refuse({"variable": 2.9, "op": "add", "value": 1})
+
+    def test_a_boolean_variable_id_is_refused(self):
+        self.refuse({"variable": True, "op": "add", "value": 1})
+
+    def test_a_string_variable_id_is_refused(self):
+        self.refuse({"variable": "3", "op": "add", "value": 1})
+
+    def test_a_float_variable_end_is_refused(self):
+        self.refuse({"variable": 1, "variable_end": 3.7, "op": "add",
+                     "value": 1})
+
+    def test_a_float_from_variable_is_refused(self):
+        self.refuse({"variable": 1, "op": "add", "from_variable": 2.9})
+
+    def test_a_malformed_random_range_is_refused(self):
+        """`low, high = entry["random"]` unpacked whatever it was given."""
+        self.refuse({"variable": 1, "op": "set", "random": [1]})
+        self.refuse({"variable": 1, "op": "set", "random": 5})
+
+    def test_an_honest_variable_command_still_compiles(self):
+        out = self.call("event_edit", map_id=1, dry_run=True, ops=[{
+            "op": "set_commands", "event_id": 1, "page": 0,
+            "commands": [{"variable": 2, "op": "add", "value": 1}]}])
+        self.assertTrue(out)
+
+
+class TestAChoiceBranchIsNeverDropped(ToolTest):
+    """Extra `branches` were compiled away and reported as a rewrite.
+
+    DSL_HELP says only that "branches" pairs with the choices by position, so
+    a caller with three branches and two choices was told "rewrote page 0 of
+    event 1" and lost the third. That is the rule the whole `check_op_args`
+    gate exists to enforce -- a dropped argument reports the same success as
+    an applied one -- one level below where that gate reaches.
+    """
+
+    def compile_choices(self, choices, branches, **extra):
+        entry = {"choices": choices, "branches": branches}
+        entry.update(extra)
+        return self.call("event_edit", map_id=1, dry_run=True, ops=[{
+            "op": "set_commands", "event_id": 1, "page": 0,
+            "commands": [entry]}])
+
+    def test_more_branches_than_choices_is_refused(self):
+        with self.assertRaises((ToolError, CommandError)) as caught:
+            self.compile_choices(["Yes", "No"], [[], [], []])
+        message = str(caught.exception)
+        self.assertIn("3", message)
+        self.assertIn("2", message)
+
+    def test_matching_branches_still_compile(self):
+        out = self.compile_choices(
+            ["Yes", "No"],
+            [[{"comment": "y"}], [{"comment": "n"}]])
+        self.assertTrue(out)
+
+    def test_fewer_branches_than_choices_is_allowed(self):
+        """A choice with an empty body is a real thing to author."""
+        out = self.compile_choices(["Yes", "No"], [[{"comment": "y"}]])
+        self.assertTrue(out)
+
+
+class EmptyPageMap:
+    """A map whose amplification is entirely in (events x pages).
+
+    Every page holds an empty @list, so every charge of the form
+    `spend(len(commands))` is free. One page condition flag is set so the page
+    is not "unconditional", which is what keeps `_check_shadowing` walking and
+    producing nothing -- a finding ceiling cannot bound a walk that finds
+    nothing. The graphic is left empty for the same reason in the asset walk:
+    `_AssetChecker.check` returns before it counts anything.
+    """
+
+    # 4,000,000 pairs from ~18 KB. Large enough that an unbounded walk is
+    # unmistakable, small enough to build in a test.
+    PAGES, EVENTS = 2000, 2000
+
+    BUDGET_SECONDS = 10.0
+
+    def craft_empty_page_map(self):
+        page = RubyObject("RPG::Event::Page")
+        condition = RubyObject("RPG::Event::Page::Condition")
+        # Truthy, so the page is not unconditional and the shadowing rule
+        # keeps looking without ever collecting.
+        condition.set("switch1_valid", True)
+        condition.set("switch1_id", 1)
+        page.set("condition", condition)
+        # Empty, so the asset checker returns before it collects.
+        page.set("graphic", RubyObject("RPG::Event::Page::Graphic"))
+        for name, value in (("trigger", 0), ("priority_type", 0),
+                            ("move_type", 0), ("move_speed", 3),
+                            ("move_frequency", 3), ("walk_anime", True),
+                            ("step_anime", False), ("direction_fix", False),
+                            ("through", False)):
+            page.set(name, value)
+        page.set("list", [])          # the bypass
+
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", [page] * self.PAGES)
+
+        events = RubyHash()
+        for event_id in range(1, self.EVENTS + 1):
+            events.set(event_id, event)
+        game_map = self.project.load_map(1)
+        game_map.set("events", events)
+        path = self.project.path_for(self.project.map_file(1))
+        path.write_bytes(marshal_rb.dump(game_map))
+        self.assertLess(path.stat().st_size, 128 * 1024,
+                        "the point of the finding is that it is small")
+        self.ctx = self.reopen()
+
+    def assert_bounded(self, tool_name, **arguments):
+        import time
+        start = time.perf_counter()
+        out = self.call(tool_name, **arguments)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, self.BUDGET_SECONDS,
+                        "%s took %.1fs on a map of empty pages"
+                        % (tool_name, elapsed))
+        return out
+
+
+class TestAnEmptyPageStillCostsSomething(EmptyPageMap, ToolTest):
+    """A visit has to be charged for, or the product is free."""
+
+    def test_the_budget_charges_for_a_list_of_no_commands(self):
+        from rpgvxace_mcp import analysis
+        budget = analysis.WalkBudget()
+        for _ in range(analysis.MAX_WALK_STEPS + 1):
+            if not budget.spend(0):
+                break
+        self.assertTrue(budget.exhausted,
+                        "a budget charged with zero-length lists never ran "
+                        "out, so the walk it bounds is unbounded")
+
+    def test_the_walk_charges_per_event_and_per_page(self):
+        """Not per command: the product is what a crafted file buys."""
+        from rpgvxace_mcp import analysis
+        budget = analysis.WalkBudget()
+        visited = 0
+        for _ in analysis.iter_command_lists(self.project, None, budget):
+            visited += 1
+        self.assertTrue(budget.exhausted or visited < 1000,
+                        "the walk neither ran out nor finished small")
+
+    def test_search_stops_and_says_so(self):
+        self.craft_empty_page_map()
+        out = self.assert_bounded("search", query="zzz-no-match",
+                                  scopes=["events"])
+        self.assertTrue(
+            out.get("may_have_more") or "command_walk_stopped" in out,
+            "an empty result from an unbounded walk reads as 'there are "
+            "none': %s" % sorted(out))
+
+    def test_validate_events_stops_and_says_so(self):
+        self.craft_empty_page_map()
+        out = self.assert_bounded("validate", map_ids=[1], scopes=["events"])
+        self.assertTrue(out.get("truncated") or "command_walk_stopped" in out,
+                        "validate gave a clean bill from a walk that never "
+                        "finished: %s" % sorted(out))
+
+    def test_validate_assets_is_bounded(self):
+        """`_check_map_assets` took no budget at all.
+
+        It walks events x pages itself rather than through
+        `iter_command_lists`, and its only guard was the asset checker's
+        finding ceiling -- which an empty graphic name never reaches, because
+        `check` returns before it collects.
+        """
+        self.craft_empty_page_map()
+        self.assert_bounded("validate", map_ids=[1], scopes=["assets"])
+
+    def test_the_page_rule_walk_is_bounded(self):
+        """`check_event_pages` took no budget either.
+
+        Its ceiling is on findings, and a page with a condition flag set
+        produces none -- so it walked every page of every event for nothing.
+        """
+        self.craft_empty_page_map()
+        self.assert_bounded("validate", map_ids=[1], scopes=["events"])
+
+    def test_event_get_is_bounded(self):
+        self.craft_empty_page_map()
+        out = self.assert_bounded("event_get", map_id=1)
+        self.assertTrue(
+            any("stopped" in str(v) or "not read" in str(v)
+                for v in out.values()),
+            "the reply does not say the walk was cut short: %s" % sorted(out))
+
+    def test_map_get_is_bounded(self):
+        """MAX_EVENT_SUMMARY_ROWS counted page rows only.
+
+        `rows` was incremented inside the pages loop, while the event row was
+        appended unconditionally outside it -- so events with empty @pages
+        cost nothing and the summary was unbounded in the one dimension a
+        crafted file controls most cheaply.
+        """
+        self.craft_empty_page_map()
+        out = self.assert_bounded("map_get", map_id=1, include_events=True)
+        self.assertLessEqual(len(out["events"]),
+                             map_tools.MAX_EVENT_SUMMARY_ROWS)
+        self.assertIn("events_truncated", out)
+
+    def test_every_row_counts_toward_the_summary_ceiling(self):
+        """Events as well as pages, against one ceiling."""
+        self.craft_empty_page_map()
+        out = self.assert_bounded("map_get", map_id=1, include_events=True)
+        rows = len(out["events"]) + sum(len(e["pages"]) for e in out["events"])
+        self.assertLessEqual(rows, map_tools.MAX_EVENT_SUMMARY_ROWS + 1)
+
+    def test_deleting_a_map_is_bounded(self):
+        self.craft_empty_page_map()
+        out = self.assert_bounded("map_edit", op="delete", map_id=3,
+                                  dry_run=True)
+        self.assertTrue(
+            "stopped" in str(out) or "incomplete" in str(out),
+            "a transfer scan that never finished says the map is "
+            "unreferenced: %s" % sorted(out))
+
+    def test_an_ordinary_project_is_unaffected(self):
+        """The floor must not make a real project look crafted."""
+        out = self.call("validate")
+        self.assertNotIn("command_walk_stopped", out)
+        out = self.call("map_get", map_id=1, include_events=True)
+        self.assertNotIn("events_truncated", out)
+
+
+class TestOneBatchGetsOneWalkAllowance(ToolTest):
+    """`reference_preview` made a fresh budget per op, so MAX_OPS multiplied it.
+
+    `validate` says why this is wrong in its own comment -- "One allowance for
+    every command walk this call makes" -- and `db_get` says it again for its
+    conversion budget. A db_edit carrying 200 deletes got 200 separate
+    200,000-step allowances.
+    """
+
+    def test_a_batch_shares_one_allowance(self):
+        from rpgvxace_mcp import analysis
+        seen = []
+        original = analysis.WalkBudget
+
+        class Counted(original):
+            def __init__(self, *a, **k):
+                seen.append(1)
+                super().__init__(*a, **k)
+
+        analysis.WalkBudget = Counted
+        self.addCleanup(setattr, analysis, "WalkBudget", original)
+        ids = [entry_id for entry_id, _ in self.project.entries("items")][:4]
+        self.assertGreater(len(ids), 1, "the fixture needs several items")
+        self.call("db_edit", table="items", dry_run=True,
+                  ops=[{"op": "delete", "id": i} for i in ids])
+        self.assertLessEqual(len(seen), 1,
+                             "a %d-delete batch allocated %d separate walk "
+                             "allowances" % (len(ids), len(seen)))
+
+
+class TestEveryConversionBranchIsCallable(unittest.TestCase):
+    """A branch that raises TypeError when reached is not a handled case.
+
+    `_to_json_value` handles a bare `bytes` by calling
+    `_string_to_json(RubyString(bytes(value)), codec)` -- two arguments to a
+    function that takes four. Nothing in the reader produces a bare `bytes`
+    today, so the line has never run; it reads as a handled case and is a
+    crash waiting for the first caller that makes one.
+    """
+
+    def test_a_bare_bytes_value_converts(self):
+        codec = convert.TextCodec("utf-8")
+        rendered = convert.to_json(b"hello", codec, "full", convert.new_walk())
+        self.assertIn("hello", str(rendered))
+
+    def test_a_bytearray_value_converts(self):
+        codec = convert.TextCodec("utf-8")
+        rendered = convert.to_json(bytearray(b"hi"), codec, "full",
+                                   convert.new_walk())
+        self.assertIn("hi", str(rendered))
+
+    def test_it_agrees_with_the_ruby_string_branch(self):
+        """A bare bytes and the RubyString the reader would have built."""
+        codec = convert.TextCodec("utf-8")
+        from rpgvxace_mcp.rubytypes import RubyString
+        bare = convert.to_json(b"hello", codec, "full", convert.new_walk())
+        wrapped = convert.to_json(RubyString(b"hello"), codec, "full",
+                                  convert.new_walk())
+        self.assertEqual(bare, wrapped)
+
+
+class TestEveryWalkSpendsItsAllowance(ToolTest):
+    """Each walk is asked directly whether it charged for what it visited.
+
+    A wall-clock assertion can only fail when a walk is slow enough, which
+    makes it a test of the fixture as much as of the code -- and it cannot
+    tell "bounded" from "small". The budget knows exactly, so it is the thing
+    to ask.
+    """
+
+    SLOTS = 5000
+
+    def setUp(self):
+        super().setUp()
+        from rpgvxace_mcp import analysis
+        self.analysis = analysis
+
+    def map_with(self, events):
+        game_map = self.project.load_map(1)
+        game_map.set("events", events)
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.project = Project(self.tmp / "project")
+        self.ctx = Context(self.project)
+
+    def hash_of(self, value):
+        events = RubyHash()
+        for event_id in range(1, self.SLOTS + 1):
+            events.set(event_id, value)
+        return events
+
+    def event_with_pages(self, pages):
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", pages)
+        return event
+
+    def spent(self, walk):
+        """Run a walk against a small allowance and report whether it charged."""
+        budget = self.analysis.WalkBudget(limit=64)
+        walk(budget)
+        return budget
+
+    def test_an_events_hash_of_non_events_is_charged_for(self):
+        """Skipped by `continue`, so it used to cost nothing."""
+        self.map_with(self.hash_of(42))
+        budget = self.spent(lambda b: list(
+            self.analysis.iter_command_lists(self.project, [1], b)))
+        self.assertTrue(budget.exhausted,
+                        "a hash of %d non-event values was walked free"
+                        % self.SLOTS)
+
+    def test_a_pages_list_of_non_pages_is_charged_for(self):
+        """Same shape one level down."""
+        self.map_with(self.hash_of(self.event_with_pages([7] * self.SLOTS)))
+        budget = self.spent(lambda b: list(
+            self.analysis.iter_command_lists(self.project, [1], b)))
+        self.assertTrue(budget.exhausted,
+                        "a @pages list of %d non-page values was walked free"
+                        % self.SLOTS)
+
+    def test_the_page_rule_walk_spends_the_allowance(self):
+        """`check_event_pages` does not go through `iter_command_lists`."""
+        self.map_with(self.hash_of(self.event_with_pages([])))
+        budget = self.spent(
+            lambda b: self.analysis.check_event_pages(self.project, [1], b))
+        self.assertTrue(budget.exhausted,
+                        "the page rule walk charged nothing for %d events"
+                        % self.SLOTS)
+
+    def test_the_asset_walk_spends_the_allowance(self):
+        """`_check_map_assets` does not either -- its sibling always did.
+
+        Called directly rather than through `check_assets`, which also hands
+        the budget to `_check_command_assets`: that walk charges through
+        `iter_command_lists`, so it would exhaust the allowance on its own and
+        this test would pass whatever the map walk did.
+        """
+        self.map_with(self.hash_of(self.event_with_pages([])))
+        checker = self.analysis._AssetChecker(self.project)
+        budget = self.spent(
+            lambda b: self.analysis._check_map_assets(
+                self.project, checker, [1], b))
+        self.assertTrue(budget.exhausted,
+                        "the map asset walk charged nothing for %d events"
+                        % self.SLOTS)
+
+    def test_an_ordinary_project_does_not_exhaust_a_real_allowance(self):
+        """The charges must not make a real project look crafted."""
+        budget = self.analysis.WalkBudget()
+        list(self.analysis.iter_command_lists(self.project, None, budget))
+        self.assertFalse(budget.exhausted)
+        self.assertGreater(budget.remaining,
+                           self.analysis.MAX_WALK_STEPS * 0.9,
+                           "a fixture project spent more than a tenth of the "
+                           "allowance, so the charges are too heavy")
+
+
+class TestAnEventWithNoPagesStillCostsARow(ToolTest):
+    """`map_get`'s ceiling counted page rows, so an event with none was free.
+
+    Four bytes per hash pair on disk buys one five-key dict in the reply, and
+    `MAX_TOOL_RESULT_CHARS` is measured after the reply has been serialised --
+    so it bounds the response and not the work or the memory.
+    """
+
+    def craft(self):
+        event = RubyObject("RPG::Event")
+        event.set("id", 1)
+        event.set("name", self.project.codec.make_string("E"))
+        event.set("x", 0)
+        event.set("y", 0)
+        event.set("pages", [])                     # no pages at all
+        events = RubyHash()
+        for event_id in range(1, map_tools.MAX_EVENT_SUMMARY_ROWS * 3):
+            events.set(event_id, event)
+        game_map = self.project.load_map(1)
+        game_map.set("events", events)
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+
+    def test_the_summary_stops_at_the_ceiling(self):
+        self.craft()
+        out = self.call("map_get", map_id=1, include_events=True)
+        self.assertLessEqual(len(out["events"]),
+                             map_tools.MAX_EVENT_SUMMARY_ROWS,
+                             "%d event rows came back against a ceiling of %d"
+                             % (len(out["events"]),
+                                map_tools.MAX_EVENT_SUMMARY_ROWS))
+
+    def test_and_says_that_it_stopped(self):
+        self.craft()
+        out = self.call("map_get", map_id=1, include_events=True)
+        self.assertIn("events_truncated", out)
+
+    def test_event_get_is_bounded_the_same_way(self):
+        self.craft()
+        out = self.call("event_get", map_id=1)
+        self.assertLess(len(out["events"]),
+                        map_tools.MAX_EVENT_SUMMARY_ROWS * 3)

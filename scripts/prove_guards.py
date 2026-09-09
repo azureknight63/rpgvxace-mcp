@@ -56,6 +56,7 @@ CONVERT = "src/rpgvxace_mcp/convert.py"
 SAFETY = "src/rpgvxace_mcp/tools/pattern_safety.py"
 SEARCH_TOOLS = "src/rpgvxace_mcp/tools/search_tools.py"
 RAW_TOOLS = "src/rpgvxace_mcp/tools/raw_tools.py"
+COMMANDS = "src/rpgvxace_mcp/commands.py"
 
 
 class Guard:
@@ -139,7 +140,7 @@ GATED = "tests/test_tools.py::TestOpArgumentsAreGatedEverywhere::"
 COMMON = "tests/test_tools.py::TestCommonEventOpsAreGatedToo::"
 SYMDEPTH = "tests/test_marshal.py::TestHostileInput::"
 BUDGETONE = "tests/test_tools.py::TestOneBudgetForAWholeResponse::"
-TALLY = "tests/test_tools.py::TestTileTallySaysWhatItLeftOut::"
+TILETALLY = "tests/test_tools.py::TestTileTallySaysWhatItLeftOut::"
 MAPREFS = "tests/test_tools.py::TestMapReferenceCountsDoNotUnderstate::"
 LOOKAROUND = "tests/test_tools.py::TestLookaroundIsRefusedByName::"
 MEASURED = "tests/test_tools.py::TestSearchPatternsStayFast::"
@@ -156,6 +157,15 @@ NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
 BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
 INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
 AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
+SPENDS = ("tests/test_tools.py::TestEveryWalkSpendsItsAllowance::")
+NOPAGES = ("tests/test_tools.py::TestAnEventWithNoPagesStillCostsARow::")
+EMPTYPAGE = ("tests/test_tools.py::TestAnEmptyPageStillCostsSomething::")
+BATCH = ("tests/test_tools.py::TestOneBatchGetsOneWalkAllowance::")
+FAILCLOSED2 = ("tests/test_tools.py::TestTheMeasurementFailsClosedOnEveryAbnormalExit::")
+LENGTHS = ("tests/test_tools.py::TestEveryDeclaredLengthLimitIsEnforced::")
+DSLINT = ("tests/test_tools.py::TestTheDslRefusesACoercibleId::")
+DSLCHOICE = ("tests/test_tools.py::TestAChoiceBranchIsNeverDropped::")
+CALLABLE = ("tests/test_tools.py::TestEveryConversionBranchIsCallable::")
 COUNTS = ("tests/test_tools.py::TestACountIsNamedForWhatItCounted::")
 DRYRUN = ("tests/test_tools.py::TestADryRunDoesNotReadAsDone::")
 SCOPECLAIM = ("tests/test_tools.py::TestAScopeIsClaimedOnlyOnceRead::")
@@ -289,7 +299,7 @@ GUARDS = [
                 )
 """,
         "",
-        [L + "test_ivar_wrapped_symbol_in_a_name_position_is_reported"],
+        [L + "test_ivar_wrapped_symbol_round_trips"],
         "a non-ASCII class or ivar name loads but cannot be written back, and "
         "nothing says so -- the file quietly changes shape",
     ),
@@ -1117,15 +1127,15 @@ GUARDS = [
         'the backtracking budget is enforced', SAFETY,
         '    if worst <= MAX_BACKTRACK_PATHS:\n        return',
         '    if True:\n        return',
-        [FAST + "test_every_backtracking_chain_is_refused",
-         FAST + "test_the_tool_refuses_it_too"],
+        [FAST + "test_every_costly_pattern_is_refused",
+         FAST + "test_the_tool_refuses_them_too"],
         'one search with a pattern like "a?a?a?...b" wedges this single-threaded server until it is killed',
     ),
     Guard(
         'an unbounded repeat of a variable body is refused', SAFETY,
         '    if unbounded and inner_freedom > 1:',
         '    if False:',
-        [FAST + "test_every_backtracking_chain_is_refused"],
+        [FAST + "test_every_costly_pattern_is_refused"],
         '(a+)+ and (a|ab)* are charged a linear weight, which is not what they cost -- their time grows with the length of the text searched',
     ),
     Guard(
@@ -1294,7 +1304,7 @@ GUARDS = [
         'the tile tally says what it left out', MAP_TOOLS,
         '            "tile_ids_not_shown": max(0, len(counter) - TOP_TILE_IDS),',
         '            "tile_ids_not_shown": 0,',
-        [TALLY + "test_it_reports_the_ids_it_did_not_list"],
+        [TILETALLY + "test_it_reports_the_ids_it_did_not_list"],
         'a caller asking whether one tile is used reads a twelve-row list, does not find it, and concludes it is unused',
     ),
     Guard(
@@ -1567,8 +1577,8 @@ GUARDS = [
     ),
     Guard(
         'the payload does not ride on a command line', SAFETY,
-        """                              timeout=PREFLIGHT_SECONDS, input=payload)""",
-        """                              timeout=PREFLIGHT_SECONDS)""",
+        """                              timeout=PREFLIGHT_SECONDS, input=payload,""",
+        """                              timeout=PREFLIGHT_SECONDS,""",
         [CHILD + "test_the_subjects_travel_on_stdin",
          CHILD + "test_a_wide_kana_class_is_measured_not_refused"],
         'base64 of ten 2000-character subjects is 27000 characters for ASCII and 83000 for Japanese, against a 32767 Windows limit, so every Japanese pattern with a moderate character class was refused as unsafe on a question the check never got to ask',
@@ -1660,6 +1670,147 @@ GUARDS = [
         [SUMMARY + "test_the_summary_stops_at_its_ceiling",
          SUMMARY + "test_a_stopped_summary_says_so"],
         'events times pages, both out of the file: the shared-object map is fifty events of fifty pages all one object, so 7 KB produced 2500 rows and nothing said why',
+    ),
+    Guard(
+        'a visit is charged for even when it carries nothing', ANALYSIS,
+        '        self.remaining -= max(1, steps)',
+        '        self.remaining -= steps',
+        [EMPTYPAGE + "test_the_budget_charges_for_a_list_of_no_commands",
+         EMPTYPAGE + "test_search_stops_and_says_so",
+         EMPTYPAGE + "test_validate_events_stops_and_says_so"],
+        'every charge in the project was spend(len(commands)), which is zero for a page holding an empty list, and spend only trips below zero -- so an 18.4 KB map describing four million (event, page) pairs was walked in full, search taking 5.7s and reporting no stop signal at all',
+    ),
+    Guard(
+        'the walk charges per event and per page slot', ANALYSIS,
+        '''            if budget is not None and not budget.spend(1):
+                return
+            if not isinstance(event, RubyObject):
+                continue
+            name = _text(project, event.get("name"))
+            for page_index, page in enumerate(_seq(event.get("pages"))):
+                if budget is not None and not budget.spend(1):
+                    return''',
+        '''            if not isinstance(event, RubyObject):
+                continue
+            name = _text(project, event.get("name"))
+            for page_index, page in enumerate(_seq(event.get("pages"))):
+                if False:
+                    return''',
+        # The budget's own state, not elapsed time. With `spend`'s one-step
+        # floor in place a map of real pages is already bounded, so a
+        # wall-clock test could not tell these extra charges apart from the
+        # floor -- and what they close is a hash of values that are not
+        # events, and a @pages list of values that are not pages, both of
+        # which `continue` past before anything charges.
+        [SPENDS + "test_an_events_hash_of_non_events_is_charged_for",
+         SPENDS + "test_a_pages_list_of_non_pages_is_charged_for"],
+        'the amplification unit is (events x pages), so charging only for command payload left the product free -- and a page slot holding something that is not an RPG::Event::Page was free as well',
+    ),
+    Guard(
+        'the page rule walk takes an allowance', ANALYSIS,
+        '''            if budget is not None and not budget.spend(1):
+                return findings
+            if not isinstance(event, RubyObject):
+                continue
+            pages = _seq(event.get("pages"))
+            if budget is not None and not budget.spend(len(pages)):
+                return findings''',
+        '''            if not isinstance(event, RubyObject):
+                continue
+            pages = _seq(event.get("pages"))''',
+        [SPENDS + "test_the_page_rule_walk_spends_the_allowance"],
+        'check_event_pages collects only for an unconditional page, so one condition flag set on a crafted page made a finding ceiling powerless and it walked every page of every event for nothing',
+    ),
+    Guard(
+        'the asset walk takes the allowance its sibling had', ANALYSIS,
+        """            if budget is not None and not budget.spend(1):
+                return
+            if not isinstance(event, RubyObject):
+                continue
+            name = _text(project, event.get("name"))
+            for page_index, page in enumerate(_seq(event.get("pages"))):
+                if checker.full:
+                    return
+                if budget is not None and not budget.spend(1):
+                    return""",
+        """            if not isinstance(event, RubyObject):
+                continue
+            name = _text(project, event.get("name"))
+            for page_index, page in enumerate(_seq(event.get("pages"))):
+                if checker.full:
+                    return""",
+        [SPENDS + "test_the_asset_walk_spends_the_allowance"],
+        '_AssetChecker.check returns before it counts anything when a graphic name is empty, so the collector ceiling never fills and the walk over events x pages had no bound at all',
+    ),
+    Guard(
+        'the event summary charges for the event row too', MAP_TOOLS,
+        '''        # The event's own row. Charged here rather than only in the pages loop
+        # below, which is what let an event with no pages be free.
+        rows += 1''',
+        '''        pass''',
+        # An event with *no* pages, which is the case the counter missed:
+        # the crafted map with 2000 real pages per event is bounded by the
+        # page counter either way.
+        [NOPAGES + "test_the_summary_stops_at_the_ceiling",
+         NOPAGES + "test_and_says_that_it_stopped"],
+        'the counter sat inside the pages loop while the event row was appended outside it, so a hash of a million links to an event with no pages built a million dicts -- and MAX_TOOL_RESULT_CHARS is measured after the reply is serialised, so it bounds the response and not the work',
+    ),
+    Guard(
+        'one batch gets one walk allowance', DB_TOOLS,
+        '        self.walk = WalkBudget()',
+        '        self.walk = None',
+        [BATCH + "test_a_batch_shares_one_allowance"],
+        'a db_edit carrying two hundred deletes of unreferenced entries got two hundred separate 200,000-step allowances, because the walk returns early only when it finds hits',
+    ),
+    Guard(
+        'the measurement fails closed on every abnormal exit', SAFETY,
+        '''        if done.returncode == COMPILE_FAILED_EXIT:''',
+        '''        if done.returncode != 0 and "error" in (done.stderr or "").lower():''',
+        [FAILCLOSED2 + "test_every_abnormal_exit_is_refused",
+         FAILCLOSED2 + "test_an_abnormal_exit_is_never_cached_as_a_pass"],
+        '"error" in stderr stood in for "was this a compile error?", so MemoryError, RecursionError, ImportError and a non-interpreter sys.executable all skipped the refusal and were cached as measured passes -- four of six abnormal exits, measured',
+    ),
+    Guard(
+        'the preflight child cannot import from the working directory', SAFETY,
+        '    command = [sys.executable, "-I", "-c", _CHILD]',
+        '    command = [sys.executable, "-c", _CHILD]',
+        [CHILD + "test_the_child_cannot_import_from_the_working_directory"],
+        "python -c puts the process's CWD first on sys.path, so a re.py in an untrusted project directory is executed by the first regex search of the session -- and the CWD is routinely the project folder",
+    ),
+    Guard(
+        'a declared length limit applies to every mode', SEARCH_TOOLS,
+        '''    if len(query) > MAX_PATTERN_CHARS:
+        raise ToolError(
+            "the query is %d characters, above the %d this server accepts. "''',
+        '''    if False:
+        raise ToolError(
+            "the query is %d characters, above the %d this server accepts. "''',
+        [LENGTHS + "test_a_long_substring_query_is_refused",
+         LENGTHS + "test_both_modes_refuse_at_the_same_length"],
+        'the substring branch returned before the check, so a megabyte-long query was accepted while the same string as a regex was refused -- and the ceiling test passed it because it checks that a limit is declared, not that it is applied',
+    ),
+    Guard(
+        'a variable id is checked rather than coerced', COMMANDS,
+        '    variable_id = _needs_int(entry["variable"], "variable")',
+        '    variable_id = int(entry["variable"])',
+        [DSLINT + "test_a_float_variable_id_is_refused",
+         DSLINT + "test_a_boolean_variable_id_is_refused"],
+        'int(2.9) is 2, so {"variable": 2.9} wrote game variable 2 and the tool reported success against the id the caller named -- the rule registry.as_int states, applied in this file to switch and indent but not to the ids that select which variable a command writes',
+    ),
+    Guard(
+        'a choice branch is never compiled away', COMMANDS,
+        '    if len(branches) > len(choices):',
+        '    if False:',
+        [DSLCHOICE + "test_more_branches_than_choices_is_refused"],
+        'three branches against two choices compiled two and discarded the third, then reported the page as rewritten -- a dropped argument reporting the same success as an applied one',
+    ),
+    Guard(
+        'every conversion branch is callable', CONVERT,
+        '        return _string_to_json(RubyString(bytes(value)), codec, tables, walk)',
+        '        return _string_to_json(RubyString(bytes(value)), codec)',
+        [CALLABLE + "test_a_bare_bytes_value_converts",
+         CALLABLE + "test_it_agrees_with_the_ruby_string_branch"],
+        'the branch passed two of four required arguments, so it raised TypeError if reached -- reported to the model as "an argument was not the shape the tool expected", a diagnosis about the caller for a defect in the converter',
     ),
 ]
 

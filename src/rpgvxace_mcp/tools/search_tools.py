@@ -13,8 +13,8 @@ import time
 from typing import Any
 
 from ..analysis import (
-    MAX_COMMANDS_WALKED,
-    CommandBudget,
+    MAX_WALK_STEPS,
+    WalkBudget,
     Location,
     iter_command_lists,
 )
@@ -89,7 +89,7 @@ SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
     "%g seconds of matching, and after %s commands walked, saying so as "
     "\"text_scan_stopped\" or \"command_walk_stopped\". Either one means the "
     "hits are real but the absences are not."
-    % (MAX_SEARCH_SECONDS, "{:,}".format(MAX_COMMANDS_WALKED)),
+    % (MAX_SEARCH_SECONDS, "{:,}".format(MAX_WALK_STEPS)),
     schema({
         "query": prop(STR, "Text to look for (case-insensitive substring, or "
                            "a regular expression when regex is true). At most "
@@ -102,7 +102,8 @@ SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
                            "and long chains of optional or repeated parts: "
                            "each can backtrack for longer than this server "
                            "can be interrupted."
-                           % (MAX_PATTERN_CHARS, MAX_SUBJECT_CHARS)),
+                           % (MAX_PATTERN_CHARS, MAX_SUBJECT_CHARS),
+                      maxLength=MAX_PATTERN_CHARS),
         "regex": prop(BOOL, "Treat query as a Python regular expression."),
         "command_code": prop(INT, "Find every event command with this code, "
                                   "instead of searching text."),
@@ -201,7 +202,7 @@ class _Hits:
         # reference renders as far more commands than its size suggests, and
         # a search that stopped early and found nothing reads exactly like one
         # that looked everywhere.
-        self.walk = CommandBudget()
+        self.walk = WalkBudget()
 
     @property
     def full(self) -> bool:
@@ -273,10 +274,15 @@ class _Hits:
             "may_have_more": self.full,
             "scopes_searched": self.searched,
         }
-        if self.empty and not self.rows:
-            # Nothing found, and at least one scope never opened anything: the
-            # two together are indistinguishable from a completed search of a
-            # project that does not contain the text.
+        if not self.rows and (self.empty or self.unsearchable
+                              or self.unreadable):
+            # Nothing found, and something was not read: a scope that opened
+            # nothing, a file that would not load, or a script slot that would
+            # not inflate. Any of the three makes an empty result
+            # indistinguishable from a completed search of a project that does
+            # not contain the text -- and the tool's own description points a
+            # caller at this field as the one that says whether the scan ran
+            # out of project.
             out["may_have_more"] = True
         matcher = self.matcher
         if matcher is not None and matcher.clipped:
@@ -452,14 +458,21 @@ def _matcher(args: dict[str, Any], query: str | None) -> "_Matcher | None":
     """
     if not query:
         return None
+    # Before the branch, because the limit is declared on `query` and not on
+    # `regex`: the substring path used to return above this check, so a
+    # megabyte-long substring query was accepted while the same string as a
+    # regex was refused -- two spellings of one argument, one declared limit,
+    # one of them enforced. `TestEveryCallerFacingCeilingIsDeclared` passed it
+    # because 512 appears in the description; it checks that a ceiling is
+    # declared, not that it is applied.
+    if len(query) > MAX_PATTERN_CHARS:
+        raise ToolError(
+            "the query is %d characters, above the %d this server accepts. "
+            "Search for a shorter piece of the text you are looking for."
+            % (len(query), MAX_PATTERN_CHARS))
     if not opt_bool(args, "regex"):
         needle = query.lower()
         return _Matcher(lambda text: needle in text.lower(), whole=True)
-    if len(query) > MAX_PATTERN_CHARS:
-        raise ToolError(
-            "the pattern is %d characters, above the %d this server compiles. "
-            "Search for a plain substring instead, or narrow the pattern."
-            % (len(query), MAX_PATTERN_CHARS))
     try:
         check_pattern(query)
     except PatternTooCostly as exc:

@@ -693,8 +693,17 @@ def _compile_text(entry: dict[str, Any], enc: TextCodec,
 
 
 def _compile_variable(entry: dict[str, Any], indent: int) -> list[RubyObject]:
-    variable_id = int(entry["variable"])
-    end = int(entry.get("variable_end", variable_id))
+    """Control Variables (122) from a DSL entry.
+
+    Every id here goes through `_needs_int`, not `int()`. `int(True)` is 1 and
+    `int(2.9)` is 2, so a wrong-typed id addressed a different game variable
+    than the caller named -- and quietly, because the command was then written
+    and reported as a success against the coerced id. `registry.as_int` says
+    the same thing about database ids; this file already applied the rule to
+    switch, self_switch, face_index and indent, and not to the variable ids.
+    """
+    variable_id = _needs_int(entry["variable"], "variable")
+    end = _needs_int(entry.get("variable_end", variable_id), "variable_end")
     operation = entry.get("op", entry.get("operation", "set"))
     op_code = VARIABLE_OP_CODES.get(operation)
     if op_code is None:
@@ -703,12 +712,27 @@ def _compile_variable(entry: dict[str, Any], indent: int) -> list[RubyObject]:
             % (operation, ", ".join(sorted(VARIABLE_OP_CODES)))
         )
     if "from_variable" in entry:
-        operand_type, operand, operand2 = 1, int(entry["from_variable"]), 0
+        operand_type = 1
+        operand = _needs_int(entry["from_variable"], "from_variable")
+        operand2 = 0
     elif "random" in entry:
-        low, high = entry["random"]
-        operand_type, operand, operand2 = 2, int(low), int(high)
+        bounds = entry["random"]
+        # Shape-checked before unpacking: `low, high = entry["random"]` raised
+        # a bare ValueError on anything that was not a pair, and server.py
+        # reports an unexpected exception as "an argument was not the shape
+        # the tool expected" -- true, but it names neither the argument nor
+        # the shape.
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            raise CommandError(
+                "random takes two whole numbers, [low, high]; got %r"
+                % (bounds,))
+        operand_type = 2
+        operand = _needs_int(bounds[0], "random low")
+        operand2 = _needs_int(bounds[1], "random high")
     else:
-        operand_type, operand, operand2 = 0, int(entry.get("value", 0)), 0
+        operand_type = 0
+        operand = _needs_int(entry.get("value", 0), "value")
+        operand2 = 0
     return [_cmd(122, indent, [variable_id, end, op_code, operand_type, operand, operand2])]
 
 
@@ -761,6 +785,22 @@ def _compile_choices(entry: dict[str, Any], enc: TextCodec, indent: int,
         raise CommandError("the engine allows 1 to %d choices, got %d"
                            % (MAX_CHOICES, len(choices)))
     branches = entry.get("branches") or []
+    if not isinstance(branches, (list, tuple)):
+        raise CommandError("branches must be an array of command lists, "
+                           "got %r" % (branches,))
+    if len(branches) > len(choices):
+        # Refused, not truncated. `body = branches[index] if index <
+        # len(branches) else []` compiled the first len(choices) and dropped
+        # the rest, and the reply then said the page had been rewritten -- the
+        # same success a caller gets when nothing was dropped, so it will not
+        # retry what it believes already happened. Fewer branches than choices
+        # is fine: a choice with an empty body is a real thing to author.
+        raise CommandError(
+            "there are %d branches for %d choices, and branches pair with "
+            "choices by position, so %d of them would be dropped. Give one "
+            "branch per choice (an empty list for a choice that does "
+            "nothing), or use cancel_branch for the cancel path."
+            % (len(branches), len(choices), len(branches) - len(choices)))
     cancel_branch = entry.get("cancel_branch")
     # parameters[1] selects cancel behaviour: 0 disallows cancelling, 1..4 picks
     # that choice, 5 routes to a When Cancel branch. Passed through verbatim so

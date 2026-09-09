@@ -395,12 +395,19 @@ def unreadable_events_note(events: Any) -> "str | None":
             % type(events).__name__)
 
 
-# How many event page rows one map_get summary may build. Events times pages,
-# and both numbers come out of the file: the shared-object map is fifty events
-# of fifty pages, all one object, so 7 KB produced 2500 rows -- and nothing in
-# the reply said the list was long because the file was crafted rather than
-# because the map is big. Every other whole-file walk in this module goes
-# through `_check_budget`; this one went through nothing.
+# How many rows one map_get summary may build -- event rows and page rows
+# together. Events times pages, and both numbers come out of the file: the
+# shared-object map is fifty events of fifty pages, all one object, so 7 KB
+# produced 2500 rows, and nothing in the reply said the list was long because
+# the file was crafted rather than because the map is big.
+#
+# "Together" is the correction. The first version of this counted only page
+# rows, because the counter sat inside the pages loop while the event row was
+# appended outside it -- so an event with an empty @pages cost nothing and
+# still produced a row, and a hash of a million links to one such event (four
+# bytes a pair on disk) built a million dicts. `MAX_TOOL_RESULT_CHARS` does
+# not save that: it is measured after the reply has been serialised, so it
+# bounds the response and not the work or the memory.
 MAX_EVENT_SUMMARY_ROWS = 2000
 
 
@@ -422,6 +429,9 @@ def _event_summaries(ctx: Context, game_map: RubyObject
             return out, True
         if not isinstance(event, RubyObject):
             continue
+        # The event's own row. Charged here rather than only in the pages loop
+        # below, which is what let an event with no pages be free.
+        rows += 1
         pages = event.get("pages") or []
         page_rows = []
         for index, page in enumerate(pages):
@@ -949,7 +959,12 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     # both call worse than no preview.
     has_file = ctx.project.exists(filename)
     if dry_run:
-        preview: dict[str, Any] = {
+        # `reply`, not `preview`: `preview` above is the ReferencePreview, and
+        # rebinding the name here left one local holding two unrelated types
+        # on two paths of one function -- with `preview.counted` read further
+        # down, correct only because this branch returns. `_op_delete` in
+        # db_tools names its reply `reply` for the same reason.
+        reply: dict[str, Any] = {
             "op": "delete", "map_id": map_id, "dry_run": True,
             "would_delete": filename if has_file else None,
             "incoming_transfers": incoming,
@@ -958,11 +973,11 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
             # An empty `incoming_transfers` from a scan that stopped reads as
             # "no map sends the player here", which is the one thing a caller
             # about to delete a map acts on.
-            preview["incoming_transfers_scan_stopped"] = incomplete
+            reply["incoming_transfers_scan_stopped"] = incomplete
         if not has_file:
-            preview["note"] = ("there is no %s to delete, so only the tree "
+            reply["note"] = ("there is no %s to delete, so only the tree "
                                "entry would be removed" % filename)
-        return preview
+        return reply
     # The tree entry goes first. Removing the file first meant that a refused
     # MapInfos save -- the editor holding it open, which is exactly what the
     # staleness check exists for -- left the map deleted and the tree still
