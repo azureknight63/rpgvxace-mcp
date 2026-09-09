@@ -44,7 +44,10 @@ CODEC = "src/rpgvxace_mcp/marshal_rb.py"
 TYPES = "src/rpgvxace_mcp/rubytypes.py"
 SCHEMA = "src/rpgvxace_mcp/schema.py"
 DOCS = "src/rpgvxace_mcp/docs.py"
-MAP_TOOLS = "src/rpgvxace_mcp/tools/map_tools.py"
+MAP_COMMON = "src/rpgvxace_mcp/tools/map_common.py"
+MAP_READ = "src/rpgvxace_mcp/tools/map_read_tools.py"
+MAP_EDIT = "src/rpgvxace_mcp/tools/map_edit_tools.py"
+MAP_TILE = "src/rpgvxace_mcp/tools/map_tile_tools.py"
 MISC_TOOLS = "src/rpgvxace_mcp/tools/misc_tools.py"
 PROJECT = "src/rpgvxace_mcp/project.py"
 SERVER = "src/rpgvxace_mcp/server.py"
@@ -472,7 +475,7 @@ GUARDS = [
         "encode on the transport and ends the session",
     ),
     Guard(
-        "unmodelled engine cannot create a map", MAP_TOOLS,
+        "unmodelled engine cannot create a map", MAP_EDIT,
         "    if ctx.project.engine != ctx.project.profile.key:",
         "    if False:",
         [UNMOD + "test_creating_a_map_is_refused"],
@@ -862,7 +865,7 @@ GUARDS = [
         "when it had been given",
     ),
     Guard(
-        "a map patch cannot change its size", MAP_TOOLS,
+        "a map patch cannot change its size", MAP_EDIT,
         '    refuse_fields(',
         '    _skip = (',
         [MAPW + "test_a_patch_cannot_change_the_map_size",
@@ -871,7 +874,7 @@ GUARDS = [
         "does not have, which is the shape the editor refuses to open",
     ),
     Guard(
-        "both halves of a map edit are checked first", MAP_TOOLS,
+        "both halves of a map edit are checked first", MAP_EDIT,
         '    if name is not None:\n'
         '        info = ctx.project.get_entry("map_infos", map_id)',
         '    if False:\n'
@@ -881,7 +884,7 @@ GUARDS = [
         "caller is told the call failed with half of it already on disk",
     ),
     Guard(
-        "a discarded tile is reported", MAP_TOOLS,
+        "a discarded tile is reported", MAP_EDIT,
         '    dropped = _cells_outside(data, width, height)',
         '    dropped = 0',
         [MAPW + "test_a_shrink_reports_the_tiles_it_discards"],
@@ -889,7 +892,7 @@ GUARDS = [
         "bounds",
     ),
     Guard(
-        "tile values fit their layer", MAP_TOOLS,
+        "tile values fit their layer", MAP_TILE,
         '    _check_tile(ctx, tile_id, rect.z, "tile_id")',
         '    pass  # check removed',
         [MAPW + "test_a_tile_value_the_layer_cannot_hold_is_refused",
@@ -930,7 +933,7 @@ GUARDS = [
         "which is the same lie as reporting a scope that was skipped",
     ),
     Guard(
-        "creating a map is staged like every other write", MAP_TOOLS,
+        "creating a map is staged like every other write", MAP_EDIT,
         "    with ctx.staged(filename, infos_file) as write_landed:",
         "    if True:  # staging removed",
         [CREATE + "test_a_refused_create_leaves_no_tree_entry"],
@@ -985,7 +988,7 @@ GUARDS = [
         'field this refuses',
     ),
     Guard(
-        "creating a map checks its patch", MAP_TOOLS,
+        "creating a map checks its patch", MAP_EDIT,
         """    # The same refusal the update path makes. Creating used to return before
     # that check ran, so a create could write a map whose @width disagreed
     # with its tile table -- the shape the editor will not open.
@@ -1214,14 +1217,14 @@ GUARDS = [
         'a malformed field name is dropped and the rows come back without it, with no error',
     ),
     Guard(
-        'an empty tile table is named', MAP_TOOLS,
+        'an empty tile table is named', MAP_TILE,
         '    if data.xsize < 1 or data.ysize < 1:',
         '    if False:',
         [EMPTYT + "test_an_empty_tile_table_says_so"],
         'a map with no cells is reported as a bad default for x, which is about an argument the caller never sent',
     ),
     Guard(
-        'growing a map is bounded too', MAP_TOOLS,
+        'growing a map is bounded too', MAP_EDIT,
         '    _check_budget(width * height * data.zsize, "write",\n                  windowed=False, remedy=_RESIZE_REMEDY)',
         '    pass  # target size unchecked',
         [GROW + "test_a_grow_past_the_ceiling_is_refused"],
@@ -1265,7 +1268,7 @@ GUARDS = [
         'a VX area is written with no @id, or with the @id of the entry it was cloned from, and a patch can move an id off its own slot',
     ),
     Guard(
-        'map_tiles gates its op arguments', MAP_TOOLS,
+        'map_tiles gates its op arguments', MAP_TILE,
         '    check_op_args(op, args, TILE_OP_ARGS, "map_tiles")',
         '    pass  # gate removed',
         [GATED + "test_map_tiles_refuses_the_other_ops_arguments"],
@@ -1309,7 +1312,7 @@ GUARDS = [
         'MAX_JSON_NODES and MAX_JSON_DEPTH both restart once per string that carries an ivar record, so a few kilobytes can ask for an unbounded walk',
     ),
     Guard(
-        'the tile tally says what it left out', MAP_TOOLS,
+        'the tile tally says what it left out', MAP_READ,
         '            "tile_ids_not_shown": max(0, len(counter) - TOP_TILE_IDS),',
         '            "tile_ids_not_shown": 0,',
         [TILETALLY + "test_it_reports_the_ids_it_did_not_list"],
@@ -1374,7 +1377,7 @@ GUARDS = [
         'command_reference code=101 search=X answers for 101 alone, and the caller cannot tell that from a search that matched nothing',
     ),
     Guard(
-        'a filtered list says what it counted', MAP_TOOLS,
+        'a filtered list says what it counted', MAP_READ,
         '    orphans = sorted(on_disk - {i for i, _ in',
         '    orphans = [] if parent_filter is not None else sorted(on_disk - {i for i, _ in',
         [FILTERED + "test_a_filter_does_not_claim_there_are_no_orphans"],
@@ -1390,7 +1393,7 @@ GUARDS = [
         'a map whose @events cannot be read comes back with an empty event list on all three read tools, so a model concludes there are none',
     ),
     Guard(
-        'map_get answers a tiles request it cannot fill', MAP_TOOLS,
+        'map_get answers a tiles request it cannot fill', MAP_READ,
         '    tiles = one_of(args, "tiles", list(TILE_DETAIL), TILE_DETAIL[0])',
         '    tiles = "none"',
         [TILESNONE + "test_asking_for_counts_says_there_is_no_table",
@@ -1405,7 +1408,7 @@ GUARDS = [
         'a negative page is accepted and filters nothing out, while event_edit refuses the same value and raw_data gives it the opposite meaning',
     ),
     Guard(
-        'the delete preview matches the delete', MAP_TOOLS,
+        'the delete preview matches the delete', MAP_EDIT,
         '            "would_delete": filename if has_file else None,',
         '            "would_delete": filename,',
         [DELPREV + "test_the_preview_says_there_is_no_file_to_delete"],
@@ -1658,7 +1661,7 @@ GUARDS = [
         'not claiming the scope is only half of it: the reply then just omits it, and a caller has to notice an absence rather than read a sentence',
     ),
     Guard(
-        'the event summary has a ceiling', MAP_TOOLS,
+        'the event summary has a ceiling', MAP_READ,
         """        if rows >= MAX_EVENT_SUMMARY_ROWS:
             return out, True""",
         """        if False:
@@ -1739,7 +1742,7 @@ GUARDS = [
         '_AssetChecker.check returns before it counts anything when a graphic name is empty, so the collector ceiling never fills and the walk over events x pages had no bound at all',
     ),
     Guard(
-        'the event summary charges for the event row too', MAP_TOOLS,
+        'the event summary charges for the event row too', MAP_READ,
         '''        # The event's own row. Charged here rather than only in the pages loop
         # below, which is what let an event with no pages be free.
         rows += 1''',

@@ -36,7 +36,10 @@ from rpgvxace_mcp.rubytypes import (  # noqa: E402
 )
 from rpgvxace_mcp import convert  # noqa: E402
 from rpgvxace_mcp.convert import ConversionError  # noqa: E402
-from rpgvxace_mcp.schema import PROFILES  # noqa: E402
+from rpgvxace_mcp.schema import (  # noqa: E402
+    PROFILES,
+    STRUCTURAL_MAP_FIELDS,
+)
 from rpgvxace_mcp.tools.search_tools import MAX_SUBJECT_CHARS  # noqa: E402
 from rpgvxace_mcp.tools import pattern_safety  # noqa: E402
 from rpgvxace_mcp.tools.pattern_safety import (  # noqa: E402
@@ -48,7 +51,10 @@ from rpgvxace_mcp.tools.search_tools import _matcher  # noqa: E402
 from rpgvxace_mcp.tools import (  # noqa: E402,F401
     db_tools,
     event_tools,
-    map_tools,
+    map_common,
+    map_edit_tools,
+    map_read_tools,
+    map_tile_tools,
     misc_tools,
     raw_tools,
 )
@@ -2482,7 +2488,7 @@ class TestInapplicableArgumentsAreRefused(ToolTest):
         for tool_name, key, table in (
                 ("event_edit", "ops", event_tools.EVENT_OP_ARGS),
                 ("db_edit", "ops", db_tools.DB_OP_ARGS),
-                ("map_edit", None, map_tools.MAP_OP_ARGS)):
+                ("map_edit", None, map_edit_tools.MAP_OP_ARGS)):
             with self.subTest(tool=tool_name):
                 properties = REGISTRY[tool_name].schema["properties"]
                 if key:
@@ -2753,7 +2759,7 @@ class TestAMapPatchCannotMoveAnEvent(ToolTest):
     def test_both_guards_read_the_same_list(self):
         """The two lists had drifted, which is what opened the hole."""
         self.assertEqual(tuple(raw_tools.STRUCTURAL_MAP_PATHS),
-                         tuple(map_tools.STRUCTURAL_MAP_FIELDS))
+                         tuple(STRUCTURAL_MAP_FIELDS))
 
 
 class TestCommandReferenceSaysWhoseLayoutsTheseAre(ToolTest):
@@ -3038,7 +3044,7 @@ class TestDiscardedTileCountIsRight(ToolTest):
                             if (x >= width or y >= height)
                             and table.get(x, y, z))
                     self.assertEqual(
-                        map_tools._cells_outside(table, width, height),
+                        map_edit_tools._cells_outside(table, width, height),
                         expected,
                         "%dx%dx%d cropped to %dx%d" % (xs, ys, zs, width, height))
 
@@ -3272,8 +3278,8 @@ class TestEveryOpSelectingToolHasATable(unittest.TestCase):
     # Every op table in the tools layer, by the tool and argument path it
     # governs. `ops` means the op sits inside each entry of an `ops` array.
     TABLES = {
-        ("map_edit", None): map_tools.MAP_OP_ARGS,
-        ("map_tiles", None): map_tools.TILE_OP_ARGS,
+        ("map_edit", None): map_edit_tools.MAP_OP_ARGS,
+        ("map_tiles", None): map_tile_tools.TILE_OP_ARGS,
         ("db_edit", "ops"): db_tools.DB_OP_ARGS,
         ("event_edit", "ops"): event_tools.EVENT_OP_ARGS,
         ("raw_data", None): raw_tools.RAW_OP_ARGS,
@@ -3478,7 +3484,7 @@ class TestTileTallySaysWhatItLeftOut(ToolTest):
         counts = self.call("map_get", map_id=1,
                            tiles="counts")["tile_counts"]
         layer = counts["0"]
-        self.assertGreater(layer["distinct_tile_ids"], map_tools.TOP_TILE_IDS)
+        self.assertGreater(layer["distinct_tile_ids"], map_read_tools.TOP_TILE_IDS)
         self.assertEqual(
             layer["tile_ids_not_shown"],
             layer["distinct_tile_ids"] - len(layer["most_common"]))
@@ -3540,8 +3546,8 @@ class TestNoOpSlipsPastTheGate(ToolTest):
     # Every op-selecting tool, and the table that must cover it. `ops` means
     # the op sits inside each entry of an `ops` array.
     TABLES = {
-        ("map_edit", None): map_tools.MAP_OP_ARGS,
-        ("map_tiles", None): map_tools.TILE_OP_ARGS,
+        ("map_edit", None): map_edit_tools.MAP_OP_ARGS,
+        ("map_tiles", None): map_tile_tools.TILE_OP_ARGS,
         ("db_edit", "ops"): db_tools.DB_OP_ARGS,
         ("event_edit", "ops"): event_tools.EVENT_OP_ARGS,
         ("raw_data", None): raw_tools.RAW_OP_ARGS,
@@ -5100,7 +5106,7 @@ class TestMapGetBoundsItsEventSummary(SharedObjectMap, ToolTest):
         self.craft_shared_map()
         out = self.assert_bounded("map_get", map_id=1, include_events=True)
         rows = sum(len(event["pages"]) for event in out["events"])
-        self.assertLessEqual(rows, map_tools.MAX_EVENT_SUMMARY_ROWS)
+        self.assertLessEqual(rows, map_read_tools.MAX_EVENT_SUMMARY_ROWS)
 
     def test_a_stopped_summary_says_so(self):
         self.craft_shared_map()
@@ -5717,7 +5723,7 @@ class TestAnEmptyPageStillCostsSomething(EmptyPageMap, ToolTest):
         self.craft_empty_page_map()
         out = self.assert_bounded("map_get", map_id=1, include_events=True)
         self.assertLessEqual(len(out["events"]),
-                             map_tools.MAX_EVENT_SUMMARY_ROWS)
+                             map_read_tools.MAX_EVENT_SUMMARY_ROWS)
         self.assertIn("events_truncated", out)
 
     def test_every_row_counts_toward_the_summary_ceiling(self):
@@ -5725,7 +5731,7 @@ class TestAnEmptyPageStillCostsSomething(EmptyPageMap, ToolTest):
         self.craft_empty_page_map()
         out = self.assert_bounded("map_get", map_id=1, include_events=True)
         rows = len(out["events"]) + sum(len(e["pages"]) for e in out["events"])
-        self.assertLessEqual(rows, map_tools.MAX_EVENT_SUMMARY_ROWS + 1)
+        self.assertLessEqual(rows, map_read_tools.MAX_EVENT_SUMMARY_ROWS + 1)
 
     def test_deleting_a_map_is_bounded(self):
         self.craft_empty_page_map()
@@ -5921,7 +5927,7 @@ class TestAnEventWithNoPagesStillCostsARow(ToolTest):
         event.set("y", 0)
         event.set("pages", [])                     # no pages at all
         events = RubyHash()
-        for event_id in range(1, map_tools.MAX_EVENT_SUMMARY_ROWS * 3):
+        for event_id in range(1, map_read_tools.MAX_EVENT_SUMMARY_ROWS * 3):
             events.set(event_id, event)
         game_map = self.project.load_map(1)
         game_map.set("events", events)
@@ -5933,10 +5939,10 @@ class TestAnEventWithNoPagesStillCostsARow(ToolTest):
         self.craft()
         out = self.call("map_get", map_id=1, include_events=True)
         self.assertLessEqual(len(out["events"]),
-                             map_tools.MAX_EVENT_SUMMARY_ROWS,
+                             map_read_tools.MAX_EVENT_SUMMARY_ROWS,
                              "%d event rows came back against a ceiling of %d"
                              % (len(out["events"]),
-                                map_tools.MAX_EVENT_SUMMARY_ROWS))
+                                map_read_tools.MAX_EVENT_SUMMARY_ROWS))
 
     def test_and_says_that_it_stopped(self):
         self.craft()
@@ -5947,7 +5953,7 @@ class TestAnEventWithNoPagesStillCostsARow(ToolTest):
         self.craft()
         out = self.call("event_get", map_id=1)
         self.assertLess(len(out["events"]),
-                        map_tools.MAX_EVENT_SUMMARY_ROWS * 3)
+                        map_read_tools.MAX_EVENT_SUMMARY_ROWS * 3)
 
 
 class TestEveryPreviewReadsAsAPreview(ToolTest):
@@ -6168,7 +6174,7 @@ class TestATileTallyUsesTheBuffer(ToolTest):
         """The fast form has to agree with the slow one, layer by layer."""
         from collections import Counter
         data = self.project.load_map(1).get("data")
-        counts = map_tools._tile_counts(data)
+        counts = map_read_tools._tile_counts(data)
         for z in range(data.zsize):
             slow: Counter = Counter()
             for y in range(data.ysize):
@@ -6185,14 +6191,14 @@ class TestATileTallyUsesTheBuffer(ToolTest):
         data = self.project.load_map(1).get("data")
         data.set(0, 0, 0, 4242)
         data.set(1, 0, 0, 4242)
-        counts = map_tools._tile_counts(data)
+        counts = map_read_tools._tile_counts(data)
         top = {row["tile_id"]: row["count"]
                for row in counts["0"]["most_common"]}
         self.assertEqual(top.get(4242), 2)
 
     def test_every_layer_is_reported(self):
         data = self.project.load_map(1).get("data")
-        counts = map_tools._tile_counts(data)
+        counts = map_read_tools._tile_counts(data)
         self.assertEqual(sorted(counts), sorted(str(z) for z in range(data.zsize)))
 
 

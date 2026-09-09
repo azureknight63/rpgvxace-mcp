@@ -21,7 +21,10 @@ from .project import Project, ProjectError, ReadOnlyError, StaleFileError
 from .tools import (  # noqa: F401
     db_tools,
     event_tools,
-    map_tools,
+    map_common,
+    map_edit_tools,
+    map_read_tools,
+    map_tile_tools,
     misc_tools,
     raw_tools,
     search_tools,

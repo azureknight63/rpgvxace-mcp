@@ -47,7 +47,10 @@ from rpgvxace_mcp.schema import (  # noqa: E402
 from rpgvxace_mcp.tools import (  # noqa: E402,F401
     db_tools,
     event_tools,
-    map_tools,
+    map_common,
+    map_edit_tools,
+    map_read_tools,
+    map_tile_tools,
     misc_tools,
 )
 from rpgvxace_mcp.tools.registry import Context, REGISTRY, ToolError  # noqa: E402
@@ -372,9 +375,13 @@ class TestToolModulesAreLeaves(unittest.TestCase):
                 if p.name != "__init__.py" and not self.registers_a_tool(p)}
 
     def test_the_scan_finds_the_tool_modules(self):
+        """So a broken scan cannot make the rule below vacuously true."""
         names = {p.stem for p in self.tool_modules()}
-        self.assertIn("map_tools", names)
         self.assertIn("event_tools", names)
+        # The three halves map_tools was split into. Named individually
+        # because the split is the thing this suite made possible.
+        for half in ("map_read_tools", "map_edit_tools", "map_tile_tools"):
+            self.assertIn(half, names)
         self.assertGreater(len(names), 5)
 
     def test_no_tool_module_imports_from_a_sibling(self):
