@@ -278,6 +278,12 @@ CODE_JUMP_TO_LABEL = 119
 CODE_TRANSFER_PLAYER = 201
 CODE_CALL_COMMON_EVENT = 117
 CODE_SCRIPT, CODE_SCRIPT_MORE = 355, 655
+CODE_COMMENT = 108
+# The continuation codes `summarize` renders as bare text. Named
+# because it dispatches on them, which is the same reason the eight
+# above have names -- and it spelled all eight numbers out anyway.
+CODE_TEXT_LINE = 401
+CODE_COMMENT_LINE = 408
 
 # Transfer Player (201): designation, map_id, x, y, direction, fade.
 TRANSFER_MAP, TRANSFER_X, TRANSFER_Y = 1, 2, 3
@@ -399,15 +405,15 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
     def p(index: int, default: Any = None) -> Any:
         return _param(params, index, default)
 
-    if code == 0:
+    if code == CODE_BLANK:
         return ""
-    if code in (401, 408, 655):
+    if code in (CODE_TEXT_LINE, CODE_COMMENT_LINE, CODE_SCRIPT_MORE):
         return '"%s"' % _text(p(0, ""), codec)
-    if code == 101:
+    if code == CODE_SHOW_TEXT:
         face = _text(p(0, ""), codec)
         detail = "face %s[%s]" % (face, p(1, 0)) if face else "no face"
         return "%s (%s)" % (name, detail)
-    if code == 108:
+    if code == CODE_COMMENT:
         return "Comment: %s" % _text(p(0, ""), codec)
     if code == 102:
         # `MAX_CHOICES` is the *authoring* ceiling; this list's length comes
@@ -441,9 +447,9 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
     if code == 123:
         return "%s: %s = %s" % (name, _text(p(0, ""), codec),
                                 SWITCH_OPERATIONS.get(p(1), p(1)))
-    if code == 117:
+    if code == CODE_CALL_COMMON_EVENT:
         return "%s: %s" % (name, p(0))
-    if code == 201:
+    if code == CODE_TRANSFER_PLAYER:
         return "%s: map %s at (%s, %s)" % (name, p(1), p(2), p(3))
     if code == 205:
         return "%s: %s" % (name, _character(p(0)))
@@ -455,7 +461,7 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
         return "%s: %s" % (name, audio_name)
     if code == 301:
         return "%s: troop %s" % (name, p(1))
-    if code == 355:
+    if code == CODE_SCRIPT:
         return "%s: %s" % (name, _text(p(0, ""), codec))
     if code == 505:
         move = p(0)
@@ -463,7 +469,7 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
             move_code = move.get("code", 0)
             return "> %s" % MOVE_COMMAND_NAMES.get(move_code, "Move %s" % move_code)
         return "> Move Command"
-    if code in (118, 119):
+    if code in (CODE_LABEL, CODE_JUMP_TO_LABEL):
         return "%s: %s" % (name, _text(p(0, ""), codec))
 
     spec = ALL_PARAM_SPECS.get(code)
@@ -650,7 +656,8 @@ def _compile_entry(entry: dict[str, Any], enc: TextCodec, indent: int,
         return [_cmd(117, indent,
                      [_needs_int(entry["common_event"], "common_event")])]
 
-    for key, code in (("label", 118), ("jump", 119)):
+    for key, code in (("label", CODE_LABEL),
+                      ("jump", CODE_JUMP_TO_LABEL)):
         if key in entry:
             return [_cmd(code, indent, [enc.make_string(str(entry[key]))])]
 

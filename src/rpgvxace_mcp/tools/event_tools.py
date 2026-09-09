@@ -1162,7 +1162,11 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         if borrowed:
             notes.append(borrowed)
         if notes:
-            entry["notes"] = notes
+            # `layout_notes`, because `notes` was also a *sentence* in
+            # `search`'s reply -- one key, two types, and a caller reading
+            # either had to know which tool it came from. These are notes
+            # about one command's parameter layout, so the key says so.
+            entry["layout_notes"] = notes
         return entry
 
     needle = (opt_str(args, "search") or "").lower()

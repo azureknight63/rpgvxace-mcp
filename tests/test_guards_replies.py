@@ -320,15 +320,16 @@ class TestSearchSaysWhatItDidNotRead(ToolTest):
         out = self.call("search", query="NEEDLE", regex=True,
                         scopes=["database"])
         self.assertEqual(out["hits"], [])
-        self.assertIn("notes", out)
-        self.assertIn(str(MAX_SUBJECT_CHARS), out["notes"])
+        self.assertIn("strings_clipped_note", out)
+        self.assertIn(str(MAX_SUBJECT_CHARS),
+                      out["strings_clipped_note"])
 
     def test_a_substring_search_reads_the_whole_string(self):
         self.long_note()
         out = self.call("search", query="NEEDLE", scopes=["database"])
         self.assertEqual(out["count"], 1)
         # Nothing was clipped, so nothing is claimed to have been.
-        self.assertNotIn("notes", out)
+        self.assertNotIn("strings_clipped_note", out)
 
 
 class TestCommandReferenceSaysWhoseLayoutsTheseAre(ToolTest):
@@ -642,16 +643,22 @@ class TestAScopeIsClaimedOnlyOnceRead(ToolTest):
             "could be opened, so zero hits reads as zero matches")
 
     def test_it_says_that_it_read_nothing_rather_than_going_quiet(self):
+        """One `scopes_not_read` mapping, not one key per scope.
+
+        This asked for `events_note`, built as `"%s_note" % scope` -- a key
+        name made out of data, so a caller had to guess which of four
+        spellings would come back.
+        """
         self.break_every_events_file()
         out = self.call("search", query="anything", scopes=["events"])
-        self.assertTrue(out.get("events_note"),
+        self.assertTrue(out.get("scopes_not_read", {}).get("events"),
                         "nothing in the reply explains the empty result: %s"
                         % sorted(out))
 
     def test_a_readable_project_still_claims_it(self):
         out = self.call("search", query="Potion", scopes=["events"])
         self.assertIn("events", out["scopes_searched"])
-        self.assertNotIn("events_note", out)
+        self.assertNotIn("scopes_not_read", out)
 
 
 class TestNoDeadPublicApi(unittest.TestCase):
@@ -1072,3 +1079,233 @@ class TestEveryReferenceTargetHasANoun(unittest.TestCase):
                 | {ref.target for ref in NESTED_DB_REFERENCES} | literal)
         self.assertEqual(sorted(set(TABLE_NOUNS) - used), [],
                          "these nouns name a table nothing reads")
+
+
+class TestACodeWithAConstantIsSpelledWithIt(unittest.TestCase):
+    """`commands` names its codes and then wrote the numbers anyway.
+
+    `CONDITION_KINDS`' comment says this was fixed for the COND_* set --
+    "eight of the thirteen constants were dead while the function that
+    should have used them spelled their numbers out" -- and the same thing
+    was true of CODE_* for `summarize`, which dispatched on all eight by
+    number.
+
+    Checked rather than described, because a constant nobody reads is
+    indistinguishable from no constant at all.
+    """
+
+    def module(self):
+        return (Path(__file__).resolve().parent.parent / "src"
+                / "rpgvxace_mcp" / "commands.py")
+
+    def constants(self):
+        """Every CODE_* constant, by the number it names."""
+        import ast
+        tree = ast.parse(self.module().read_text(encoding="utf-8"))
+        out = {}
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            targets, values = node.targets[0], node.value
+            pairs = (zip(targets.elts, values.elts)
+                     if isinstance(targets, ast.Tuple)
+                     and isinstance(values, ast.Tuple)
+                     else [(targets, values)])
+            for name, value in pairs:
+                if (isinstance(name, ast.Name)
+                        and name.id.startswith("CODE_")
+                        and isinstance(value, ast.Constant)):
+                    out[value.value] = name.id
+        return out
+
+    def test_no_function_compares_a_code_to_a_number_that_has_a_name(self):
+        import ast
+        known = self.constants()
+        self.assertGreater(len(known), 8, "the constants were not found")
+        tree = ast.parse(self.module().read_text(encoding="utf-8"))
+        spelled = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Compare)
+                    and isinstance(node.left, ast.Name)
+                    and node.left.id == "code"):
+                continue
+            for comparator in node.comparators:
+                items = (comparator.elts if isinstance(comparator, ast.Tuple)
+                         else [comparator])
+                for item in items:
+                    if (isinstance(item, ast.Constant)
+                            and item.value in known):
+                        spelled.append("%s should be %s"
+                                       % (item.value, known[item.value]))
+        self.assertEqual(spelled, [],
+                         "these compare a code to a number this module has "
+                         "already named: " + "; ".join(spelled))
+
+
+class TestOneVocabularyForAPartialAnswer(ToolTest):
+    """Twenty-odd spellings of "this is not the whole story", two colliding.
+
+    `notes` was a list of layout notes in `command_reference` and a sentence
+    about clipped strings in `search`; `events_truncated` was a paragraph
+    while `references_truncated` and `incoming_transfers_truncated` two
+    modules over were booleans. One key, two types, in both cases -- so a
+    caller reading either had to know which tool it was talking to, which
+    is the opposite of what a shared suffix is for.
+
+    Three suffixes now, one type each, and `registry.partial` builds them.
+    """
+
+    TYPES = {"_truncated": bool, "_note": str, "_not_read": dict}
+
+    def replies(self):
+        """A broad sample of real replies, read-only where possible."""
+        slot = self.call("scripts", op="list")["scripts"][0]["index"]
+        return [
+            ("project_info", dict()),
+            ("db_list", dict(table="items")),
+            ("db_get", dict(table="items", id=1)),
+            ("map_list", dict(include_details=True)),
+            ("map_get", dict(map_id=1, tiles="counts")),
+            ("map_tiles", dict(op="read", map_id=1, x=0, y=0, width=2,
+                               height=2, z=0)),
+            ("event_get", dict(map_id=1)),
+            ("event_get", dict(common_event_id=1)),
+            ("search", dict(query="Potion")),
+            ("search", dict(query=".", regex=True)),
+            ("search", dict(command_code=101)),
+            ("validate", dict()),
+            ("command_reference", dict()),
+            ("scripts", dict(op="get", index=slot)),
+            ("backups", dict(op="list")),
+            ("raw_data", dict(op="get", table="system", path="game_title")),
+            ("db_edit", dict(table="items", dry_run=True,
+                             ops=[{"op": "delete", "id": 1}])),
+            ("map_edit", dict(op="delete", map_id=2, dry_run=True)),
+        ]
+
+    def keys_of(self, value, prefix=""):
+        """Every key in a reply, including the ones inside its rows."""
+        if isinstance(value, dict):
+            for key, item in value.items():
+                yield key, item
+                yield from self.keys_of(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from self.keys_of(item)
+
+    def test_every_partial_key_has_the_type_its_suffix_promises(self):
+        wrong = []
+        for name, arguments in self.replies():
+            reply = self.call(name, **arguments)
+            for key, value in self.keys_of(reply):
+                for suffix, kind in self.TYPES.items():
+                    if key.endswith(suffix) and not isinstance(value, kind):
+                        wrong.append("%s: %s is %s, not %s"
+                                     % (name, key, type(value).__name__,
+                                        kind.__name__))
+        self.assertEqual(wrong, [],
+                         "these keys share a suffix and not a type: "
+                         + "; ".join(wrong))
+
+    # The two functions whose job *is* building these keys. Every other
+    # place that makes a key out of data is the defect: `"%s_note" % scope`
+    # produced one of four names depending on which scope came back empty,
+    # so a caller had to guess which one to read.
+    OWNERS = ("partial", "as_reply")
+
+    def test_no_reply_key_is_built_out_of_data(self):
+        """A key made from a value cannot be looked up in any schema.
+
+        The scan looks for a format expression in a subscript position,
+        which is the shape that produced it -- skipping the two functions
+        that own the suffixes, because a rule that forbids its own
+        implementation is not a rule.
+        """
+        import ast
+        root = (Path(__file__).resolve().parent.parent / "src"
+                / "rpgvxace_mcp")
+        dynamic = []
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            # By node identity, because `ast.walk` yields a function's whole
+            # body whatever the loop does with the FunctionDef itself -- so
+            # skipping the definition does not skip what is inside it.
+            allowed = {id(inner)
+                       for node in ast.walk(tree)
+                       if isinstance(node, ast.FunctionDef)
+                       and node.name in self.OWNERS
+                       for inner in ast.walk(node)}
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Subscript):
+                    continue
+                if id(node) in allowed:
+                    continue
+                index = node.slice
+                if (isinstance(index, ast.BinOp)
+                        and isinstance(index.op, ast.Mod)
+                        and isinstance(index.left, ast.Constant)
+                        and isinstance(index.left.value, str)):
+                    dynamic.append("%s: %s" % (path.name,
+                                               ast.unparse(node)))
+        self.assertEqual(dynamic, [],
+                         "these build a reply key out of data: "
+                         + "; ".join(dynamic))
+
+    def test_the_owner_list_names_functions_that_exist(self):
+        """So an exemption cannot outlive the function it was written for."""
+        from rpgvxace_mcp.analysis import ReferencePreview
+        from rpgvxace_mcp.tools import registry
+        self.assertTrue(callable(registry.partial))
+        self.assertTrue(callable(ReferencePreview.as_reply))
+
+    def test_a_reported_omission_forces_a_partial_key(self):
+        """The rule the whole vocabulary exists for.
+
+        A reply that says it left something out must also carry one of the
+        three suffixes, or the count is the only sign and a caller reading
+        the list rather than the count sees a complete answer.
+        """
+        counters = ("cells_omitted", "tile_ids_not_shown")
+        silent = []
+        for name, arguments in self.replies():
+            reply = self.call(name, **arguments)
+            omitted = [(key, value) for key, value in self.keys_of(reply)
+                       if key in counters and isinstance(value, int)
+                       and value > 0]
+            if not omitted:
+                continue
+            said = [key for key, _ in self.keys_of(reply)
+                    if any(key.endswith(s) for s in self.TYPES)]
+            if not said:
+                silent.append("%s reports %s and says nothing"
+                              % (name, omitted))
+        self.assertEqual(silent, [], "; ".join(silent))
+
+    def test_every_op_taking_tool_says_which_op_answered(self):
+        """`op` selects the branch, so a reply cannot be read without it."""
+        missing = []
+        for name, tool in REGISTRY.items():
+            spec = (tool.schema.get("properties") or {}).get("op") or {}
+            if not spec.get("enum"):
+                continue
+            for label, arguments in self.replies():
+                if label != name or "op" not in arguments:
+                    continue
+                reply = self.call(name, **arguments)
+                if reply.get("op") != arguments["op"]:
+                    missing.append("%s op=%s" % (name, arguments["op"]))
+        self.assertEqual(missing, [],
+                         "these replies do not say which op answered: "
+                         + ", ".join(missing))
+
+    def test_the_op_comes_first_or_second(self):
+        """A reply is read in order, and `dry_run` is the only thing before it."""
+        for name, arguments in self.replies():
+            if "op" not in arguments:
+                continue
+            with self.subTest(tool=name, op=arguments["op"]):
+                reply = self.call(name, **arguments)
+                keys = list(reply)[:2]
+                self.assertIn("op", keys,
+                              "%s answers %s before it says which op"
+                              % (name, keys))

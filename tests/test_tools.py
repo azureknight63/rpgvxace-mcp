@@ -510,7 +510,10 @@ class TestCommandReference(ToolTest):
         result = self.call("command_reference", code=232)
         self.assertIsNone(result["parameters"])
         # A list, because a code can be both undispatched and unrecorded.
-        self.assertTrue(any("include_raw" in note for note in result["notes"]))
+        # `layout_notes`: `notes` was also a *sentence* in search's
+        # reply, so one key had two types.
+        self.assertTrue(any("include_raw" in note
+                            for note in result["layout_notes"]))
 
     def test_search_by_name(self):
         result = self.call("command_reference", search="picture")

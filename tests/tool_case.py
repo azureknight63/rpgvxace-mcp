@@ -3,27 +3,6 @@
 Its own module so both halves of the suite import *down* to it rather than
 one importing the other -- the sibling-import problem the tools layer had
 just finished fixing, and worse here: a guard names its test by file, so a
-# Imported for their side effect: each of these modules registers its tools
-# with `REGISTRY` at import time, so a suite that never mentions them still
-# needs them loaded -- and `REGISTRY` is empty without them, which reads as
-# "the tool does not exist" rather than as a missing import.
-#
-# Here rather than in each suite, because that is exactly what went wrong
-# when this file was split out: pyflakes reports the block as unused, the
-# automatic prune believed it, and three real-project tests then failed with
-# KeyError on a tool name.
-from rpgvxace_mcp.tools import (  # noqa: E402,F401
-    db_tools,
-    event_tools,
-    map_common,
-    map_edit_tools,
-    map_read_tools,
-    map_tile_tools,
-    misc_tools,
-    raw_tools,
-    search_tools,
-)
-
 class that moves because another file imported it takes its guard with it.
 
 `ToolTest` builds a fresh demo project per test method. The mixins build
@@ -54,6 +33,30 @@ from rpgvxace_mcp.rubytypes import (  # noqa: E402
 from rpgvxace_mcp.tools.registry import (  # noqa: E402
     Context,
     REGISTRY,
+)
+
+# Imported for their side effect: each of these modules registers its tools
+# with `REGISTRY` at import time, so a suite that never mentions them still
+# needs them loaded -- and `REGISTRY` is empty without them, which reads as
+# "the tool does not exist" rather than as a missing import.
+#
+# Here rather than in each suite, because that is what went wrong when this
+# file was split out: pyflakes reports the block as unused, the automatic
+# prune believed it, and every suite then failed with KeyError on a tool
+# name. And the repair after that put this block inside the docstring,
+# because the anchor it looked for matched the word "class" in prose --
+# which is why `tests/test_prove_guards.py` now runs each suite file on its
+# own rather than only as part of the whole run.
+from rpgvxace_mcp.tools import (  # noqa: E402,F401
+    db_tools,
+    event_tools,
+    map_common,
+    map_edit_tools,
+    map_read_tools,
+    map_tile_tools,
+    misc_tools,
+    raw_tools,
+    search_tools,
 )
 
 

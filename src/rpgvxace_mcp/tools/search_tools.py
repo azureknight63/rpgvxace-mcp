@@ -22,7 +22,11 @@ from ..commands import command_name, summarize
 from ..project import ProjectError
 from ..rubytypes import RubyObject, RubyString, _bare_name
 from ..schema import ARRAY, HASH
-from .pattern_safety import PatternTooCostly, check_pattern
+from .pattern_safety import (
+    MEASURED_FLAGS,
+    PatternTooCostly,
+    check_pattern,
+)
 from .registry import (
     ARR,
     BOOL,
@@ -299,7 +303,7 @@ class _Hits:
         if matcher is not None and matcher.clipped:
             out["strings_clipped_to_first_chars"] = {
                 "characters": MAX_SUBJECT_CHARS, "count": matcher.clipped}
-            out["notes"] = (
+            out["strings_clipped_note"] = (
                 "%d string%s longer than %d characters, and a regular "
                 "expression is matched against that much of each. A hit "
                 "further in was not found and is not reported as absent. "
@@ -307,8 +311,11 @@ class _Hits:
                 "string in full."
                 % (matcher.clipped, "s were" if matcher.clipped > 1 else " was",
                    MAX_SUBJECT_CHARS))
-        for scope, note in self.empty.items():
-            out["%s_note" % scope] = note
+        if self.empty:
+            # One mapping, not one key per scope: `"%s_note" % scope` built
+            # a key name out of data, so a caller could not look it up in
+            # any schema and had to guess at four possible spellings.
+            out["scopes_not_read"] = dict(self.empty)
         if self.unreadable:
             out["scripts_not_searched"] = self.unreadable
         if self.unsearchable:
@@ -504,7 +511,10 @@ def _matcher(args: dict[str, Any], query: str | None) -> "_Matcher | None":
     except PatternTooCostly as exc:
         raise ToolError(str(exc))
     try:
-        pattern = re.compile(query, re.IGNORECASE)
+        # The flags the *measurement* was made under, from the module
+        # that made it: both spelled `re.IGNORECASE` and nothing held
+        # them equal.
+        pattern = re.compile(query, MEASURED_FLAGS)
     except re.error as exc:
         raise ToolError("invalid regular expression: %s" % exc)
     except RecursionError:

@@ -884,6 +884,32 @@ def decoded_text(codec: TextCodec, value: Any) -> str:
     return text
 
 
+def brief(value: Any, limit: int = MAX_TEXT_CHARS) -> str:
+    """A value quoted into a message, sliced before it is repr'd.
+
+    The slice comes first, which is the point and the half one of the
+    two copies of this helper missed: `analysis._brief`'s only caller
+    passes a MapInfos hash key straight out of an untrusted file, so a
+    crafted key was repr'd whole and cut afterwards -- a cap that
+    bounds the result and not the work, which is the opposite of the
+    rule `decoded_text` states for itself just above.
+
+    Here rather than in either caller: `registry.echo` had the same job
+    and the pre-slice, `analysis._brief` had the job and not the
+    pre-slice, and the two used different constants.
+    """
+    if isinstance(value, RubyString):
+        return brief(value.data, limit)
+    if isinstance(value, (str, bytes, bytearray)) and len(value) > limit:
+        return "%r... (%d %s)" % (
+            value[:limit], len(value),
+            "characters" if isinstance(value, str) else "bytes")
+    shown = repr(value)
+    if len(shown) > limit:
+        return shown[:limit] + "... (%d characters)" % len(shown)
+    return shown
+
+
 def normalize_strings(value: Any, codec: TextCodec, depth: int = 0) -> Any:
     """Restyle every string in a freshly built object tree for this project.
 

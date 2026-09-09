@@ -47,6 +47,7 @@ a number that does not predict the cost.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 import sys
@@ -286,17 +287,23 @@ _CATEGORY_SAMPLES = {
 # parent -- see `measure_cost`.
 COMPILE_FAILED_EXIT = 17
 
+# The flags every measurement is made under, and the flags the caller
+# has to match on. The child spelled `re.IGNORECASE` and so did the one
+# caller, and nothing held the two equal -- a cost measured under one
+# set of flags says nothing about a match made under another.
+MEASURED_FLAGS = re.IGNORECASE
+
 _CHILD = (
     "import base64, re, sys\n"
     "lines = sys.stdin.read().split()\n"
     "pattern = base64.b64decode(lines[0]).decode('utf-8')\n"
     "try:\n"
-    "    compiled = re.compile(pattern, re.IGNORECASE)\n"
+    "    compiled = re.compile(pattern, %d)\n"
     "except re.error:\n"
     "    sys.exit(%d)\n"
     "for encoded in lines[1:]:\n"
     "    compiled.search(base64.b64decode(encoded).decode('utf-8'))\n"
-    "print('ok')\n") % COMPILE_FAILED_EXIT
+    "print('ok')\n") % (int(MEASURED_FLAGS), COMPILE_FAILED_EXIT)
 
 # Patterns already measured and passed, in this process. A model searching for
 # the same thing across several scopes would otherwise pay for a child each

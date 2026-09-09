@@ -123,9 +123,27 @@ class Tool:
         The check lives here rather than in the transport so that it travels
         with the tool: put in one caller, every other entry point skipped it,
         and a schema that is not enforced everywhere is not a contract.
+
+        The reply says which op answered it, for the same reason and in the
+        same place. Three of the tools that take an `op` echoed it and four
+        did not, so a caller holding a reply could not always tell which
+        branch produced it -- and `op` is what selects the branch, so it is
+        the one argument a reply cannot be read without. Added here rather
+        than in each handler: that is what "three of seven" comes from.
         """
         check_args(self.schema, args)
-        return self.handler(ctx, args)
+        reply = self.handler(ctx, args)
+        op = args.get("op")
+        if (isinstance(reply, dict) and isinstance(op, str)
+                and "op" not in reply):
+            # Rebuilt rather than assigned into, so `op` is first: a reply is
+            # read in order, and which branch answered comes before what it
+            # answered. `dry_run` is the one thing that comes before it, for
+            # the same reason `write_reply` puts it first.
+            lead = {"dry_run": True} if reply.get("dry_run") else {}
+            return {**lead, "op": op,
+                    **{k: v for k, v in reply.items() if k != "dry_run"}}
+        return reply
 
     def definition(self) -> dict[str, Any]:
         return {
@@ -277,6 +295,41 @@ PREVIEW_NAMES = {
     "code_characters": "would_write_characters",
     "after": "would_become",
 }
+
+
+# How a reply says it is not the whole story. Three suffixes, each with one
+# type, because there were twenty-odd spellings and two of them collided:
+# `notes` was a list in one tool and a sentence in another, and `_truncated`
+# was a boolean in two tools and a paragraph in a third -- so a caller
+# reading either had to know which tool it was talking to.
+#
+#   <subject>_truncated  bool  the answer about <subject> is partial
+#   <subject>_note       str   prose about <subject>, whatever the reason
+#   <subject>_not_read   dict  what could not be read, and why, by name
+#
+# A dynamic key is the fourth thing this replaces: `"%s_note" % scope` is a
+# key a caller cannot find in any schema, so `search` now answers one
+# `scopes_not_read` mapping instead of one key per scope.
+PARTIAL_SUFFIXES = ("_truncated", "_note", "_not_read")
+
+
+def partial(subject: str, truncated: bool = False,
+            notes: "tuple[str, ...] | list[str]" = ()) -> dict[str, Any]:
+    """The keys that say an answer about ``subject`` is not complete.
+
+    One function, so the suffixes and their types cannot drift again. The
+    boolean and the prose are separate keys deliberately: a model reads the
+    sentence and a caller's code reads the flag, and folding them into one
+    key is what made `events_truncated` a paragraph where
+    `references_truncated` was a boolean.
+    """
+    out: dict[str, Any] = {}
+    if truncated:
+        out["%s_truncated" % subject] = True
+    said = [note for note in notes if note]
+    if said:
+        out["%s_note" % subject] = " ".join(said)
+    return out
 
 
 def preview_row(row: dict[str, Any]) -> dict[str, Any]:

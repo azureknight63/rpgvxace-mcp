@@ -15,6 +15,7 @@ from ..schema import TILE_ID_RANGES, TRIGGER_NAMES, unreadable_events_note
 from .map_common import MAX_CELLS_PER_WALK, _check_budget
 from .registry import (
     BOOL,
+    partial,
     Context,
     INT,
     REFRESH,
@@ -233,13 +234,17 @@ def map_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     if opt_bool(args, "include_events", True):
         result["events"], cut_short = _event_summaries(ctx, game_map)
         if cut_short:
-            result["events_truncated"] = (
-                "this map describes more than %d event and page rows, so the "
-                "summary "
-                "stops there. A map that large is usually a file that shares "
-                "one page object across many slots rather than a big map -- "
-                "run validate. Read particular events with event_get."
-                % MAX_EVENT_SUMMARY_ROWS)
+            # A boolean *and* a sentence, from `partial`. This used to be the
+            # sentence under the boolean's name, while `references_truncated`
+            # two modules over was a boolean -- so one suffix meant two
+            # types and a caller reading either had to know which.
+            result.update(partial(
+                "events", truncated=True, notes=(
+                    "this map describes more than %d event and page rows, so "
+                    "the summary stops there. A map that large is usually a "
+                    "file that shares one page object across many slots "
+                    "rather than a big map -- run validate. Read particular "
+                    "events with event_get." % MAX_EVENT_SUMMARY_ROWS,)))
         unreadable = unreadable_events_note(game_map.get("events"))
         if unreadable:
             result["events_note"] = unreadable

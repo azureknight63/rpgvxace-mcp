@@ -295,3 +295,54 @@ class MultipleAnchorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SuiteFilesRunAloneTest(unittest.TestCase):
+    """Every test file passes when it is the only one collected.
+
+    `prove_guards` names a test as `file::Class::test` and runs pytest on
+    exactly that, so a suite that only passes as part of the whole run makes
+    every guard in it report BROKEN -- a hundred guards saying "fix the
+    tests first" and none of them saying which test or why.
+
+    That is not hypothetical. Splitting `test_tools.py` moved tool
+    registration into `tool_case`, the repair put the import block inside
+    that module's docstring (the anchor matched the word "class" in prose),
+    and the whole run passed because some *other* file had imported the tool
+    modules first. 90 of 206 guards came back BROKEN, from two baseline
+    failures that the full run could not show.
+
+    One subprocess per file, so this is the slowest test in the project by
+    some distance. It is worth it: the alternative is a forty-minute proving
+    run that reports nothing usable.
+    """
+
+    def suite_files(self):
+        tests = Path(__file__).resolve().parent
+        return sorted(path for path in tests.glob("test_*.py")
+                      if path.name != Path(__file__).name)
+
+    def test_every_suite_file_passes_alone(self):
+        import os
+        import subprocess
+
+        root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(root / "src"), str(root / "tests" / "fixtures")])
+        failed = []
+        for path in self.suite_files():
+            done = subprocess.run(
+                [sys.executable, "-m", "pytest", str(path), "-q",
+                 "--no-header", "-p", "no:cacheprovider"],
+                cwd=str(root), capture_output=True, text=True, env=env,
+                timeout=600)
+            if done.returncode != 0:
+                tail = [line for line in done.stdout.split("\n")
+                        if "failed" in line or "error" in line]
+                failed.append("%s: %s" % (path.name,
+                                          tail[-1] if tail else "no detail"))
+        self.assertEqual(failed, [],
+                         "these files do not pass on their own, so every "
+                         "guard naming them would report BROKEN: "
+                         + "; ".join(failed))

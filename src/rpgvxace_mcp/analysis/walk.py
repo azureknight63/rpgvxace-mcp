@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from ..convert import MAX_TEXT_CHARS, decoded_text
+from ..convert import brief, decoded_text
 from ..project import Project, ProjectError
 from ..rubytypes import RubyHash, RubyObject
 
@@ -126,15 +126,14 @@ def _int(value: Any) -> int | None:
 
 
 def _brief(value: Any) -> str:
-    """A value quoted into a message, capped before it is repr'd.
+    """A value quoted into a message, sliced before it is repr'd.
 
-    For the places that show what was found rather than its text: a repr of an
-    un-decoded RubyString megabytes long would otherwise reach the response.
+    A wrapper over `convert.brief`, and that is the fix: this capped the
+    result and not the work, so its one caller -- which passes a
+    MapInfos hash key straight out of an untrusted file -- repr'd a
+    crafted key whole and cut it afterwards.
     """
-    shown = repr(value)
-    if len(shown) > MAX_TEXT_CHARS:
-        return shown[:MAX_TEXT_CHARS] + "... (%d characters)" % len(shown)
-    return shown
+    return brief(value)
 
 
 def _text(project: Project, value: Any) -> str:
