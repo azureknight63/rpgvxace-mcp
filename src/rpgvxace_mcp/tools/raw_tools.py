@@ -29,8 +29,7 @@ from ..rubytypes import (
     Table,
     _bare_name,
 )
-from ..schema import ALL_TABLE_KEYS
-from .map_tools import STRUCTURAL_MAP_FIELDS
+from ..schema import ALL_TABLE_KEYS, STRUCTURAL_MAP_FIELDS
 from .registry import (
     write_reply,
     Context,

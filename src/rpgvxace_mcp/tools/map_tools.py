@@ -15,7 +15,13 @@ from ..convert import (
 from ..analysis import reference_preview
 from ..project import MAX_MAP_ID, ProjectError
 from ..rubytypes import CELL_MASK, RubyHash, RubyObject, RubyString, Table
-from ..schema import TILE_ID_RANGES, TRIGGER_NAMES, new_map_info
+from ..schema import (
+    STRUCTURAL_MAP_FIELDS,
+    TILE_ID_RANGES,
+    TRIGGER_NAMES,
+    new_map_info,
+    unreadable_events_note,
+)
 from .registry import (
     write_reply,
     refuse_unknown_fields,
@@ -62,20 +68,6 @@ MAX_MAP_SIDE = 1000
 # What a new map is sized as when the caller does not say. The editor's own
 # default for a new map, and small enough to be cheap to create.
 DEFAULT_MAP_WIDTH, DEFAULT_MAP_HEIGHT = 20, 15
-
-# Map fields a patch must not touch, because something else owns the
-# invariants they are part of: setting @width alone leaves a map claiming a
-# size its @data does not have, which is a file the editor refuses to open.
-#
-# "events" is here because a patch merges field by field, so
-# `patch={"events": {"1": {"x": 99999}}}` reached straight into the event
-# object and moved it off the map, past event_edit's bounds check -- while the
-# refusal message printed right here already told the caller to use event_edit
-# for events. raw_data's list had "events" and this one did not, which is the
-# drift that made the two disagree; there is now one list, and raw_data imports
-# it.
-STRUCTURAL_MAP_FIELDS = ("width", "height", "data", "events")
-
 
 # How many cells one windowed read returns or one write covers. The whole of a
 # large map is more than a caller can use and more than the response can carry.
@@ -391,22 +383,6 @@ def _tile_sheet(tile_id: int) -> str:
         if low <= tile_id <= high:
             return sheet
     return "unknown"
-
-
-def unreadable_events_note(events: Any) -> "str | None":
-    """What to say about an @events that is not a Hash, or None if it is fine.
-
-    `event_edit` refuses such a map by name; the three read tools returned an
-    empty list, so "we could not read this" and "there are none" looked
-    identical and a model concluded the map has no events. One sentence, in
-    one place, because three tools were reporting the same fact three ways --
-    which is to say, not reporting it at all.
-    """
-    if events is None or isinstance(events, RubyHash):
-        return None
-    return ("this map holds its events as %s rather than a Hash, so none "
-            "could be read. Run validate to see what is wrong with the file."
-            % type(events).__name__)
 
 
 # How many rows one map_get summary may build -- event rows and page rows

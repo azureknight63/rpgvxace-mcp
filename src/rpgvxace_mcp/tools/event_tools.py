@@ -28,11 +28,11 @@ from ..project import MAX_MAP_ID
 from ..rubytypes import RubyHash, RubyObject, RubyString
 from ..schema import (
     TRIGGER_NAMES,
+    unreadable_events_note,
     new_event,
     new_event_command,
     new_page,
 )
-from .map_tools import unreadable_events_note
 from .registry import (
     write_reply,
     MAX_OPS,

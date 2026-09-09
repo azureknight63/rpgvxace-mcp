@@ -1154,7 +1154,7 @@ GUARDS = [
         'a regex search reports "no hits" for text it never looked at, in the same shape as a search that read everything',
     ),
     Guard(
-        'a map patch cannot reach into events', MAP_TOOLS,
+        'a map patch cannot reach into events', SCHEMA,
         'STRUCTURAL_MAP_FIELDS = ("width", "height", "data", "events")',
         'STRUCTURAL_MAP_FIELDS = ("width", "height", "data")',
         [MAPEV + "test_patching_events_is_refused",
@@ -1381,9 +1381,9 @@ GUARDS = [
         'a filtered map_list reports "no orphan map files" from a check that never ran, which is the zero that reads as "nothing looked"',
     ),
     Guard(
-        'unreadable events are not reported as empty', MAP_TOOLS,
-        'def unreadable_events_note(events: Any) -> "str | None":',
-        'def unreadable_events_note(events: Any) -> "str | None":\n    return None',
+        'unreadable events are not reported as empty', SCHEMA,
+        'def unreadable_events_note(events: "Any") -> "str | None":',
+        'def unreadable_events_note(events: "Any") -> "str | None":\n    return None',
         [UNREAD + "test_event_get_says_it_could_not_read_them",
          UNREAD + "test_map_get_says_so_too",
          UNREAD + "test_map_list_says_so_too"],

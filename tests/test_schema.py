@@ -336,3 +336,75 @@ class TestTheReferenceAgreesWithTheTables(unittest.TestCase):
         text = self.document(self.ace)
         for code in names:
             self.assertIn(str(code), text)
+
+
+class TestToolModulesAreLeaves(unittest.TestCase):
+    """No tool module takes vocabulary from a sibling tool module.
+
+    Shared facts belong in `schema` (what the format is), `analysis` (how a
+    project is walked) or `registry` (what a tool call looks like) -- all of
+    which sit below `tools/` and are imported by every one of them. A fact
+    kept in a leaf makes that leaf un-splittable and the graph unreadable.
+    """
+
+    def folder(self):
+        root = Path(__file__).resolve().parent.parent / "src"
+        return root / "rpgvxace_mcp" / "tools"
+
+    def registers_a_tool(self, path):
+        """Whether a module under tools/ actually registers one.
+
+        This is the line between a leaf and shared infrastructure, and it is
+        computed rather than listed: `registry` and `pattern_safety` register
+        nothing and are imported by the modules that do, which is the design.
+        A hard-coded exception list would have to be maintained, and the next
+        helper added would look like a violation.
+        """
+        return "@tool(" in path.read_text(encoding="utf-8")
+
+    def tool_modules(self):
+        """The leaves: modules under tools/ that register a tool."""
+        return sorted(p for p in self.folder().glob("*.py")
+                      if p.name != "__init__.py" and self.registers_a_tool(p))
+
+    def shared_modules(self):
+        return {p.stem for p in self.folder().glob("*.py")
+                if p.name != "__init__.py" and not self.registers_a_tool(p)}
+
+    def test_the_scan_finds_the_tool_modules(self):
+        names = {p.stem for p in self.tool_modules()}
+        self.assertIn("map_tools", names)
+        self.assertIn("event_tools", names)
+        self.assertGreater(len(names), 5)
+
+    def test_no_tool_module_imports_from_a_sibling(self):
+        import ast
+
+        crossings = []
+        shared = self.shared_modules()
+        self.assertIn("registry", shared, "the scan lost the shared layer")
+        for path in self.tool_modules():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                # level 1 and a bare module name is a sibling inside tools/.
+                if node.level != 1 or not node.module:
+                    continue
+                if node.module in shared:
+                    continue
+                names = ", ".join(alias.name for alias in node.names)
+                crossings.append("%s imports %s from .%s"
+                                 % (path.name, names, node.module))
+        self.assertEqual(
+            crossings, [],
+            "a tool module is a leaf: move the shared name down to schema, "
+            "analysis or registry.\n  " + "\n  ".join(crossings))
+
+    def test_the_shared_names_are_reachable_where_they_moved(self):
+        """So this suite cannot pass by the names simply disappearing."""
+        from rpgvxace_mcp.schema import (STRUCTURAL_MAP_FIELDS,
+                                         unreadable_events_note)
+        self.assertIn("events", STRUCTURAL_MAP_FIELDS)
+        self.assertIsNone(unreadable_events_note(RubyHash()))
+        self.assertIsNotNone(unreadable_events_note(42))

@@ -155,7 +155,40 @@ def map_filename(map_id: int, extension: str) -> str:
 # Documented class fields
 # ---------------------------------------------------------------------------
 
-# Classes whose structure is identical in both engines.
+# Map fields a patch must not touch, because something else owns the
+# invariants they are part of: setting @width alone leaves a map claiming a
+# size its @data does not have, which is a file the editor refuses to open.
+#
+# "events" is here because a patch merges field by field, so
+# `patch={"events": {"1": {"x": 99999}}}` reached straight into the event
+# object and moved it off the map, past event_edit's bounds check.
+#
+# Here rather than in `map_tools`, which is a leaf that registers tools:
+# `raw_tools` needs this list too and was importing it from that leaf, which
+# is what made the import graph among the tools unreadable and `map_tools`
+# un-splittable. Same argument as TRIGGER_NAMES below.
+STRUCTURAL_MAP_FIELDS = ("width", "height", "data", "events")
+
+
+def unreadable_events_note(events: "Any") -> "str | None":
+    """What to say about an @events that is not a Hash, or None if it is fine.
+
+    `event_edit` refuses such a map by name; the three read tools returned an
+    empty list, so "we could not read this" and "there are none" looked
+    identical and a model concluded the map has no events. One sentence, in
+    one place, because three tools were reporting the same fact three ways --
+    which is to say, not reporting it at all.
+
+    Here rather than in `map_tools` for the same reason as the list above:
+    `event_tools` needs it and was reaching into a sibling leaf for it.
+    """
+    if events is None or isinstance(events, RubyHash):
+        return None
+    return ("this map holds its events as %s rather than a Hash, so none "
+            "could be read. Run validate to see what is wrong with the file."
+            % type(events).__name__)
+
+
 # The six flags on RPG::Event::Page::Condition. A page with none of them set
 # has no conditions, which matters because RPG Maker runs the LAST page whose
 # conditions match: an unconditional page hides every page before it. Listed
@@ -182,6 +215,10 @@ TRIGGER_NAMES = {
 # The nine tileset sheets an RPG::Tileset names, in @tileset_names order.
 TILESET_SHEET_NAMES = ("A1", "A2", "A3", "A4", "A5", "B", "C", "D", "E")
 
+# Classes whose structure is identical in both engines. This sentence spent
+# several rounds sixty lines further up, above PAGE_CONDITION_FLAGS, where it
+# read as a description of that -- which is how a comment goes wrong with
+# nothing wrong in the code.
 SHARED_CLASS_FIELDS: dict[str, dict[str, str]] = {
     "RPG::MapInfo": {
         "name": "Map name as shown in the map tree",
