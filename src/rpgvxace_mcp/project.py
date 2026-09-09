@@ -20,19 +20,33 @@ from __future__ import annotations
 import configparser
 import functools
 import hashlib
-import json
 import os
-import re
 import shutil
-import stat
 import tempfile
 import zlib
-from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from . import marshal_rb
+from .backups import BackupStore
+# Read here, and re-exported here. `CHANGE_LOG`, `WORK_DIR`,
+# `DEFAULT_BACKUP_KEEP` and the three errors are imported *from this module*
+# by the tools layer and the tests, under the names they have always had --
+# moving the path rules into their own file is not a reason to make nine
+# callers learn a second module name.
+from .paths import (  # noqa: F401
+    BACKUP_STAMP_FORMAT,
+    CHANGE_LOG,
+    DEFAULT_BACKUP_KEEP,
+    ProjectError,
+    ReadOnlyError,
+    StaleFileError,
+    TMP_SUFFIX,
+    WORK_DIR,
+    _contained,
+    safe_component,
+)
 from .convert import TextCodec, decoded_text, detect_encoding
 from .rubytypes import RubyHash, RubyObject, RubyString, ruby_children
 from .schema import (
@@ -50,14 +64,6 @@ from .schema import (
     VX_PROFILE,
     map_filename,
 )
-
-
-WORK_DIR = ".rpgvxace-mcp"
-BACKUP_DIR = "backups"
-CHANGE_LOG = "changes.jsonl"
-BACKUP_STAMP_FORMAT = "%Y%m%d-%H%M%S"
-TMP_SUFFIX = ".rpgvxace-mcp.tmp"
-DEFAULT_BACKUP_KEEP = 10
 
 # How much of a project is sampled to guess its text encoding.
 ENCODING_SAMPLE_TABLES = ("system", "actors", "items", "map_infos")
@@ -84,58 +90,6 @@ MAX_GAME_INI_BYTES = 1024 * 1024
 # A script slot inflates into memory, so a crafted Scripts file must not be
 # able to ask for an unbounded amount of it.
 MAX_SCRIPT_BYTES = 16 * 1024 * 1024
-
-# A single path component that cannot lead anywhere but where it is joined.
-# Everything this server opens is named either by its own registry or by a
-# caller, and a caller's string reaches the filesystem, so it is checked here.
-_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
-
-# Names Windows resolves to devices rather than files, whatever the extension.
-# safe_component is meant to be the one place a caller's name is judged, so it
-# refuses these rather than leaving each call site to prove it cannot reach one.
-_RESERVED_NAMES = frozenset(
-    ["con", "prn", "aux", "nul"]
-    + ["com%d" % n for n in range(1, 10)]
-    + ["lpt%d" % n for n in range(1, 10)]
-)
-
-# A snapshot directory this server made: the stamp, and an optional label.
-_BACKUP_STAMP = re.compile(r"^\d{8}-\d{6}(-[A-Za-z0-9._-]+)?$")
-
-
-def _is_reparse_point(path: Path) -> bool:
-    """Whether this is a symlink, a junction, or any other reparse point.
-
-    `Path.is_symlink()` is False for an NTFS directory junction -- which is
-    why `os.path.isjunction` had to be added in 3.12 -- so the prune filter
-    that meant to step over a directory it did not create stepped straight
-    into one.
-
-    What that actually did is worth recording, because it is not what a review
-    of this code predicted. The prediction was that `shutil.rmtree` would
-    recurse through the junction and delete the target's contents. Measured on
-    3.11: rmtree refuses ("Cannot call rmtree on a symbolic link") and the
-    target survives -- and it never gets that far anyway, because
-    `_contained` resolves the junction to its target, finds it outside the
-    backup root, and raises. So there was no data loss. What there was is one
-    foreign directory failing the prune for the whole project, with a message
-    about containment rather than about a directory that was never ours.
-
-    Three checks because no single one covers every version: `is_symlink` for
-    a real symlink, `os.path.isjunction` where it exists, and the reparse
-    attribute for 3.11 on Windows.
-    """
-    if path.is_symlink():
-        return True
-    isjunction = getattr(os.path, "isjunction", None)
-    if isjunction is not None and isjunction(path):
-        return True
-    try:
-        attributes = os.lstat(path).st_file_attributes
-    except (AttributeError, OSError):
-        # Not Windows, or the entry went away between listing and asking.
-        return False
-    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 # Project files that identify an engine, most specific first. The modelled
 # engines come from their own profiles so this cannot drift; XP has no profile,
@@ -200,55 +154,6 @@ RTP_SEARCH_ROOTS = [
 ]
 
 
-class ProjectError(RuntimeError):
-    """Raised for problems with the project itself, not with a request."""
-
-
-class ReadOnlyError(ProjectError):
-    """Raised when something would write while --read-only is in force."""
-
-
-class StaleFileError(ProjectError):
-    """Raised when a file changed on disk after this server read it."""
-
-
-def safe_component(name: Any, what: str) -> str:
-    """One path component, with no way out of the directory it is joined to.
-
-    Tool arguments reach the filesystem, and this server feeds the model text
-    out of the project itself -- map names, dialogue, script source -- so a path
-    argument has to be treated as something an attacker may have influenced. A
-    name with a separator, a drive letter, or ``..`` in it is refused here
-    rather than resolved somewhere later.
-    """
-    if not isinstance(name, str) or not _SAFE_COMPONENT.match(name):
-        raise ProjectError(
-            "%r is not a usable %s. It has to be a single name made of letters, "
-            "digits, dots, dashes, plus signs or underscores -- no directory "
-            "separators, drive letters or \"..\"." % (name, what)
-        )
-    if name.split(".")[0].lower() in _RESERVED_NAMES or name.endswith("."):
-        raise ProjectError(
-            "%r is not a usable %s: Windows resolves that name to a device "
-            "rather than a file." % (name, what)
-        )
-    return name
-
-
-def _contained(path: Path, inside: Path, what: str) -> Path:
-    """Assert a built path really is under the directory it should be.
-
-    Belt to :func:`safe_component`'s braces: a symlink or junction inside the
-    tree could otherwise carry a validated name somewhere else.
-    """
-    resolved = path.resolve()
-    if not resolved.is_relative_to(inside.resolve()):
-        raise ProjectError(
-            "%s resolves to %s, which is outside %s" % (what, resolved, inside)
-        )
-    return resolved
-
-
 # How much *source* the decoded-file cache may hold in total.
 #
 # MAX_DATA_FILE_BYTES bounds one file; nothing bounded the sum, and the cache
@@ -289,7 +194,7 @@ class CachedFile:
         self.digest = digest
 
 
-class Project:
+class Project(BackupStore):
     def __init__(self, root: str | os.PathLike[str], encoding: str = "auto",
                  read_only: bool = False, backup_keep: int = DEFAULT_BACKUP_KEEP,
                  allow_other_engines: bool = False,
@@ -917,263 +822,6 @@ class Project:
         self._log_change(tool, filename, "deleted")
         return {"file": filename, "deleted": str(path), "backup": backup}
 
-    # -- backups --------------------------------------------------------------
-    def backup_root(self) -> Path:
-        return self.work_dir() / BACKUP_DIR
-
-    def session_backup_dir(self) -> Path:
-        return self.backup_root() / self._session
-
-    def _backup_dir(self, stamp: str) -> Path:
-        """The directory of one named snapshot, and only inside the backup root.
-
-        ``stamp`` comes from a tool argument, so it is validated as a single
-        component and the result is checked to be under the backup root. Without
-        both, an absolute path replaces the join entirely and the restore reads
-        and writes wherever it is pointed.
-        """
-        safe_component(stamp, "backup name")
-        root = self.backup_root()
-        directory = root / stamp
-        _contained(directory, root, "backup %r" % stamp)
-        return directory
-
-    @staticmethod
-    def _backup_contents(directory: Path) -> list[str]:
-        return sorted(p.name for p in directory.iterdir() if p.is_file())
-
-    def backup_file(self, filename: str) -> str | None:
-        """Copy a file aside the first time this run touches it.
-
-        Old snapshots are pruned when this run's snapshot directory is first
-        created, so pruning happens once per run rather than per file.
-        """
-        if filename in self._backed_up:
-            return None
-        source = self.path_for(filename)
-        if not source.is_file():
-            self._backed_up.add(filename)
-            return None
-        target_dir = self.session_backup_dir()
-        first = not target_dir.exists()
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / safe_component(filename, "data file name")
-        _contained(target, target_dir, "backup of %r" % filename)
-        shutil.copy2(source, target)
-        self._backed_up.add(filename)
-        if first:
-            self.prune_backups()
-        return str(target)
-
-    def snapshot(self, label: str = "manual", keep: set[str] | None = None,
-                 dry_run: bool = False) -> dict[str, Any]:
-        """Copy every data file into a fresh backup directory.
-
-        Prunes old snapshots afterwards, sparing anything named in ``keep``.
-
-        ``dry_run`` reports what would be copied without writing anything.
-        It walks the same files with the same skips rather than leaving the
-        caller to glob for itself: the `backups` tool did that, so its preview
-        listed the symlinked data files this refuses to copy -- a preview that
-        does not match the act is worse than no preview.
-        """
-        if not dry_run:
-            # Gated like every sibling preview: save_file, delete_file,
-            # restore_backup and prune_backups all check this only when they
-            # are about to write. A read-only server used to refuse a snapshot
-            # *preview*, which writes nothing, so a model exploring one was
-            # told a write had failed.
-            self._assert_writable("taking a snapshot")
-        clean = re.sub(r"[^A-Za-z0-9._-]", "-", label) or "manual"
-        stamp = datetime.now().strftime(BACKUP_STAMP_FORMAT) + "-" + clean
-        target = self._backup_dir(stamp)
-        if not dry_run:
-            target.mkdir(parents=True, exist_ok=True)
-        copied = []
-        for path in sorted(self.data_dir.glob("*" + self.extension)):
-            if _is_reparse_point(path):
-                # Copying one would put whatever it points at into the backup
-                # tree, where the read tools would serve it as project data.
-                # Through `_is_reparse_point`, whose own docstring calls
-                # `is_symlink()` insufficient on Windows: this was the one
-                # filter left asking the narrower question.
-                continue
-            name = safe_component(path.name, "data file name")
-            _contained(target / name, target, "backup of %r" % name)
-            if not dry_run:
-                shutil.copy2(path, target / name)
-            copied.append(name)
-        # The prune is part of the act, so the preview reports it too. It was
-        # left out of both, so `backups op="create"` quietly removed the
-        # oldest snapshot while the sibling op="prune" reports every removal.
-        #
-        # One key set on both paths. The dry run used to answer
-        # `would_snapshot`, `label` and `would_prune` where the act answers
-        # `backup`, `path`, `files` and `pruned` -- two different replies to
-        # one question, so a caller could not compare them, and the preview
-        # led with a past-tense-free key rather than with the fact that
-        # nothing had happened. Naming a *fact* here and letting the tools
-        # layer phrase it keeps `write_reply` the one place that decides how
-        # a preview reads, and keeps this module below that layer.
-        return {"backup": stamp, "path": str(target), "label": clean,
-                "files": copied,
-                "pruned": self.prune_backups(keep, dry_run=dry_run)}
-
-    def list_backups(self) -> list[dict[str, Any]]:
-        root = self.backup_root()
-        if not root.is_dir():
-            return []
-        out = []
-        for entry in sorted(root.iterdir(), reverse=True):
-            if entry.is_dir():
-                files = self._backup_contents(entry)
-                out.append({
-                    "backup": entry.name,
-                    "created": datetime.fromtimestamp(
-                        entry.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"),
-                    "files": files,
-                    "is_current_session": entry.name == self._session,
-                })
-        return out
-
-    def restore_backup(self, stamp: str, files: list[str] | None = None,
-                       dry_run: bool = False) -> dict[str, Any]:
-        # Validated before anything else, including the read-only gate: an
-        # unchecked name here both reads and writes outside the project, and
-        # checking it first means the caller is told the real reason and the
-        # containment guard is exercised in both modes.
-        source_dir = self._backup_dir(stamp)
-        if not dry_run:
-            self._assert_writable("restoring %s" % stamp)
-        if not source_dir.is_dir():
-            available = [b["backup"] for b in self.list_backups()]
-            raise ProjectError(
-                "no backup named %r; available: %s"
-                % (stamp, ", ".join(available) if available else "none")
-            )
-        available_files = self._backup_contents(source_dir)
-        # Validated as a whole before anything is copied: a rejection partway
-        # through the loop would leave Data/ half restored.
-        # Both checks in the same pass, before the safety snapshot: leaving
-        # the containment check in the copy loop meant a symlink planted in a
-        # backup aborted partway, with Data/ half old and half new.
-        wanted = []
-        for name in (files or available_files):
-            safe_component(name, "file name")
-            _contained(source_dir / name, self.backup_root(),
-                       "backup file %r" % name)
-            wanted.append(name)
-        missing = [f for f in wanted if f not in available_files]
-        if missing:
-            raise ProjectError(
-                "backup %s does not contain %s (it holds: %s)"
-                % (stamp, ", ".join(missing), ", ".join(available_files))
-            )
-        if dry_run:
-            # The facts, in the same key set as the act below and with no
-            # phrasing of its own: `write_reply` in the tools layer renames
-            # `restored` and puts `dry_run` first. This branch used to say
-            # `would_restore` here and lead with `backup`, so the one thing a
-            # caller most needs to see -- that nothing happened -- came third.
-            # `safety_backup` is absent because a dry run makes none, which is
-            # a real difference and not a phrasing one.
-            return {"backup": stamp, "restored": wanted}
-        # Snapshot what is about to be overwritten, so a mistaken restore is
-        # itself reversible. `keep` spares the snapshot being restored from:
-        # pruning runs inside this call, and would otherwise be free to delete
-        # the very directory about to be copied out of.
-        pre = self.snapshot("pre-restore", keep={stamp})
-        # Staleness-checked before anything is copied, so a restore that would
-        # overwrite an editor's unsaved work refuses with none of it done. This
-        # was the one write path exempt from the module's own stated habit --
-        # "refuse to write over a file that changed underneath us" -- and the
-        # safety snapshot above made it recoverable rather than harmless.
-        for name in wanted:
-            cached = self._cache.get(name)
-            if cached is not None:
-                self._assert_not_stale(name, self.path_for(name), cached)
-        for name in wanted:
-            # The snapshot being restored from, not the backup root: with the
-            # root as the boundary a symlink planted in one snapshot could
-            # resolve into another and be restored from there.
-            source = _contained(source_dir / name, source_dir,
-                                "backup file %r" % name)
-            shutil.copy2(source, self.path_for(name))
-            self._cache.pop(name, None)
-            # With the cache entry gone, the per-run backup flag has to go too,
-            # or the next save of a restored file skips its own backup.
-            self._backed_up.discard(name)
-        self._map_ids = None
-        self._log_change("backups", ",".join(wanted), "restored from %s" % stamp)
-        return {"backup": stamp, "restored": wanted, "safety_backup": pre["backup"]}
-
-    def prune_backups(self, keep: set[str] | None = None,
-                      dry_run: bool = False) -> list[str]:
-        """Delete all but the newest snapshots, sparing ``keep``.
-
-        ``dry_run`` returns the names that would go without removing them, so
-        a caller previewing a prune does not have to reimplement which
-        directories are candidates.
-        """
-        if not dry_run:
-            self._assert_writable("pruning backups")
-        root = self.backup_root()
-        if not root.is_dir() or self.backup_keep <= 0:
-            return []
-        spared = {self._session} | (keep or set())
-        # Only this server's own snapshots are candidates, and only by their
-        # stamped names: a directory someone else put here is not ours to
-        # delete, and a name that is not a timestamp would sort unpredictably
-        # against ones that are.
-        dirs = sorted((p for p in root.iterdir()
-                       if p.is_dir() and _BACKUP_STAMP.match(p.name)),
-                      reverse=True)
-        removed = []
-        for stale in dirs[self.backup_keep:]:
-            if stale.name in spared or _is_reparse_point(stale):
-                continue
-            _contained(stale, root, "backup %r" % stale.name)
-            if not dry_run:
-                shutil.rmtree(stale, ignore_errors=True)
-            removed.append(stale.name)
-        return removed
-
-    # -- change log -----------------------------------------------------------
-    def _log_change(self, tool: str, filename: str, summary: str) -> None:
-        try:
-            self.work_dir().mkdir(parents=True, exist_ok=True)
-            record = {
-                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "session": self._session,
-                "tool": tool,
-                "file": filename,
-                "summary": summary,
-            }
-            with open(self.work_dir() / CHANGE_LOG, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record) + "\n")
-        except OSError:
-            pass  # a project on read-only media must not break editing in memory
-
-    def recent_changes(self, limit: int = 20) -> list[dict[str, Any]]:
-        path = self.work_dir() / CHANGE_LOG
-        if not path.is_file():
-            return []
-        try:
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                # A deque keeps only the tail: the log grows for the life of
-                # the project and there is no reason to hold all of it.
-                rows = deque((line for line in handle if line.strip()),
-                             maxlen=limit)
-        except OSError:
-            return []
-        out = []
-        for line in rows:
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return out
-
     # -- assets ---------------------------------------------------------------
     def asset_names(self, kind: str) -> frozenset[str]:
         """Base names (no extension) of one asset kind, project plus RTP.
@@ -1429,5 +1077,3 @@ def collect_strings(value: Any, out: list[bytes], limit: int = 200,
     # values in RubyIvars in files the editor writes.
     for item in ruby_children(value):
         collect_strings(item, out, limit, depth + 1, seen, budget)
-
-

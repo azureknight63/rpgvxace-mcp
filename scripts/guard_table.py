@@ -30,6 +30,7 @@ MAP_EDIT = "src/rpgvxace_mcp/tools/map_edit_tools.py"
 MAP_TILE = "src/rpgvxace_mcp/tools/map_tile_tools.py"
 MISC_TOOLS = "src/rpgvxace_mcp/tools/misc_tools.py"
 PROJECT = "src/rpgvxace_mcp/project.py"
+BACKUPS = "src/rpgvxace_mcp/backups.py"
 SERVER = "src/rpgvxace_mcp/server.py"
 WALK = "src/rpgvxace_mcp/analysis/walk.py"
 REFERENCES = "src/rpgvxace_mcp/analysis/references.py"
@@ -523,7 +524,7 @@ GUARDS = [
         "reference",
     ),
     Guard(
-        "backup name is one path component", PROJECT,
+        "backup name is one path component", BACKUPS,
         """        safe_component(stamp, "backup name")
         root = self.backup_root()
         directory = root / stamp
@@ -537,7 +538,7 @@ GUARDS = [
         "read tools hand them to the model",
     ),
     Guard(
-        "containment is checked before the read-only gate", PROJECT,
+        "containment is checked before the read-only gate", BACKUPS,
         """        source_dir = self._backup_dir(stamp)
         if not dry_run:
             self._assert_writable("restoring %s" % stamp)""",
@@ -561,7 +562,7 @@ GUARDS = [
         "without checking it stays there",
     ),
     Guard(
-        "read-only blocks snapshots and pruning", PROJECT,
+        "read-only blocks snapshots and pruning", BACKUPS,
         '        self._assert_writable("pruning backups")',
         "",
         [PATHRO + "test_snapshot_and_prune_are_refused"],
@@ -569,7 +570,7 @@ GUARDS = [
         "the operator's disk",
     ),
     Guard(
-        "pruning spares the snapshot being restored", PROJECT,
+        "pruning spares the snapshot being restored", BACKUPS,
         '        pre = self.snapshot("pre-restore", keep={stamp})',
         '        pre = self.snapshot("pre-restore")',
         [PRUNE + "test_restore_survives_a_full_backup_root"],
@@ -635,7 +636,7 @@ GUARDS = [
         "writing a script back silently drops its tail",
     ),
     Guard(
-        "restore validates every name before it copies", PROJECT,
+        "restore validates every name before it copies", BACKUPS,
         '            safe_component(name, "file name")',
         '            pass  # check removed',
         [RESTORE + "test_a_bad_name_in_the_snapshot_stops_before_anything_is_copied"],
@@ -1963,7 +1964,7 @@ GUARDS = [
         'every editing tool mutates the value in the cache and then asks for it to be written, so evicting that entry in between writes the file as it was on disk and reports the edit as applied',
     ),
     Guard(
-        'a foreign backup directory is stepped over', PROJECT,
+        'a foreign backup directory is stepped over', BACKUPS,
         '            if stale.name in spared or _is_reparse_point(stale):',
         '            if stale.name in spared or stale.is_symlink():',
         [FOREIGN + "test_the_real_snapshots_are_still_pruned",
@@ -2194,5 +2195,13 @@ GUARDS = [
         [CRAFTEDCOMMON + "test_a_string_in_a_common_event_slot_is_reported",
          CRAFTEDCOMMON + "test_an_array_in_a_common_event_slot_is_reported"],
         'the read path called .get("list") straight away, so a file holding an Array in that slot raised AttributeError -- reported with the hint "an argument was not the shape the tool expected", a diagnosis about the caller for a fact about the file',
+    ),
+    Guard(
+        'a tile id the layer cannot hold is refused', MAP_COMMON,
+        '    if not 0 <= tile_id <= ceiling:',
+        '    if False:',
+        [MAPW + "test_a_tile_value_the_layer_cannot_hold_is_refused",
+         MAPW + "test_a_region_id_beyond_the_layer_is_refused"],
+        'Table.set masks to 16 bits, so an out-of-range id was silently stored as a different tile and then reported back as the value the caller asked for -- and layer 3 holds region ids the editor numbers 0 to 63, so 2816 is a plausible value from a tileset that reads as a region',
     ),
 ]

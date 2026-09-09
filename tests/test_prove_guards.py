@@ -242,6 +242,29 @@ class GuardTableTest(unittest.TestCase):
                 with self.subTest(guard=guard.name):
                     self.assertNotEqual(present, reverted)
 
+    def test_no_alias_names_something_no_guard_watches(self):
+        """An alias nothing uses is a file this suite claims to cover.
+
+        Added when the backup store moved out of `project.py`: a `PATHS`
+        alias went in alongside `BACKUPS` for the guards that turned out
+        not to live in `paths.py` after all, and nothing said so. The
+        duplicate check next door cannot see this one -- an alias used
+        zero times collides with nothing.
+
+        Only file aliases. A test-class alias used by no guard would be
+        the same defect, but the class it names is still collected and
+        still runs; a file alias names a file nothing is proven against.
+        """
+        used = {guard.file for guard in GUARDS}
+        idle = sorted(
+            name for name, value in vars(guard_table).items()
+            if (name.isupper() and isinstance(value, str)
+                and (value.startswith("src/") or value.startswith("scripts/"))
+                and value not in used))
+        self.assertEqual(idle, [],
+                         "these name a source file no guard watches, so "
+                         "nothing is proven about it: " + ", ".join(idle))
+
     def test_no_two_aliases_name_one_thing(self):
         """Two names for one test class or one file read as two subjects.
 

@@ -659,6 +659,87 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
                 self.assertTrue(hasattr(analysis, name), name)
 
 
+class TestTheBackupMixinContractHolds(unittest.TestCase):
+    """`BackupStore` is half of `Project`, and this is the seam.
+
+    The backup store was a quarter of a thousand-line class, read for its
+    own reasons and scrolled past to reach the loading and saving it sat
+    between. It is its own file now, and a mixin rather than a collaborator
+    because `restore_backup` reads the file cache, the per-run backup
+    flags, the map-id cache and the staleness check -- an object holding a
+    reference to `Project` to reach six of its private attributes is the
+    same coupling with a longer name.
+
+    What makes that safe rather than merely shorter is this test. A mixin
+    reading an attribute nobody defines fails at the moment the method
+    runs, which for `restore_backup` is after a safety snapshot has been
+    taken; and a mixin whose stated contract has gone stale is worse than
+    one with no contract written down, because the list reads as checked.
+    So both directions: everything the mixin says it needs exists, and
+    everything the mixin actually reaches is in the list.
+    """
+
+    def project(self):
+        """A real one. The attributes are set in `__init__`, not on the class."""
+        import shutil
+        import sys
+        import tempfile
+        from pathlib import Path as P
+        sys.path.insert(0, str(P(__file__).resolve().parent / "fixtures"))
+        from build_project import build
+        from rpgvxace_mcp.project import Project
+        tmp = P(tempfile.mkdtemp(prefix="rpgvxace-mixin-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        build(tmp / "project")
+        return Project(tmp / "project")
+
+    def reached(self):
+        """Every `self.<name>` the mixin's own source reads."""
+        import ast
+        source = (Path(__file__).resolve().parent.parent / "src"
+                  / "rpgvxace_mcp" / "backups.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        store = next(n for n in tree.body
+                     if isinstance(n, ast.ClassDef) and n.name == "BackupStore")
+        out = set()
+        for node in ast.walk(store):
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "self"):
+                out.add(node.attr)
+        own = {n.name for n in store.body if isinstance(n, ast.FunctionDef)}
+        own |= {t.id for n in store.body if isinstance(n, ast.Assign)
+                for t in n.targets if isinstance(t, ast.Name)}
+        return out - own
+
+    def test_everything_the_mixin_needs_is_there(self):
+        from rpgvxace_mcp.backups import BackupStore
+        project = self.project()
+        missing = sorted(name for name in BackupStore.NEEDS_FROM_PROJECT
+                         if not hasattr(project, name))
+        self.assertEqual(missing, [],
+                         "the mixin says it needs these and `Project` does "
+                         "not have them: " + ", ".join(missing))
+
+    def test_everything_the_mixin_reaches_is_in_the_list(self):
+        """The direction that keeps the list from going stale."""
+        from rpgvxace_mcp.backups import BackupStore
+        reached = self.reached()
+        self.assertTrue(reached, "read nothing, so this checked nothing")
+        undeclared = sorted(reached - set(BackupStore.NEEDS_FROM_PROJECT))
+        self.assertEqual(
+            undeclared, [],
+            "the mixin reaches these and does not declare them, so its "
+            "contract reads as checked and is not: " + ", ".join(undeclared))
+
+    def test_nothing_declared_is_unused(self):
+        """A name in the list the mixin no longer reads is the same staleness."""
+        from rpgvxace_mcp.backups import BackupStore
+        idle = sorted(set(BackupStore.NEEDS_FROM_PROJECT) - self.reached())
+        self.assertEqual(idle, [],
+                         "declared and never reached: " + ", ".join(idle))
+
+
 # Last in the file, deliberately. It used to sit mid-module,
 # and module statements run in order -- so `python tests/test_schema.py`
 # called `unittest.main()` (which exits) before the classes below
