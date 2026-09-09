@@ -720,10 +720,9 @@ GUARDS = [
         "an unreadable table is not an empty table", LINT_FINDINGS,
         "        self._load(name)\n"
         "        if name in self._failures:\n"
-        "            return None\n"
-        "        return {i for i, _ in self._rows[name]}",
+        "            return None",
         "        self._load(name)\n"
-        "        return {i for i, _ in self._rows.get(name, [])}",
+        "        if False:",
         [VTBL + "test_an_unreadable_table_is_one_finding_not_a_dangling_reference_each"],
         "a table caught half-written by the editor reads as empty, so every id "
         "that refers to it is reported as missing",
@@ -1022,8 +1021,8 @@ GUARDS = [
     ),
     Guard(
         "findings are counted before they are dropped", LINT_REPORT,
-        "    counts = {level: sum(1 for f in findings if f.severity == level)",
-        "    counts = {level: sum(1 for f in findings[:limit] if f.severity == level)",
+        "    tally = Counter(f.severity for f in findings)",
+        "    tally = Counter(f.severity for f in findings[:limit])",
         [TALLY + "test_counts_survive_truncation"],
         'truncating by arrival order before sorting let a flood of warnings '
         "from one check push out a later check's errors, and the counts "

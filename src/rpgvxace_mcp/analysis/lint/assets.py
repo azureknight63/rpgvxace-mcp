@@ -63,6 +63,21 @@ class _AssetChecker:
         # complete. This is the guard that removed 185 false warnings.
         self.complete = project.assets_complete
         self.severity = WARNING if self.complete else INFO
+        # Folded name -> the real spelling, per asset kind, built on first
+        # use. See the case-mismatch branch of `check`.
+        self._folded: dict[str, dict[str, str]] = {}
+
+    def folded(self, kind: str) -> dict[str, str]:
+        """One asset kind's names, keyed by their case-folded form.
+
+        Built once per kind and per checker. The case-mismatch branch of
+        `check` scanned the whole pool with `str.lower()` on every miss, and
+        the finding ceiling allows five thousand of those.
+        """
+        if kind not in self._folded:
+            self._folded[kind] = {name.lower(): name
+                                  for name in self.project.asset_names(kind)}
+        return self._folded[kind]
 
     @property
     def full(self) -> bool:
@@ -105,8 +120,13 @@ class _AssetChecker:
         # case-sensitive filesystem, so it survives every local playtest. This
         # is certain regardless of whether the RTP was located: the file is
         # demonstrably there under another spelling.
-        lowered = text.lower()
-        near = next((c for c in pool if c.lower() == lowered), None)
+        # Against a folded map built once per kind, not by folding the
+        # pool again on every miss: the scan was `len(pool)` `str.lower()`
+        # calls each time, the ceiling allows 5000 misses per checker, and a
+        # VX Ace Characters pool with its RTP is ~400 names -- two million
+        # redundant folds on exactly the broken project the ceiling exists
+        # for, which is also the run the user cannot interrupt.
+        near = self.folded(kind).get(text.lower())
         if near is not None:
             self.findings.append(Finding(
                 WARNING, "asset_case_mismatch",

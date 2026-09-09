@@ -818,9 +818,21 @@ PROFILES = {profile.key: profile for profile in (ACE_PROFILE, VX_PROFILE)}
 # ---------------------------------------------------------------------------
 
 
-# Real project data is about a dozen levels deep at its worst. The depth cap
-# only guards pathological input; the node budget is what bounds total work,
-# because Marshal object links make the loaded value a graph, not a tree.
+# Real project data is about a dozen levels deep at its worst, so the depth
+# cap only guards pathological input.
+#
+# What bounds the *graph* is the identity memo in `_observe`, not this
+# budget: a value reachable by several paths is returned on before it is
+# descended into, so a file whose containers link to a shared child at every
+# level costs linear work rather than exponential. This comment used to
+# credit the budget with that, which is a second answer to a question
+# `_observe`'s own docstring already answers.
+#
+# The budget bounds the *size*: it is charged per inbound link and per leaf,
+# before the memo is consulted, so an Array of three million distinct
+# Fixnums -- no children, never memoized -- costs one unit each and stops.
+# Ten times `MAX_WALK_STEPS` because this walks the whole project once to
+# describe it, where a walk budget covers one reply.
 _MAX_OBSERVE_DEPTH = 24
 _MAX_OBSERVE_NODES = 2_000_000
 

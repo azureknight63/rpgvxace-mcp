@@ -8,6 +8,7 @@ something a caller can act on.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from ...project import Project
@@ -161,8 +162,14 @@ def _report(project: Project, findings: "list[Finding]",
     # Counted before anything is dropped: truncating first meant five thousand
     # warnings from one check could push out a later check's errors, and
     # `counts` would then report zero errors while errors existed.
-    counts = {level: sum(1 for f in findings if f.severity == level)
-              for level in SEVERITIES}
+    # One pass, not one per severity: this was a `sum(1 for ...)` per level
+    # over a list that can hold MAX_FINDINGS of them. A `Counter` rather
+    # than a `for` loop, so the tally stays an expression -- a loop here
+    # would owe `TestEveryLintWalkTakesAnAllowance` an entry in its excuse
+    # table, and "bounded by the collector that produced it" is a worse
+    # reason to write down than not needing one.
+    tally = Counter(f.severity for f in findings)
+    counts = {level: tally.get(level, 0) for level in SEVERITIES}
 
     stopped = len(findings) >= MAX_FINDINGS
     if stopped:

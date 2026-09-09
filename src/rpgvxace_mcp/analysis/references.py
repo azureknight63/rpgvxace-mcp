@@ -113,6 +113,30 @@ for _table, _rules in REFERENCE_RULES.items():
         _RULES_BY_CODE.setdefault(_rule["code"], []).append((_table, _rule))
 
 
+# And the codes alone, for the question asked most often: does this command
+# refer to anything at all? Sixteen codes carry a reference and the other
+# eighty-odd do not -- 401 (a line of text), 0 (the blank end marker), 108
+# (a comment), 355 and 655 (script lines) are most of a real project. Asking
+# the mapping instead builds a `dict.get` result, a generator frame and a
+# `set` per command and discards all three empty, which is a cost paid on
+# every delete preview: `find_references_for`'s ordinary answer, "nothing
+# points at this", is the one that costs a full traversal.
+_REFERENCE_CODES = frozenset(_RULES_BY_CODE)
+
+# The rules once more, keyed by (table, code), for the caller that wants one
+# table. `_referenced_ids` yields for every table a code touches and the
+# caller filtered with `found == table`, so a Conditional Branch -- code 111,
+# one of the commonest commands in real event data -- ran `_requires_met`
+# four times (items, weapons, armors, actors) to answer about one.
+_RULES_BY_TABLE_AND_CODE: dict[tuple[str, int], list[dict[str, Any]]] = {}
+
+
+for _table, _rules in REFERENCE_RULES.items():
+    for _rule in _rules:
+        _RULES_BY_TABLE_AND_CODE.setdefault(
+            (_table, _rule["code"]), []).append(_rule)
+
+
 def _requires_met(params: list[Any], requires: dict[int, Any] | None) -> bool:
     if not requires:
         return True
@@ -140,14 +164,35 @@ def _referenced_ids(code: Any, params: list[Any]) -> Iterator[tuple[str, int]]:
     if code is None:
         return
     for table, rule in _RULES_BY_CODE.get(code, ()):
-        if not _requires_met(params, rule.get("requires")):
-            continue
-        position = rule["index"]
-        if position >= len(params):
-            continue
-        value = _int(params[position])
-        if value is not None:
-            yield table, value
+        yield from _from_rule(table, rule, params)
+
+
+def _ids_in(table: str, code: Any, params: list[Any]) -> Iterator[int]:
+    """Every id one command refers to *in one table*.
+
+    `_referenced_ids` with the table asked for rather than filtered
+    afterwards: a caller that wants one table used to run every rule the
+    code has and discard the answers for the other three.
+    """
+    code = _int(code)
+    if code is None:
+        return
+    for rule in _RULES_BY_TABLE_AND_CODE.get((table, code), ()):
+        for _, value in _from_rule(table, rule, params):
+            yield value
+
+
+def _from_rule(table: str, rule: dict[str, Any],
+               params: list[Any]) -> Iterator[tuple[str, int]]:
+    """One rule against one command's parameters. The rule, interpreted."""
+    if not _requires_met(params, rule.get("requires")):
+        return
+    position = rule["index"]
+    if position >= len(params):
+        return
+    value = _int(params[position])
+    if value is not None:
+        yield table, value
 
 
 # How many of the references to a thing being deleted come back. Enough to see
@@ -298,9 +343,16 @@ def find_references_for(project: Project, table: str, entry_ids: "set[int]",
             if not isinstance(command, RubyObject):
                 continue
             code = command.get("code", CODE_BLANK)
+            # Before the parameters are read at all. Reading them is an ivar
+            # lookup that builds an "@parameters" key string, and the set
+            # comprehension below allocates a generator frame and a set --
+            # three objects per command, for the eighty-odd codes out of a
+            # hundred that can refer to nothing.
+            if _int(code) not in _REFERENCE_CODES:
+                continue
             params = _seq(command.get("parameters"))
-            named = {value for found, value in _referenced_ids(code, params)
-                     if found == table and value in wanted}
+            named = {value for value in _ids_in(table, code, params)
+                     if value in wanted}
             if not named:
                 continue
             # Built once per matching command, not once per id: rendering a

@@ -411,11 +411,13 @@ def _new_tileset_id(ctx: Context, args: dict[str, Any]) -> int:
 
 def _new_tree_info(ctx: Context, args: dict[str, Any], name: str) -> Any:
     """The MapInfos entry for a new map: its name, parent and tree position."""
-    order = max([info.get("order") or 0
-                 for _, info in ctx.project.entries("map_infos")] or [0]) + 1
+    # Asked for once. `Project.entries` is not memoized -- only the loaded
+    # file is -- so each call sorts the hash and builds a fresh list of
+    # tuples, and this wanted the same list twice.
+    infos = ctx.project.entries("map_infos")
+    order = max([info.get("order") or 0 for _, info in infos] or [0]) + 1
     parent_id = opt_int_default(args, "parent_id", 0, minimum=0)
-    if parent_id and parent_id not in {i for i, _ in
-                                       ctx.project.entries("map_infos")}:
+    if parent_id and parent_id not in {i for i, _ in infos}:
         raise ToolError(
             "parent_id %d is not a map in the tree, so the editor would have "
             "nowhere to show the new map. Pass 0 for the top level, or an "

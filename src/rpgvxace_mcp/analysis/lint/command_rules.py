@@ -102,32 +102,39 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
                 continue
             code = command.get("code", CODE_BLANK)
             params = _seq(command.get("parameters"))
-            here = location.at(index)
+            # The location is *not* built here. It used to be, on every
+            # command walked, and it is read only inside a `Finding(...)`:
+            # on the developer's real project that was 9,819 copies for two
+            # findings. Each rule takes the list's location and the index
+            # and calls `.at()` where it reports, so the cost now scales
+            # with what is wrong rather than with what is read.
+            indent = _int(command.get("indent")) or 0
 
-            findings.extend(_check_indent(index, command,
-                                          indent_previous, here))
-            indent_previous = _int(command.get("indent")) or 0
+            findings.extend(_check_indent(index, command, indent_previous,
+                                          location, indent))
+            indent_previous = indent
 
             if not check_parameters:
                 continue
             findings.extend(_check_references(code, params, existing,
-                                              on_disk, map_sizes, here))
+                                              on_disk, map_sizes, location,
+                                              index))
             if checker is not None:
-                _command_assets(checker, code, params, here)
+                _command_assets(checker, code, params, location, index)
             if code == CODE_JUMP_TO_LABEL and params:
                 if labels is None:
                     # Built on first use: most pages have no labels at all,
                     # and this is a second pass over the whole command list.
                     labels = _labels_in(project, commands)
                 findings.extend(_check_jump(project, params, labels,
-                                            here))
+                                            location, index))
 
         findings.extend(check_list_terminator(location, commands))
     return findings.items
 
 
 def _command_assets(checker: _AssetChecker, code: Any, params: list[Any],
-                    here: Location) -> None:
+                    location: Location, index: int) -> None:
     """The two asset references a command can carry.
 
     Here rather than in its own walk over the same lists. It was
@@ -144,36 +151,40 @@ def _command_assets(checker: _AssetChecker, code: Any, params: list[Any],
     """
     if code == CODE_SHOW_TEXT:
         if params:
-            checker.check(params[0], "faces", here)
+            checker.check(params[0], "faces", location.at(index))
     elif _int(code) in AUDIO_COMMAND_KINDS:
         track = params[0] if params else None
         if isinstance(track, RubyObject):
             checker.check(track.get("name"), AUDIO_COMMAND_KINDS[code],
-                          here, "missing_audio")
+                          location.at(index), "missing_audio")
 
 
 def _check_indent(index: int, command: RubyObject, previous: int,
-                  here: Location) -> list[Finding]:
+                  location: Location, indent: int) -> list[Finding]:
     """One rule: the branch structure the indents describe is continuous.
 
     Extracted with the two below because `check_commands` was three unrelated
     rules at four levels of nesting, so the loop read as one long procedure
     rather than as "for every command, apply these three rules".
+
+    Takes the list's location and copies it at `index` only when it reports,
+    and takes `indent` rather than reading it again: the caller needs it for
+    the next command anyway, and this read it a second time from the same
+    object.
     """
-    indent = _int(command.get("indent")) or 0
     if indent <= previous + 1:
         return []
     return [Finding(
         WARNING, "indent_jump",
         "command %s jumps from indent %s to %s, which means the branch "
         "structure is inconsistent. Re-check the branches around it in the "
-        "editor." % (index, previous, indent), here)]
+        "editor." % (index, previous, indent), location.at(index))]
 
 
 def _check_references(code: Any, params: list[Any],
                       existing: "dict[str, AbstractSet[int]]",
                       on_disk: "set[int]", map_sizes: "_MapSizes",
-                      here: Location) -> list[Finding]:
+                      location: Location, index: int) -> list[Finding]:
     """One rule: every id a command names is an id that exists.
 
     A table absent from ``existing`` could not be read, so its rules are
@@ -184,20 +195,23 @@ def _check_references(code: Any, params: list[Any],
     for table, value in _referenced_ids(code, params):
         if table == MAP_TARGET:
             findings += _check_transfer(value, params, on_disk, map_sizes,
-                                        here)
-        elif table in existing and value not in existing[table]:
+                                        location, index)
+        elif table in existing:
+            ids = existing[table]
+            if value in ids:
+                continue
             noun = TABLE_NOUNS[table]
             findings.append(_missing(
                 "missing_%s" % noun.replace(" ", "_"),
                 "%s refers to %s id %s" % (command_name(code), noun, value),
                 "Point it at an existing entry, or add that entry to the "
-                "database.", here,
+                "database.", location.at(index),
                 "command parameters against the %s table" % table))
     return findings
 
 
 def _check_jump(project: Project, params: list[Any], labels: "set[str]",
-                here: Location) -> list[Finding]:
+                location: Location, index: int) -> list[Finding]:
     """One rule: a Jump to Label names a Label in the same command list."""
     target = _text(project, params[0])
     if target in labels:
@@ -206,7 +220,7 @@ def _check_jump(project: Project, params: list[Any], labels: "set[str]",
         ERROR, "missing_label",
         'Jump to Label "%s" has no matching Label in this command list, so '
         "the jump does nothing. Add a Label command with that name, or "
-        "remove the jump." % target, here)]
+        "remove the jump." % target, location.at(index))]
 
 
 def _labels_in(project: Project, commands: list[Any]) -> set[str]:
@@ -220,7 +234,7 @@ def _labels_in(project: Project, commands: list[Any]) -> set[str]:
 
 def _check_transfer(map_id: int, params: list[Any], on_disk: AbstractSet[int],
                     map_sizes: "_MapSizes",
-                    here: Location) -> list[Finding]:
+                    location: Location, index: int) -> list[Finding]:
     """Transfer Player: does the target map exist, and are the coordinates on it?
 
     Existence is decided by the files present, not by which maps happened to
@@ -232,7 +246,7 @@ def _check_transfer(map_id: int, params: list[Any], on_disk: AbstractSet[int],
         return [_missing(
             "transfer_to_missing_map",
             "Transfer Player targets map %s" % map_id,
-            "Point the transfer at an existing map.", here,
+            "Point the transfer at an existing map.", location.at(index),
             "every Transfer Player against the map files present")]
     width, height = map_sizes.get(map_id)
     if width is None or height is None:
@@ -247,7 +261,8 @@ def _check_transfer(map_id: int, params: list[Any], on_disk: AbstractSet[int],
             ERROR, "transfer_outside_map",
             "Transfer Player sends the party to (%s, %s) on map %s, which is "
             "only %sx%s, so the party would land off the map. Move the "
-            "destination inside it." % (x, y, map_id, width, height), here,
+            "destination inside it."
+            % (x, y, map_id, width, height), location.at(index),
             "Transfer Player coordinates against the target map's size")]
     return []
 

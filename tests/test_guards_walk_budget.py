@@ -1367,3 +1367,179 @@ class TestTheMergedWalkStillFindsBothKinds(ValidateTest):
         self.assertNotIn("missing_graphic", found,
                          "the events scope answered an asset question it "
                          "was not asked")
+
+
+class TestALocationIsBuiltWhenItIsReported(ValidateTest):
+    """`Location.at` runs per finding, not per command walked.
+
+    `check_commands` opened its loop body with `here = location.at(index)`,
+    unconditionally, and `here` is read only inside a `Finding(...)`. On the
+    developer's real 39-map project that was 9,819 copies for two findings
+    -- one allocation and, because `at` copied slot by slot through
+    `getattr`/`setattr`, twenty-six named attribute operations each, better
+    than 99.9% of them discarded.
+
+    Measured at 1.9% of a real validate, which is small; the reason to fix
+    it anyway is that it scales with commands walked, so the worst case is
+    the whole 200,000-step allowance turned into 200,000 dead objects, and
+    this server is single-threaded over stdio.
+
+    Counted rather than timed: a timing test on a fraction this size would
+    be a race.
+    """
+
+    COMMANDS = 400
+
+    def craft_a_long_clean_page(self):
+        """One page of commands that break no rule at all."""
+        game_map = self.project.load_map(1)
+        _, _, event = self.first_event(1)
+        page = event.get("pages")[0]
+        comment = RubyObject("RPG::EventCommand")
+        comment.set("code", 108)               # Comment: names nothing
+        comment.set("indent", 0)
+        comment.set("parameters", [self.project.codec.make_string("x")])
+        page.set("list", [comment] * self.COMMANDS)
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="a clean page")
+        self.ctx = self.reopen()
+
+    def copies(self, **arguments):
+        from rpgvxace_mcp.analysis.walk import Location
+        original = Location.at
+        counted = []
+
+        def counting(self, index):
+            counted.append(1)
+            return original(self, index)
+
+        self.addCleanup(setattr, Location, "at", original)
+        Location.at = counting
+        out = self.call("validate", **arguments)
+        return len(counted), out
+
+    def test_a_clean_page_builds_almost_no_locations(self):
+        self.craft_a_long_clean_page()
+        copies, out = self.copies()
+        total = sum(out["counts"].values())
+        self.assertLess(
+            copies, self.COMMANDS,
+            "%d locations built for %d commands and %d findings, so one is "
+            "being built per command walked" % (copies, self.COMMANDS, total))
+
+    def test_a_finding_still_says_where_it_is(self):
+        """The point of the location, on the page that has one."""
+        game_map = self.project.load_map(1)
+        _, _, event = self.first_event(1)
+        page = event.get("pages")[0]
+        jump = RubyObject("RPG::EventCommand")
+        jump.set("code", 119)                  # Jump to Label, with no Label
+        jump.set("indent", 0)
+        jump.set("parameters", [self.project.codec.make_string("nowhere")])
+        page.set("list", [jump])
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="a bad jump")
+        self.ctx = self.reopen()
+        found = [f for f in self.call("validate")["findings"]
+                 if f["rule"] == "missing_label"]
+        self.assertTrue(found, "the rule stopped reporting")
+        self.assertIn("command 0", found[0]["where"])
+        self.assertIn("event", found[0]["where"])
+
+
+class TestACopiedLocationCarriesEveryField(unittest.TestCase):
+    """`at` copies every field, checked rather than looped.
+
+    It used to copy through `for name in COPIED: setattr(...)`, which is
+    safe and is also 26 named attribute operations per call. Written out
+    now, and this is what keeps that safe: two earlier versions of `at`
+    built the copy positionally and silently dropped `table` and `field`,
+    which is a finding that names the wrong place.
+    """
+
+    def test_every_copied_field_survives(self):
+        from rpgvxace_mcp.analysis.walk import Location
+        values = {name: "v-%s" % name for name in Location.COPIED}
+        here = Location("db", **values)
+        clone = here.at(7)
+        self.assertEqual(clone.kind, "db")
+        self.assertEqual(clone.index, 7)
+        for name in Location.COPIED:
+            if name == "index":
+                continue
+            with self.subTest(field=name):
+                self.assertEqual(getattr(clone, name), values[name],
+                                 "%s was dropped by the copy" % name)
+
+    def test_the_copy_sets_nothing_outside_the_slots(self):
+        """So a field added to `__slots__` and not to `at` cannot pass."""
+        from rpgvxace_mcp.analysis.walk import Location
+        here = Location("db", table="items", entry_id=3)
+        clone = here.at(1)
+        for name in Location.__slots__:
+            with self.subTest(field=name):
+                # Every slot is assigned: an unassigned one raises here.
+                getattr(clone, name)
+
+
+class TestASetResolvesItsPathOnce(ToolTest):
+    """`raw_data op="set"` reaches the value through the parent it has.
+
+    It resolved the parent, then resolved the whole path again for the value
+    -- re-walking every segment the parent had already reached. The segments
+    are cheap; the charge is not. Each hash segment charges the shared
+    allowance `len(hash)`, so `events/1/pages/0/...` charged the events hash
+    twice, and a caller near the ceiling was refused at half the real depth
+    of the path it asked for.
+
+    `existing` is `parent[key]`, which is one segment from a value already in
+    hand.
+
+    Counted at `WalkBudget.spend`, which is the thing being charged. The old
+    code produced the right value, which is why reading found this and tests
+    did not.
+    """
+
+    def charged(self, **arguments):
+        from rpgvxace_mcp.analysis import walk as walk_module
+        original = walk_module.WalkBudget.spend
+        spent = []
+
+        def counting(inner, nodes=1):
+            spent.append(nodes)
+            return original(inner, nodes)
+
+        self.addCleanup(setattr, walk_module.WalkBudget, "spend", original)
+        walk_module.WalkBudget.spend = counting
+        self.call("raw_data", **arguments)
+        return sum(spent)
+
+    def test_a_set_charges_its_prefix_once(self):
+        """The same path, read and written, costs the same to reach."""
+        # `map_infos` is a RubyHash keyed by map id, so the first
+        # segment is a hash scan -- which is the segment that was charged
+        # twice.
+        path = "1/order"
+        read = self.charged(table="map_infos", path=path)
+        written = self.charged(table="map_infos", path=path, op="set",
+                               value={"value": 3}, dry_run=True)
+        self.assertLessEqual(
+            written, read,
+            "a set charged %d where the matching get charged %d, so it is "
+            "walking the path twice" % (written, read))
+
+    def test_a_set_still_says_where_a_bad_key_is(self):
+        """The trail in the message names the segments already walked."""
+        with self.assertRaises(ToolError) as caught:
+            self.call("raw_data", table="map_infos", op="set",
+                      path="1/nosuchfield", value={"value": 1})
+        message = str(caught.exception)
+        self.assertIn("nosuchfield", message)
+        self.assertIn("1", message,
+                      "the message lost the path it had reached: %s" % message)
+
+    def test_a_set_still_sets(self):
+        self.call("raw_data", table="map_infos", op="set",
+                  path="1/order", value={"value": 4})
+        out = self.call("raw_data", table="map_infos", path="1/order")
+        self.assertEqual(out["value"], 4)

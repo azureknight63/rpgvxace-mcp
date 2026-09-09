@@ -105,6 +105,8 @@ class _Tables:
         self.project = project
         self._rows: dict[str, list[tuple[int, Any]]] = {}
         self._failures: dict[str, str] = {}
+        # The id sets, held rather than rebuilt per call. See `ids`.
+        self._ids: dict[str, set[int]] = {}
 
     def _load(self, name: str) -> None:
         if name in self._rows or name in self._failures:
@@ -126,11 +128,19 @@ class _Tables:
         None and ``set()`` mean different things to every caller here, which
         is the point of this class: an empty table has no matching entry, an
         unreadable one cannot be asked.
+
+        Held rather than rebuilt. This is "loaded once and asked many
+        times", which is what this class is for, and it rebuilt the set on
+        every call: `actors` is asked for by the command rules and by the
+        database rules, and `troops` by the map rules and the command rules,
+        so one run made a pass over each table's rows twice over.
         """
         self._load(name)
         if name in self._failures:
             return None
-        return {i for i, _ in self._rows[name]}
+        if name not in self._ids:
+            self._ids[name] = {i for i, _ in self._rows[name]}
+        return self._ids[name]
 
     def rows_of(self, name: str) -> list[tuple[int, Any]]:
         """Rows of a table, or none when it could not be read.

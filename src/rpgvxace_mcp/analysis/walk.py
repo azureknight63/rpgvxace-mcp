@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from ..convert import brief, decoded_text  # noqa: F401
+from ..convert import decoded_text  # noqa: F401
 from ..project import Project, ProjectError
 from ..rubytypes import RubyHash, RubyObject, as_int, as_list
 
@@ -52,14 +52,17 @@ class Location:
     def at(self, index: int) -> Location:
         """This location, pointing at one command in the list it names.
 
-        Copies by slot name: building the copy positionally is how two earlier
-        versions of this ended up silently dropping ``table`` and ``field``.
+        Every field by name, and none positionally: building the copy
+        positionally is how two earlier versions of this silently dropped
+        ``table`` and ``field``, which makes a finding name the wrong place.
+        `TestACopiedLocationCarriesEveryField` is what keeps that true --
+        this was a `for name in COPIED: setattr(...)` loop, which is the same
+        safety at twenty-six named attribute operations a call.
         """
-        clone = Location(self.kind)
-        for name in Location.COPIED:
-            setattr(clone, name, getattr(self, name))
-        clone.index = index
-        return clone
+        return Location(self.kind, map_id=self.map_id,
+                        event_id=self.event_id, event_name=self.event_name,
+                        page=self.page, index=index, entry_id=self.entry_id,
+                        table=self.table, field=self.field)
 
     def as_dict(self) -> dict[str, Any]:
         out = {"kind": self.kind}

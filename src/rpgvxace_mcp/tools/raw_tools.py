@@ -180,9 +180,9 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             % (len(path), MAX_PATH_SEGMENTS))
     mode = one_of(args, "tables", list(TABLE_MODES), TABLE_MODES[0])
 
-    # One allowance for every resolve this call makes, so `op="set"` -- which
-    # walks the path twice, once for the parent and once for the value -- is
-    # bounded across both rather than per walk.
+    # One allowance for every resolve this call makes: `op="set"` reaches
+    # the parent and then the value, and the second reach is one segment
+    # from the first, so the two together cost what the path costs.
     walk = WalkBudget()
 
     if op == "get":
@@ -202,7 +202,15 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     parent = _resolve(root, path[:-1], ctx.codec, walk)
     key = path[-1]
     new_value = from_json(args["value"]["value"], ctx.codec)
-    existing = _resolve(root, path, ctx.codec, walk)
+    # From the parent, not from the top again. This was
+    # `_resolve(root, path, ...)`, which re-walked every segment the parent
+    # had already reached -- and each hash segment charges the shared
+    # allowance `len(hash)`, so a path through the events hash charged it
+    # twice and a caller near the ceiling was refused at half the depth it
+    # had asked for. `reached` keeps the trail in an error message naming
+    # the whole path rather than "the top of the file".
+    existing = _resolve(parent, path[-1:], ctx.codec, walk,
+                        reached=path[:-1])
     _check_same_kind(existing, new_value, "/".join(path))
     # The same check the validating tools make on a replacement. raw_data is
     # deliberately permissive about *values* and has never been permissive
@@ -276,8 +284,14 @@ def _check_same_kind(existing: Any, replacement: Any, path: str) -> None:
 
 
 def _resolve(value: Any, path: list[str], codec: TextCodec,
-             budget: "WalkBudget | None" = None) -> Any:
+             budget: "WalkBudget | None" = None,
+             reached: "list[str] | None" = None) -> Any:
     """Walk a path into a loaded file, charged for what it scans.
+
+    ``reached`` is the segments the caller has already walked, and exists
+    only so an error message names the whole path: `op="set"` resolves the
+    parent and then this one last segment against it, so without it every
+    refusal from that call would say "the top of the file".
 
     The codec is needed because a Ruby Hash can be keyed by RubyStrings as
     well as by integers, and looking such a key up as a bare Python string
@@ -292,8 +306,9 @@ def _resolve(value: Any, path: list[str], codec: TextCodec,
     which makes this the same shape as every other walk over file data.
     """
     current = value
+    walked = list(reached or ())
     for depth, key in enumerate(path):
-        trail = "/".join(path[:depth]) or "the top of the file"
+        trail = "/".join(walked + path[:depth]) or "the top of the file"
         if isinstance(current, RubyObject):
             if not current.has(key):
                 raise ToolError("%s has no field %r (it has: %s)"
