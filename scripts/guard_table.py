@@ -44,6 +44,7 @@ LINT_REPORT = "src/rpgvxace_mcp/analysis/lint/report.py"
 REGISTRY = "src/rpgvxace_mcp/tools/registry.py"
 DB_TOOLS = "src/rpgvxace_mcp/tools/db_tools.py"
 EVENT_TOOLS = "src/rpgvxace_mcp/tools/event_tools.py"
+COMMAND_DOCS = "src/rpgvxace_mcp/tools/command_docs_tools.py"
 CONVERT = "src/rpgvxace_mcp/convert.py"
 SAFETY = "src/rpgvxace_mcp/tools/pattern_safety.py"
 SEARCH_TOOLS = "src/rpgvxace_mcp/tools/search_tools.py"
@@ -1181,7 +1182,7 @@ GUARDS = [
         'a patch merges into the event objects and moves an event off the map, past the bounds check event_edit exists to apply',
     ),
     Guard(
-        'borrowed command layouts are labelled', EVENT_TOOLS,
+        'borrowed command layouts are labelled', COMMAND_DOCS,
         '        entry["layouts_are_this_engines"] = modelled',
         '        entry["engine_is_modelled"] = modelled',
         [LAYOUT + "test_one_code_says_it_too"],
@@ -1384,7 +1385,7 @@ GUARDS = [
         'event_get common_event_id=N name_contains=X returns the event whether or not it matches, and the reply reads exactly like a positive match',
     ),
     Guard(
-        'a code lookup refuses a search', EVENT_TOOLS,
+        'a code lookup refuses a search', COMMAND_DOCS,
         '        refuse_inert(args, ("search",),',
         '        _unused = (args, ("search",),',
         [READDROP + "test_a_code_lookup_refuses_a_search_it_would_not_run"],

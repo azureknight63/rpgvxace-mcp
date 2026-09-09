@@ -6,14 +6,10 @@ from typing import Any
 
 from ..commands import (
     CODE_BLANK,
-    CONTINUATION_CODES,
     CommandError,
-    MOVE_COMMAND_NAMES,
-    command_name,
-    command_table,
+    DSL_HELP,
     compile_commands,
     move_route_steps,
-    param_specs,
     render_script,
 )
 from ..convert import (
@@ -63,6 +59,7 @@ from .registry import (
     opt_str,
     prop,
     refuse_fields,
+    refuse_inert,
     refuse_unknown_fields,
     schema,
     tool,
@@ -154,59 +151,6 @@ EVENT_OP_ARGS = {
     "set_commands": {"op", "event_id", "page", "commands"},
     "append_commands": {"op", "event_id", "page", "commands"},
 }
-
-
-DSL_HELP = (
-    "Commands are written as a list of small objects, one per command. "
-    'Supported forms: {"text": "line one\\nline two", "face_name": "Actor1"}; '
-    '{"comment": "..."}; {"script": "ruby"}; {"switch": 5, "value": "on"}; '
-    '{"switch": 5, "switch_end": 9, "value": "on"} sets a range of switches; '
-    '{"self_switch": "A", "value": "on"}; '
-    '{"variable": 3, "op": "add", "value": 1} (also from_variable, random); '
-    '{"wait": 60}; {"common_event": 2}; {"label": "top"}; {"jump": "top"}; '
-    '{"transfer": {"map_id": 2, "x": 5, "y": 6, "direction": 2, "fade": 0}}; '
-    '{"exit": true}; {"break_loop": true}; '
-    '{"if": {"switch": 1, "is": "on"}, "then": [...], "else": [...]}; '
-    '{"loop": [...]}; '
-    '{"choices": ["Yes", "No"], "branches": [[...], [...]], "cancel_branch": [...]}. '
-    'Conditions accept switch, self_switch, variable (with compare and value or '
-    'from_variable) and script. For any other command, use '
-    '{"raw": {"code": 231, "parameters": [...]}} -- see the command_reference '
-    "tool for codes, and read a working example from the project before "
-    "guessing a parameter layout.\n\n"
-    'Limits the compiler enforces: Show Choices takes 1 to 4 choices, and '
-    '"branches" pairs with them by position. "text" may be a string with \\n '
-    "or an array of lines, and is split into four-line message boxes "
-    "automatically. Entries nest through then/else/loop/branches to a bounded "
-    'depth. A "raw" entry inherits the surrounding indent unless it sets one.'
-)
-
-
-def refuse_inert(args: dict[str, Any], names: "tuple[str, ...]",
-                 because: str, *, remedy: str) -> None:
-    """Refuse an argument this branch does not read.
-
-    `check_op_args` does this for a tool that selects with an `op`. These two
-    select with something else -- which id was given, which of three switches
-    -- so the gate does not reach them, and each dropped the arguments its
-    branch has no use for. The rule is the same one and so is the reason: a
-    dropped argument reports the same success as one that was applied.
-
-    `remedy` is per call site and has no default, because there is no
-    sentence that is true at all of them. This said "Ask for one or the
-    other" everywhere, which is the answer when a caller gave two
-    alternatives and may have one -- and is not the answer for `event_get
-    common_event_id=1 page=0`, where the three inert names are alternatives
-    to nothing and the caller simply has to drop them. A refusal whose
-    remedy is wrong is worse than one with none: the model does as it says,
-    is refused again, and has now been told twice that the fix is a choice
-    it does not have.
-    """
-    inert = sorted(name for name in names if args.get(name) is not None)
-    if inert:
-        raise ToolError(
-            "%s does not read %s. %s"
-            % (because, " or ".join(echo(name) for name in inert), remedy))
 
 
 def _one_target(args: dict[str, Any], verb: str) -> "tuple[int | None, int | None]":
@@ -1128,118 +1072,3 @@ def _insert_move_route_steps(commands: list[RubyObject]) -> list[RubyObject]:
         if isinstance(route, RubyObject) and route.cls == "RPG::MoveRoute":
             out.extend(move_route_steps(route, command.get("indent", 0) or 0))
     return out
-
-
-@tool(
-    "command_reference",
-    "Look up event command codes",
-    "The event command codes this project's engine dispatches, and how to "
-    "write them with event_edit. Search by name or look up a single code to "
-    "see its parameter layout. For an engine outside the VX family (only "
-    "reachable with --allow-other-engines) the codes and layouts reported are "
-    "VX Ace's, which are not that engine's -- every reply says which it is in "
-    "\"layouts_are_this_engines\", because a parameter layout believed to be "
-    "confirmed is how a caller writes a command the interpreter misreads.",
-    schema({
-        "code": prop(INT, "Look up one command code."),
-        "search": prop(STR, "Find commands whose name contains this text."),
-        "move_commands": prop(BOOL, "List move route command codes instead."),
-    }),
-)
-def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
-    """The command codes this project's engine dispatches. Reads only.
-
-    `command_table` and `param_specs` fall back to VX Ace's tables for an
-    engine this server does not model. That is right for reading -- an
-    unmodelled engine is still mostly describable -- and wrong to present as
-    confirmed, which is what this tool did: it never asked. So every reply now
-    says whether the layouts really are this engine's, from the same property
-    analysis.py and _create_map ask.
-    """
-    engine = ctx.project.engine
-    specs = param_specs(engine)
-    table = command_table(engine)
-    modelled = ctx.project.command_layouts_modelled
-    borrowed = None if modelled else (
-        "This is a %s project, which this server does not model. The codes "
-        "and parameter layouts below are VX Ace's and are not confirmed for "
-        "this engine -- XP's Show Text, for one, keeps the message text where "
-        "Ace keeps the face graphic. Read a command out of an event that "
-        "already works (event_get with include_raw) before authoring one."
-        % engine)
-
-    if opt_bool(args, "move_commands"):
-        refuse_inert(args, ("code", "search"),
-                     "move_commands lists the move route codes, which are a "
-                     "separate set from the command codes, so it",
-                     remedy="Drop them, or ask without move_commands.")
-        # Below `modelled`, not above it: this branch used to return first and
-        # so was the one reply that omitted the key the description promises
-        # every reply carries. A move route's codes are borrowed for an
-        # unmodelled engine exactly as the command codes are.
-        moves: dict[str, Any] = {
-            "move_commands": [{"code": code, "name": name}
-                              for code, name in sorted(MOVE_COMMAND_NAMES.items())],
-            "layouts_are_this_engines": modelled,
-            "note": "Move command codes come from the shared XP/VX/Ace move "
-                    "command set rather than the VX reference manual. Confirm "
-                    "against an existing route before relying on one.",
-        }
-        if borrowed:
-            moves["engine_warning"] = borrowed
-        return moves
-
-    code = opt_int(args, "code")
-    if code is not None:
-        refuse_inert(args, ("search",),
-                     "a lookup of one code answers for that code alone, so it",
-                     remedy="Ask for one or the other.")
-        entry: dict[str, Any] = {"code": code, "name": command_name(code)}
-        # A list, because both notes can apply at once: a code this engine
-        # does not dispatch AND whose layout is unrecorded used to lose the
-        # first message to the second, leaving the model hunting for an example
-        # of a command its engine cannot run.
-        notes: list[str] = []
-        if code not in table:
-            notes.append(
-                "%s does not dispatch this code, so it should not appear in "
-                "this project's events." % ctx.project.profile.label)
-        if code in specs:
-            entry["parameters"] = specs[code]
-        else:
-            entry["parameters"] = None
-            notes.append("This command's parameter layout is not recorded here. "
-                         "Read an event that already uses it (event_get with "
-                         "include_raw) and copy the shape.")
-        entry["layouts_are_this_engines"] = modelled
-        if borrowed:
-            notes.append(borrowed)
-        if notes:
-            # `layout_notes`, because `notes` was also a *sentence* in
-            # `search`'s reply -- one key, two types, and a caller reading
-            # either had to know which tool it came from. These are notes
-            # about one command's parameter layout, so the key says so.
-            entry["layout_notes"] = notes
-        return entry
-
-    needle = (opt_str(args, "search") or "").lower()
-    rows = [
-        {"code": code, "name": name,
-         "parameters": specs.get(code),
-         "continuation": code in CONTINUATION_CODES}
-        for code, name in sorted(table.items())
-        if not needle or needle in name.lower()
-    ]
-    return {
-        "engine": ctx.project.profile.label,
-        "layouts_are_this_engines": modelled,
-        "commands": rows,
-        # `search` filters these, so this is the number that matched and not
-        # the size of the table. Same rename, same reason as event_get above.
-        "matching_commands": len(rows),
-        **({"engine_warning": borrowed} if borrowed else {}),
-        "authoring": DSL_HELP,
-        "indent_rule": "Commands inside a branch or loop sit one indent deeper. "
-                       "event_edit handles indentation for if/loop/choices; if you "
-                       "write branch commands with raw, set indent yourself.",
-    }

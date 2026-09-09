@@ -839,24 +839,32 @@ class TestReadToolsDropNoArgumentsEither(ToolTest):
                       "the site the sentence did fit lost it")
 
     def test_every_inert_refusal_names_its_own_remedy(self):
-        """Structural, so a fourth call site cannot inherit a wrong one."""
+        """Structural, so a fourth call site cannot inherit a wrong one.
+
+        Over the whole tools layer, not one module. It read `event_tools.py`
+        by name, and when `command_reference` moved to
+        `command_docs_tools.py` two of the three call sites went with it --
+        which the count below caught, and which is why the count is there.
+        """
         import ast
-        source = (Path(__file__).resolve().parent.parent / "src"
-                  / "rpgvxace_mcp" / "tools"
-                  / "event_tools.py").read_text(encoding="utf-8")
-        calls = [node for node in ast.walk(ast.parse(source))
-                 if isinstance(node, ast.Call)
-                 and getattr(node.func, "id", "") == "refuse_inert"]
+        tools = (Path(__file__).resolve().parent.parent / "src"
+                 / "rpgvxace_mcp" / "tools")
+        calls = []
+        for path in sorted(tools.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            calls += [(path.name, node) for node in ast.walk(tree)
+                      if isinstance(node, ast.Call)
+                      and getattr(node.func, "id", "") == "refuse_inert"]
         self.assertGreaterEqual(len(calls), 3,
-                                "found no call sites, so this checked none")
-        for call in calls:
+                                "found %d call sites, so this checked "
+                                "almost nothing" % len(calls))
+        for where, call in calls:
             given = {kw.arg for kw in call.keywords}
-            with self.subTest(line=call.lineno):
+            with self.subTest(module=where, line=call.lineno):
                 self.assertIn(
                     "remedy", given,
-                    "the call at line %d takes the default remedy, and there "
-                    "is no default that is right for every branch"
-                    % call.lineno)
+                    "%s:%d takes the default remedy, and there is no default "
+                    "that is right for every branch" % (where, call.lineno))
 
     def test_a_common_event_read_still_works(self):
         out = self.call("event_get", common_event_id=1)

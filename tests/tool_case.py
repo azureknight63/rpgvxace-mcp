@@ -48,6 +48,7 @@ from rpgvxace_mcp.tools.registry import (  # noqa: E402
 # which is why `tests/test_prove_guards.py` now runs each suite file on its
 # own rather than only as part of the whole run.
 from rpgvxace_mcp.tools import (  # noqa: E402,F401
+    command_docs_tools,
     db_tools,
     event_tools,
     map_common,

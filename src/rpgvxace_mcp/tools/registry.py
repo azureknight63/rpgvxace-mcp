@@ -520,6 +520,39 @@ def scopes_arg(args: dict[str, Any], key: str,
     return [s for s in asked if s in allowed] or list(allowed)
 
 
+def refuse_inert(args: dict[str, Any], names: "tuple[str, ...]",
+                 because: str, *, remedy: str) -> None:
+    """Refuse an argument this branch does not read.
+
+    `check_op_args` next door does this for a tool that selects with an
+    `op`. `event_get` selects on which id it was given and
+    `command_reference` on which of three switches, so that gate does not
+    reach them, and each dropped the arguments its branch has no use for.
+    The rule is the same one and so is the reason: a dropped argument
+    reports the same success as one that was applied.
+
+    Here rather than in `event_tools`, where it was: `command_reference`
+    moved to its own module and imported it from there, and a tool module
+    importing from a sibling is what `TestToolModulesAreLeaves` refuses --
+    a shared name belongs in `schema`, `analysis` or here.
+
+    `remedy` is per call site and has no default, because there is no
+    sentence that is true at all of them. This said "Ask for one or the
+    other" everywhere, which is the answer when a caller gave two
+    alternatives and may have one -- and is not the answer for `event_get
+    common_event_id=1 page=0`, where the three inert names are alternatives
+    to nothing and the caller simply has to drop them. A refusal whose
+    remedy is wrong is worse than one with none: the model does as it says,
+    is refused again, and has now been told twice that the fix is a choice
+    it does not have.
+    """
+    inert = sorted(name for name in names if args.get(name) is not None)
+    if inert:
+        raise ToolError(
+            "%s does not read %s. %s"
+            % (because, " or ".join(echo(name) for name in inert), remedy))
+
+
 def check_op_args(op: str, args: dict[str, Any],
                   uses: "dict[str, set[str]]", where: str = "this tool") -> None:
     """Refuse an argument the chosen op does not read.

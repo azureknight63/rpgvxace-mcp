@@ -19,6 +19,7 @@ from .convert import ConversionError
 from .docs import RESOURCES, server_instructions
 from .project import Project, ProjectError, ReadOnlyError, StaleFileError
 from .tools import (  # noqa: F401
+    command_docs_tools,
     db_tools,
     event_tools,
     map_common,

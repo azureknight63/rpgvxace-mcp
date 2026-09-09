@@ -993,3 +993,35 @@ def move_route_steps(route: RubyObject, indent: int) -> list[RubyObject]:
         if isinstance(move, RubyObject) and (move.get("code", 0) or 0) != 0:
             steps.append(_cmd(505, indent, [move]))
     return steps
+
+
+# How to write a command list for `compile_commands`, in the words two
+# tools serve to the model: `event_edit`'s description, and `command_reference`'s
+# "authoring" key. Here rather than in either of them because it describes
+# what the compiler below accepts, so a form added there and not here is a
+# form no caller is told about -- and a form described here and not there is
+# worse, because a caller writes it and is refused.
+DSL_HELP = (
+    "Commands are written as a list of small objects, one per command. "
+    'Supported forms: {"text": "line one\\nline two", "face_name": "Actor1"}; '
+    '{"comment": "..."}; {"script": "ruby"}; {"switch": 5, "value": "on"}; '
+    '{"switch": 5, "switch_end": 9, "value": "on"} sets a range of switches; '
+    '{"self_switch": "A", "value": "on"}; '
+    '{"variable": 3, "op": "add", "value": 1} (also from_variable, random); '
+    '{"wait": 60}; {"common_event": 2}; {"label": "top"}; {"jump": "top"}; '
+    '{"transfer": {"map_id": 2, "x": 5, "y": 6, "direction": 2, "fade": 0}}; '
+    '{"exit": true}; {"break_loop": true}; '
+    '{"if": {"switch": 1, "is": "on"}, "then": [...], "else": [...]}; '
+    '{"loop": [...]}; '
+    '{"choices": ["Yes", "No"], "branches": [[...], [...]], "cancel_branch": [...]}. '
+    'Conditions accept switch, self_switch, variable (with compare and value or '
+    'from_variable) and script. For any other command, use '
+    '{"raw": {"code": 231, "parameters": [...]}} -- see the command_reference '
+    "tool for codes, and read a working example from the project before "
+    "guessing a parameter layout.\n\n"
+    'Limits the compiler enforces: Show Choices takes 1 to 4 choices, and '
+    '"branches" pairs with them by position. "text" may be a string with \\n '
+    "or an array of lines, and is split into four-line message boxes "
+    "automatically. Entries nest through then/else/loop/branches to a bounded "
+    'depth. A "raw" entry inherits the surrounding indent unless it sets one.'
+)
