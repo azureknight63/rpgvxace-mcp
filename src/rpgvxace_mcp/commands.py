@@ -289,13 +289,6 @@ CODE_COMMENT = 108
 CODE_ERASE_EVENT = 214
 CODE_GAME_OVER = 353
 CODE_RETURN_TO_TITLE = 354
-# The three other ways an event can hand control back: for itself,
-# and twice for the game. Named because the autorun rule reads them
-# as a set beside CODE_TRANSFER_PLAYER, and three bare integers in
-# that set were the only members a reader had to look up.
-CODE_ERASE_EVENT = 214
-CODE_GAME_OVER = 353
-CODE_RETURN_TO_TITLE = 354
 # The continuation codes `summarize` renders as bare text. Named
 # because it dispatches on them, which is the same reason the eight
 # above have names -- and it spelled all eight numbers out anyway.

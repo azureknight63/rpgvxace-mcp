@@ -12,11 +12,20 @@ are ordered, and `report` is the only one that knows them all:
 
     findings <- {maps, pages, command_rules, assets, database} <- report
 
-with two edges inside the middle five, each because two rules share a piece
-of machinery rather than a subject: `command_rules` reads `maps` for
-`_MapSizes`, since a Transfer Player is checked against the size of the map
-it names, and `database` reads `assets` for `_AssetChecker`, since a
-tileset's nine sheets are files on disk.
+with three edges inside the middle five, each because two rules share a
+piece of machinery rather than a subject:
+
+* `command_rules` reads `maps` for `_MapSizes`, since a Transfer Player is
+  checked against the size of the map it names;
+* `database` reads `assets` for `_AssetChecker`, since a tileset's nine
+  sheets are files on disk;
+* `command_rules` reads `assets` for the same checker, since the two asset
+  rules that need a command list ride the walk `check_commands` already
+  makes rather than making a second one.
+
+There were two until that last one landed, and this sentence said two for a
+round afterwards. `tests/test_schema.py` holds the table itself, which is
+why the code was right while the prose was not.
 
 Re-exported from here so `from .lint import X` and `from ..analysis import
 X` both keep working: the split is about how this code is read and changed,

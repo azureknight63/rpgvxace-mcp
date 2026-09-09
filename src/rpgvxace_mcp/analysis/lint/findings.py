@@ -1,7 +1,7 @@
 """What a finding is, how many there may be, and the tables to read.
 
 The bottom of this package. Every rule module reads this one, none
-of them reads another except along the two edges this package's
+of them reads another except along the three edges this package's
 `__init__` names, and nothing here reads a rule.
 """
 

@@ -16,6 +16,7 @@ import sys
 import unittest
 from pathlib import Path
 
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "scripts"))
 
@@ -326,7 +327,6 @@ class MultipleAnchorTest(unittest.TestCase):
         """Better than reverting the first and silently skipping the second."""
         with self.assertRaises(ValueError):
             self.guard(["a", "c"], ["b"])
-
 
 
 class SuiteFilesRunAloneTest(unittest.TestCase):

@@ -338,7 +338,12 @@ def _resolve(value: Any, path: list[str], codec: TextCodec,
             # could not store inline. Unwrap and retry the SAME key: the
             # wrapper is not a level of the path.
             current = current.inner
-            return _resolve(current, path[depth:], codec, budget)
+            # Carrying what has been walked, including this call's own
+            # `reached`: without it a refusal from below a wrapped value
+            # says "the top of the file has no field X", which is the exact
+            # message `reached` was added to stop.
+            return _resolve(current, path[depth:], codec, budget,
+                            reached=walked + path[:depth])
         elif isinstance(current, Table):
             raise ToolError("%s is an RGSS Table; use map_tiles to read or write "
                             "its cells" % trail)

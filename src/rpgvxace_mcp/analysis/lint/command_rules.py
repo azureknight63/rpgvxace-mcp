@@ -110,7 +110,7 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
             # with what is wrong rather than with what is read.
             indent = _int(command.get("indent")) or 0
 
-            findings.extend(_check_indent(index, command, indent_previous,
+            findings.extend(_check_indent(index, indent_previous,
                                           location, indent))
             indent_previous = indent
 
@@ -159,7 +159,7 @@ def _command_assets(checker: _AssetChecker, code: Any, params: list[Any],
                           location.at(index), "missing_audio")
 
 
-def _check_indent(index: int, command: RubyObject, previous: int,
+def _check_indent(index: int, previous: int,
                   location: Location, indent: int) -> list[Finding]:
     """One rule: the branch structure the indents describe is continuous.
 
@@ -183,7 +183,7 @@ def _check_indent(index: int, command: RubyObject, previous: int,
 
 def _check_references(code: Any, params: list[Any],
                       existing: "dict[str, AbstractSet[int]]",
-                      on_disk: "set[int]", map_sizes: "_MapSizes",
+                      on_disk: AbstractSet[int], map_sizes: "_MapSizes",
                       location: Location, index: int) -> list[Finding]:
     """One rule: every id a command names is an id that exists.
 

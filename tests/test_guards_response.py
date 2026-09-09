@@ -15,6 +15,7 @@ import unittest
 import zlib
 from pathlib import Path
 
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
@@ -56,6 +57,8 @@ class TestScriptInflateLimit(ToolTest):
         listing = self.reopen().project.load_scripts()
         self.assertIn("more than", listing[0]["error"])
         self.assertNotIn("code", listing[0])
+
+
 class TestRefusalsAreBounded(ToolTest):
     """A refusal quotes untrusted file content, so it has to be capped.
 
@@ -100,6 +103,8 @@ class TestRefusalsAreBounded(ToolTest):
         self.assertIs(server.echo, registry.echo)
         shown = registry.echo("x" * 5_000_000)
         self.assertLess(len(shown), registry.MAX_ECHO_CHARS + 60)
+
+
 class TestMapGetBoundsItsEventSummary(SharedObjectMap, ToolTest):
     """`_event_summaries` walks events x pages and both come from the file.
 
@@ -125,6 +130,8 @@ class TestMapGetBoundsItsEventSummary(SharedObjectMap, ToolTest):
         out = self.call("map_get", map_id=1, include_events=True)
         self.assertNotIn("events_truncated", out)
         self.assertTrue(out["events"], "the fixture map has events")
+
+
 class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
     """Every ceiling is declared to callers, or listed here as internal.
 
@@ -314,6 +321,8 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
         self.assertEqual(gone, [],
                          "INTERNAL names ceilings that no longer exist, so it "
                          "is excusing nothing and hiding the next one")
+
+
 class TestATileTallyUsesTheBuffer(ToolTest):
     """`_tile_counts` walked cell by cell; its own sibling proves the fast form.
 
@@ -354,6 +363,8 @@ class TestATileTallyUsesTheBuffer(ToolTest):
         data = self.project.load_map(1).get("data")
         counts = map_read_tools._tile_counts(data)
         self.assertEqual(sorted(counts), sorted(str(z) for z in range(data.zsize)))
+
+
 class TestTheFileCacheIsBounded(ToolTest):
     """The cache evicts, oldest first, and never drops a staged file."""
 
@@ -440,6 +451,8 @@ class TestTheFileCacheIsBounded(ToolTest):
         self.assertEqual(len(self.project._cache), held,
                          "a fixture-sized project is being evicted from, so "
                          "every call re-parses")
+
+
 class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
     """Every bound in this project counted nodes; none counted bytes.
 
@@ -546,6 +559,8 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
         self.assertLess(len(rendered), 100_000,
                         "event_get returned %d characters for one command"
                         % len(rendered))
+
+
 class TestARawPathCannotBeUnboundedlyLong(ToolTest):
     """Nothing capped the number of path segments, and a hash can be cyclic.
 
@@ -585,6 +600,8 @@ class TestARawPathCannotBeUnboundedlyLong(ToolTest):
         from rpgvxace_mcp.tools.raw_tools import MAX_PATH_SEGMENTS
         spec = REGISTRY["raw_data"].schema["properties"]["path"]
         self.assertIn(str(MAX_PATH_SEGMENTS), spec["description"])
+
+
 class TestTheNodeBudgetFitsTheResponse(unittest.TestCase):
     """A conversion this server permits must be one it can answer with.
 
@@ -620,6 +637,8 @@ class TestTheNodeBudgetFitsTheResponse(unittest.TestCase):
         """The other direction: a whole real map has to convert."""
         from rpgvxace_mcp.convert import MAX_JSON_NODES
         self.assertGreater(MAX_JSON_NODES, 100_000)
+
+
 class TestTheTileRectangleUsesTheBuffer(ToolTest):
     """The third per-cell `Table.get` loop, in the primary tile path.
 
@@ -680,6 +699,8 @@ class TestTheTileRectangleUsesTheBuffer(ToolTest):
         out = self.call("map_tiles", op="read", map_id=1, x=0, y=0, width=2,
                         height=2, z=0)
         self.assertEqual(out["rows"], [[1, 2], [3, 4]])
+
+
 class TestAListingBuildsOnlyItsWindow(ToolTest):
     """`MAX_ROWS` capped what came back and not what was built.
 
@@ -710,6 +731,8 @@ class TestAListingBuildsOnlyItsWindow(ToolTest):
         from rpgvxace_mcp.tools.map_read_tools import MAX_MAP_ROWS
         spec = REGISTRY["map_list"].schema["properties"]["limit"]
         self.assertEqual(spec["maximum"], MAX_MAP_ROWS)
+
+
 class TestAPathCannotOutscanItsFile(ToolTest):
     """`MAX_PATH_SEGMENTS` bounds the path's length, not the product.
 

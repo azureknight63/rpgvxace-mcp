@@ -89,6 +89,17 @@ _RE_ERROR = re.error
 
 
 _REPEATS = ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT")
+
+# How deep `_alphabet` will follow a pattern's groups before refusing it.
+#
+# It was 8, and reaching it returned an empty alphabet -- see `_alphabet`
+# for what that cost. Raising it is half the fix: a real search nests two or
+# three deep and `^(a(b(c)))$` is three, so eight was low enough that an
+# ordinary-looking pattern could reach it, and a cap a caller can reach by
+# accident is a cap that will be reached on purpose. Fifty is far above
+# anything hand-written and far below CPython's recursion limit, which is
+# the reason a cap exists at all: `_alphabet` recurses per group.
+MAX_ALPHABET_DEPTH = 50
 _MAXREPEAT = _sre_parse.MAXREPEAT
 
 # Category pairs that provably cannot match the same character: a category and
@@ -386,8 +397,32 @@ def _alphabet(parsed: Any, depth: int = 0) -> "set[str]":
     letter is the case that makes `.*` compete with what follows it.
     """
     found: set[str] = set()
-    if depth > 8:
-        return found
+    if depth > MAX_ALPHABET_DEPTH:
+        # Refused, not returned empty. This used to `return found`, and an
+        # empty alphabet is not "no characters" -- it is "this module could
+        # not tell", which `_subjects` then turned into a run of "a".
+        #
+        # Measured on `((((((((([0-9]+[0-9]+!)))))))))`, 31 characters and
+        # nine levels deep because CPython emits a SUBPATTERN node for
+        # `(?:...)` as well as `(...)`:
+        #
+        #     the "a" subject the gate measured    0.0001s
+        #     2,000 digits, which the gate allowed    3.9s
+        #
+        # a factor of about 39,000 between what was measured and what then
+        # runs over every string in the project -- and `_matcher` checks
+        # its deadline only between matches, because `re` holds the GIL.
+        # So the child returned in milliseconds, `_remember` cached the
+        # pass for the life of the process, and the server had no way out
+        # but being killed. Every other way this module can fail to get an
+        # answer is already a refusal; this was the one that was not.
+        raise PatternTooCostly(
+            "that pattern nests groups more than %d deep, which is deeper "
+            "than this server reads when working out which characters to "
+            "test it against -- so it cannot judge the pattern safe. "
+            "Flatten the groups, or leave regex off and search for plain "
+            "text, which reads every string in full."
+            % MAX_ALPHABET_DEPTH)
     for op, av in parsed:
         name = str(op)
         if name == "LITERAL" and 0 < av < 0x110000:
@@ -428,12 +463,24 @@ def _subjects(pattern: str) -> "list[str]":
     this sentence said "plus two mixtures" against three of them and "each
     character" against a capped eight.
     """ % MAX_SINGLE_CHARACTER_SUBJECTS
+    # `re.error` only, where this caught `Exception`. A pattern the parser
+    # rejects is left to `re.compile` to report in its own words, which
+    # three tests hold. Anything else -- including `PatternTooCostly` from
+    # the depth guard -- travels up to `check_pattern` as a refusal, because
+    # a failure to read a pattern this module is about to permit is not a
+    # reason to guess at its alphabet: the fallback below is a run of "a",
+    # which almost any pattern survives.
     try:
         alphabet = _alphabet(_sre_parse.parse(pattern))
-    except Exception:
+    except re.error:
         alphabet = set()
     # Bounded, so a pattern naming a hundred literals does not spawn a child
     # with a hundred 2000-character subjects.
+    #
+    # `or ["a"]` still stands, for the pattern that genuinely names no
+    # character of its own -- `^$`, `\\b`, a bare backreference. That is a
+    # different thing from an alphabet this module could not read, which is
+    # now a refusal rather than an empty set.
     ordered = sorted(alphabet) or ["a"]
     # A run of each of the first few, individually -- one homogeneous run is
     # what makes competing atoms backtrack.

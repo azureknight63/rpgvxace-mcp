@@ -11,6 +11,7 @@ import sys
 import unittest
 from pathlib import Path
 
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
@@ -22,8 +23,10 @@ from rpgvxace_mcp.tools.search_tools import (  # noqa: E402
 )
 from rpgvxace_mcp.tools import pattern_safety  # noqa: E402
 from rpgvxace_mcp.tools.pattern_safety import (  # noqa: E402
+    MAX_ALPHABET_DEPTH,
     PatternTooCostly,
     _REPEATS,
+    _alphabet,
     _children,
     _sre_parse,
     check_pattern,
@@ -795,3 +798,75 @@ class TestWhereANodeKeepsItsBody(unittest.TestCase):
                 got = any(_children(str(op), av)
                           for op, av in self.parsed(pattern))
                 self.assertEqual(got, expected, self.kinds(pattern))
+
+
+class TestTheAlphabetFailsClosed(unittest.TestCase):
+    r"""A pattern whose characters this module cannot see is refused.
+
+    `_alphabet` walks the parse tree to learn which characters a pattern
+    mentions, and `_subjects` builds the subjects `measure_cost` runs the
+    child against out of them. A pattern that names none -- because the walk
+    gave up -- fell through to `["a"]`, and a run of "a" makes almost any
+    pattern finish instantly.
+
+    Measured, on `((((((((([0-9]+[0-9]+!)))))))))`, which is 31 characters
+    and well inside `MAX_PATTERN_CHARS`:
+
+        the "a" subject the gate measured   0.0001s
+        2,000 digits, which the gate permits  3.9s
+
+    a factor of about 39,000 between what was measured and what then runs
+    over every string in the project -- and `_matcher` checks its deadline
+    only *between* matches, because `re` holds the GIL and cannot be
+    interrupted mid-match. So the measurement passed, `_remember` cached the
+    pass for the life of the process, and the single-threaded server had no
+    way out but being killed.
+
+    Nine levels because `_alphabet`'s depth cap is 8 and CPython emits a
+    SUBPATTERN node for `(?:...)` as well as for `(...)`.
+    """
+
+    NESTED = "(" * 9 + "[0-9]+[0-9]+!" + ")" * 9
+
+    def test_the_alphabet_sees_the_pattern_or_nothing_does(self):
+        """The one assertion that is the regression test for this."""
+        parsed = list(_sre_parse.parse(self.NESTED))
+        self.assertNotEqual(
+            _alphabet(parsed), set(),
+            "the alphabet is empty, so every subject is a run of 'a' and "
+            "the measurement is blind")
+
+    def test_a_pattern_too_deep_to_read_is_refused(self):
+        """Failing closed is the whole contract of this module.
+
+        Past `MAX_ALPHABET_DEPTH`, which is 50: deeper than anything
+        hand-written, and the depth at which this module stops being able
+        to say which characters the pattern mentions.
+        """
+        too_deep = MAX_ALPHABET_DEPTH + 10
+        with self.assertRaises(PatternTooCostly):
+            check_pattern("(" * too_deep + "a" + ")" * too_deep)
+
+    def test_a_pattern_at_the_cap_is_still_read(self):
+        """The cap is a refusal, so it has to sit above what callers write."""
+        deep = "(" * MAX_ALPHABET_DEPTH + "Potion" + ")" * MAX_ALPHABET_DEPTH
+        self.assertIn("P", _alphabet(list(_sre_parse.parse(deep))))
+
+    def test_the_nested_pattern_does_not_reach_the_matcher(self):
+        """End to end: `search` refuses it rather than running it."""
+        with self.assertRaises((PatternTooCostly, ToolError)):
+            check_pattern(self.NESTED)
+
+    def test_an_ordinary_nested_pattern_still_works(self):
+        """Failing closed must not mean refusing what callers really write."""
+        for pattern in (r"(Potion|Elixir)", r"((Fire))", r"(a(b(c)))",
+                        r"^(Chapter \d+): (.*)$"):
+            with self.subTest(pattern=pattern):
+                check_pattern(pattern)
+
+    def test_the_alphabet_of_a_deep_pattern_reaches_its_characters(self):
+        """Nine levels down, the digits and the bang are still found."""
+        found = _alphabet(list(_sre_parse.parse(self.NESTED)))
+        self.assertIn("!", found)
+        self.assertTrue(found & set("0123456789"),
+                        "no digit in %r" % sorted(found))

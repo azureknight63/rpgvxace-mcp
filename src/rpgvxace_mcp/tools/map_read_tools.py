@@ -126,7 +126,12 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                     maximum=MAX_MAP_ROWS) or MAX_MAP_ROWS
 
     infos = ctx.project.entries("map_infos", refresh)
-    on_disk = ctx.project.map_ids_present()
+    # With `refresh`, like the two reads around it. Without it this asked a
+    # cached directory listing, so `map_list refresh=true` after the editor
+    # created a map showed the new tree row with `file_present: false` and
+    # no details -- and "use after the RPG Maker editor has saved" is the
+    # whole of what `REFRESH` is for.
+    on_disk = ctx.project.map_ids_present(refresh)
     rows = []
     matching = 0
     for map_id, info in infos:

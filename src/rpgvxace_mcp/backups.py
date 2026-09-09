@@ -210,7 +210,12 @@ class BackupStore:
         wanted = []
         for name in (files or available_files):
             safe_component(name, "file name")
-            _contained(source_dir / name, self.backup_root(),
+            # The same boundary the copy loop uses -- the snapshot, not the
+            # backup root. With the root here, a symlink resolving into a
+            # *sibling* snapshot passed this pass and was caught only in the
+            # copy loop, partway through, with Data/ half old and half new:
+            # which is precisely what validating everything up front is for.
+            _contained(source_dir / name, source_dir,
                        "backup file %r" % name)
             wanted.append(name)
         missing = [f for f in wanted if f not in available_files]

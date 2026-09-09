@@ -258,10 +258,10 @@ def _check_command_assets(project: Project, checker: _AssetChecker,
         # rules would invent a missing file for every line of dialogue.
         return
     for location, commands in iter_command_lists(project, map_ids, budget):
-        if len(checker.findings) >= MAX_FINDINGS:
+        if checker.full:
             break
         for index, command in enumerate(commands):
-            if len(checker.findings) >= MAX_FINDINGS:
+            if checker.full:
                 break
             if not isinstance(command, RubyObject):
                 continue
@@ -280,7 +280,9 @@ def _check_command_assets(project: Project, checker: _AssetChecker,
 
 def _check_database_assets(project: Project, checker: _AssetChecker,
                            budget: "WalkBudget | None" = None) -> None:
-    # The last asset walk in this file -- `check_tilesets` in
+    # This *was* the walk with neither the budget its siblings take nor
+    # a `checker.full` test; it has both now, on all three of its
+    # blocks. The last asset walk in this file -- `check_tilesets` in
     # `database.py` is the fourth -- and the one with neither the
     # budget its siblings take nor a `checker.full` test. `_AssetChecker`
     # returns before it counts anything for a name that is empty or

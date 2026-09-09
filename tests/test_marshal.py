@@ -336,7 +336,6 @@ class TestHostileInput(unittest.TestCase):
         self.assertIn("above the", str(caught.exception))
 
 
-
     def test_rejects_a_deeply_nested_symbol(self):
         """A symbol in a name position can carry an encoding record.
 
@@ -349,6 +348,7 @@ class TestHostileInput(unittest.TestCase):
         with self.assertRaises(MarshalError) as caught:
             load(payload)
         self.assertIn("nested", str(caught.exception))
+
 
 class TestLosslessEdgeCases(unittest.TestCase):
     """Constructs the codec does not interpret must still round trip exactly."""

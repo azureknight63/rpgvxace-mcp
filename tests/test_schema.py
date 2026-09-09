@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
@@ -261,7 +262,6 @@ class TestSchemaReportProvenance(unittest.TestCase):
         self.assertNotIn("RGSS2", report["note"])
 
 
-
 class TestTheReferenceAgreesWithTheTables(unittest.TestCase):
     """Every shared-value list in the document comes from the live table.
 
@@ -432,8 +432,16 @@ class TestOneBlankLineConvention(unittest.TestCase):
     def modules(self):
         # Globbed, not listed: `scripts/` was one named file, so
         # `guard_table.py` arrived with 2,000 lines nothing checked.
+        #
+        # And `tests/` as well, which this said "everywhere" without
+        # reading. The three files the bounds-guard split produced had 37
+        # classes with no blank line above them at all, because the
+        # generator that wrote them joined the blocks with one newline --
+        # so the rule was blind to the directory whose files this round
+        # rewrote most.
         root = Path(__file__).resolve().parent.parent
         return (sorted((root / "src" / "rpgvxace_mcp").rglob("*.py"))
+                + sorted((root / "tests").glob("*.py"))
                 + sorted((root / "scripts").glob("*.py")))
 
     def test_every_top_level_definition_has_two_blank_lines_above_it(self):

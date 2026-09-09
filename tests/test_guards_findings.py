@@ -12,6 +12,7 @@ import sys
 import unittest
 from pathlib import Path
 
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
@@ -117,6 +118,8 @@ class TestValidateSurvivesHostileData(ValidateTest):
             # "where" as well as through the message.
             self.assertLess(len(json.dumps(finding)), 4000,
                             "one crafted name inflated every finding about it")
+
+
 class TestDamagedPagesAreRefusedNotCrashedOn(ToolTest):
     """@pages must get the type check @events already has.
 
@@ -153,6 +156,8 @@ class TestDamagedPagesAreRefusedNotCrashedOn(ToolTest):
         message = str(caught.exception)
         self.assertIn("no pages", message)
         self.assertNotIn("0..-1", message)
+
+
 class TestNoWalkCollectsPastTheCeiling(ToolTest):
     """Every walk that appends inside a loop stops at MAX_FINDINGS.
 
@@ -266,12 +271,23 @@ class TestNoWalkCollectsPastTheCeiling(ToolTest):
                              "ceiling of %d" % (len(found), self.CEILING))
 
     def test_an_ordinary_project_still_reports_everything(self):
-        """The ceiling must not clip a real project's findings."""
-        from rpgvxace_mcp import analysis
-        analysis.MAX_FINDINGS = 5000
+        """The ceiling must not clip a real project's findings.
+
+        Through the helper, and asserting the key `_report` actually sets.
+        This assigned `analysis.MAX_FINDINGS = 5000` -- the package, not the
+        modules that read it, which is the exact trap
+        `lower_the_finding_ceiling`'s own docstring records -- so it ran at
+        the ceiling of 4 that `setUp` had installed. And it asserted the
+        absence of `findings_ceiling_reached`, a key no code in this
+        project writes; the key is `stopped_early`. Two ways of passing
+        without checking anything, in one four-line test.
+        """
+        self.lower_the_finding_ceiling(5000)
         out = self.call("validate")
-        self.assertNotIn("findings_ceiling_reached", out)
+        self.assertNotIn("stopped_early", out)
         self.assertFalse(out["findings_truncated"])
+
+
 class TestNarrowingValidateActuallyNarrowsIt(ToolTest):
     """`map_ids` exists to make a run cheap, and bought almost nothing.
 
@@ -369,6 +385,8 @@ class TestNarrowingValidateActuallyNarrowsIt(ToolTest):
                       "the transfer check stopped seeing maps outside the "
                       "scope, which is what the eager lookup was for: %s"
                       % rules)
+
+
 class TestTheMapScopeStopsCollecting(ToolTest):
     """`check_maps` accumulates, so `check_maps` is what has to stop.
 
@@ -482,6 +500,8 @@ class TestTheMapScopeStopsCollecting(ToolTest):
         found = self.analysis.check_maps(self.project, [1], tables)
         self.assertTrue(any("999" in f.message for f in found),
                         [f.message for f in found])
+
+
 class TestEveryScopeSpendsTheSameAllowance(ToolTest):
     """`validate` built its walk budget after two of its four scopes ran.
 
@@ -599,6 +619,8 @@ class TestEveryScopeSpendsTheSameAllowance(ToolTest):
         """The charges must not make a real project look crafted."""
         out = self.call("validate", scopes=["maps", "database"])
         self.assertNotIn("command_walk_stopped", out)
+
+
 class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
     """Every function in the linter that loops over file data takes a budget.
 
@@ -699,6 +721,8 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
         self.assertEqual(idle, [],
                          "these take a budget and neither spend it nor pass "
                          "it on: " + ", ".join(idle))
+
+
 class TestAWholeRunHasOneCeiling(ToolTest):
     """`MAX_FINDINGS` bounds a run, not each check's own list.
 
@@ -758,6 +782,8 @@ class TestAWholeRunHasOneCeiling(ToolTest):
     def test_an_ordinary_project_does_not_claim_it_stopped(self):
         out = self.call("validate")
         self.assertNotIn("stopped_early", out)
+
+
 class TestTheCeilingStopsTheWalkingToo(ToolTest):
     """`_Findings.add` caps what is kept; these lines cap what is visited.
 

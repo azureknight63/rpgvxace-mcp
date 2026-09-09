@@ -13,6 +13,7 @@ import sys
 import unittest
 from pathlib import Path
 
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
@@ -71,6 +72,8 @@ class TestCollectionIsBounded(ValidateTest):
         self.assertLessEqual(collected, MAX_FINDINGS)
         self.assertIn("stopped_early", rows,
                       "the caller has to be told this is not the whole picture")
+
+
 class TestGrowingAMapIsBoundedToo(ToolTest):
     """The whole-table ceiling applied to shrinking and not to growing.
 
@@ -101,6 +104,8 @@ class TestGrowingAMapIsBoundedToo(ToolTest):
         out = self.call("map_edit", op="resize", map_id=1, width=25,
                         height=20, dry_run=True)
         self.assertIn("resized from 20x15 to 25x20", out["would_change"])
+
+
 class TestOneCommandListHasACeiling(ToolTest):
     """A compiled command list had no bound at all.
 
@@ -137,6 +142,8 @@ class TestOneCommandListHasACeiling(ToolTest):
                 self.call("event_edit", map_id=1, ops=[
                     {"op": "append_commands", "event_id": 1, "page": 0,
                      "commands": batch}])
+
+
 class TestReadingManyEntriesSharesOneBudget(ToolTest):
     """The conversion budget was per entry, so per response it was unbounded.
 
@@ -180,6 +187,8 @@ class TestReadingManyEntriesSharesOneBudget(ToolTest):
         db_tools.new_walk = lambda: convert._Walk(budget=one_entry + 2)
         with self.assertRaises((ToolError, ConversionError)):
             self.call("db_get", table="items", ids=[1, 2])
+
+
 class TestOneBudgetForAWholeResponse(ToolTest):
     """A string's ivar record must not start its own walk.
 
@@ -211,6 +220,8 @@ class TestOneBudgetForAWholeResponse(ToolTest):
         with self.assertRaises(ConversionError) as caught:
             convert.to_json(self.carrying_ivars(deep), self.project.codec)
         self.assertIn("nests deeper", str(caught.exception))
+
+
 class TestSharedChildrenCannotAmplifyAWalk(SharedObjectMap, ToolTest):
     """A file whose objects share children must not buy an unbounded walk.
 
@@ -264,6 +275,8 @@ class TestSharedChildrenCannotAmplifyAWalk(SharedObjectMap, ToolTest):
         self.assertIn("command_walk_stopped", out,
                       "validate reports a clean bill from a walk that never "
                       "finished: %s" % sorted(out))
+
+
 class TestSearchBoundsItsTotalWork(ToolTest):
     """A pattern measured against 2 KB then runs over the whole project.
 
@@ -362,6 +375,8 @@ class TestSearchBoundsItsTotalWork(ToolTest):
         out = self.call("search", query="Potion")
         self.assertNotIn("text_scan_stopped", out)
         self.assertTrue(out["hits"], "the fixture project has a Potion")
+
+
 class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
     """`WalkBudget` says it is the only thing between a crafted file and a
     walk the user must kill the server to escape. Three walks never got one.
@@ -475,6 +490,8 @@ class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
         out = self.call("db_edit", table="items", dry_run=True,
                         ops=[{"op": "delete", "id": 1}])
         self.assertNotIn("stopped", str(out))
+
+
 class TestAnEmptyPageStillCostsSomething(EmptyPageMap, ToolTest):
     """A visit has to be charged for, or the product is free."""
 
@@ -591,6 +608,8 @@ class TestAnEmptyPageStillCostsSomething(EmptyPageMap, ToolTest):
         self.assertNotIn("command_walk_stopped", out)
         out = self.call("map_get", map_id=1, include_events=True)
         self.assertNotIn("events_truncated", out)
+
+
 class TestOneBatchGetsOneWalkAllowance(ToolTest):
     """A batch of deletes traverses the project once, not once per delete.
 
@@ -632,6 +651,8 @@ class TestOneBatchGetsOneWalkAllowance(ToolTest):
         self.assertEqual(len(walks), 1,
                          "a %d-delete batch walked the whole project %d "
                          "times" % (len(ids), len(walks)))
+
+
 class TestEveryWalkSpendsItsAllowance(ToolTest):
     """Each walk is asked directly whether it charged for what it visited.
 
@@ -791,6 +812,8 @@ class TestEveryWalkSpendsItsAllowance(ToolTest):
                            self.analysis.MAX_WALK_STEPS * 0.9,
                            "a fixture project spent more than a tenth of the "
                            "allowance, so the charges are too heavy")
+
+
 class TestAnEventWithNoPagesStillCostsARow(ToolTest):
     """`map_get`'s ceiling counted page rows, so an event with none was free.
 
@@ -834,6 +857,8 @@ class TestAnEventWithNoPagesStillCostsARow(ToolTest):
         out = self.call("event_get", map_id=1)
         self.assertLess(len(out["events"]),
                         map_read_tools.MAX_EVENT_SUMMARY_ROWS * 3)
+
+
 class TestASkippedPageSlotIsStillCountedForReading(ToolTest):
     """Round 7 made every appended row count. Not every examined slot.
 
@@ -922,6 +947,8 @@ class TestASkippedPageSlotIsStillCountedForReading(ToolTest):
         self.assertIn("command_walk_stopped", result,
                       "naming one page walked %d x %d slots free"
                       % (self.EVENTS, self.SLOTS))
+
+
 class TestOneContainerSetForEveryWalk(ToolTest):
     """Five walks encoded "which wrappers hold other values" and disagreed.
 
@@ -991,6 +1018,8 @@ class TestOneContainerSetForEveryWalk(ToolTest):
         self.assertEqual(disagree, [],
                          "ruby_children finds nothing inside these, so a "
                          "string in one is invisible to encoding detection")
+
+
 class TestOneBatchGetsOneReferenceWalk(ToolTest):
     """A delete's reference scan ran once per op over unchanged lists.
 
@@ -1069,6 +1098,8 @@ class TestOneBatchGetsOneReferenceWalk(ToolTest):
         self.assertEqual(answers[2], before[2] + 1,
                          "item 2 was given one more reference and the batch "
                          "reports %s -> %s" % (before[2], answers[2]))
+
+
 class TestOneIndexPerEventEditCall(ToolTest):
     """`RubyHash.get` is a linear scan and `MAX_OPS` multiplies it.
 
@@ -1115,6 +1146,8 @@ class TestOneIndexPerEventEditCall(ToolTest):
                 {"op": "delete", "event_id": 1},
                 {"op": "update", "event_id": 1, "name": "Renamed"}])
         self.assertIn("no event 1", str(caught.exception))
+
+
 class TestOneEventsIndexPerCall(ToolTest):
     """The index is built once per call, and the old test could not tell.
 
@@ -1160,6 +1193,8 @@ class TestOneEventsIndexPerCall(ToolTest):
             self.call("event_edit", map_id=1, ops=[
                 {"op": "delete", "event_id": 1},
                 {"op": "update", "event_id": 1, "name": "Renamed"}])
+
+
 class TestATableCostsWhatItsCellsCost(ToolTest):
     """A Table cost the conversion budget one node however many cells it had.
 
@@ -1200,6 +1235,8 @@ class TestATableCostsWhatItsCellsCost(ToolTest):
                    if isinstance(v, dict) and "cells_omitted" in v)
         self.assertTrue(big["cells_truncated"])
         self.assertIn("map_tiles", big["cells_note"])
+
+
 class TestOneCommandCannotOutrunTheDeadline(ToolTest):
     """`_command_texts` built every string before the matcher saw one.
 

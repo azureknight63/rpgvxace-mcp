@@ -9,11 +9,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
 
 from build_project import build  # noqa: E402
+
 
 PROTOCOL_VERSION = "2025-06-18"
 
