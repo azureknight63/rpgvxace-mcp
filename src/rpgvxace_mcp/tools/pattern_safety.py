@@ -302,6 +302,12 @@ MAX_SINGLE_CHARACTER_SUBJECTS = 8
 # parent -- see `measure_cost`.
 COMPILE_FAILED_EXIT = 17
 
+
+# What the child prints once it has matched every subject. A clean exit
+# says the interpreter finished; this says the measurement did, which is
+# a different fact and the one being relied on.
+CHILD_DONE = "ok"
+
 # The flags every measurement is made under, and the flags the caller
 # has to match on. The child spelled `re.IGNORECASE` and so did the one
 # caller, and nothing held the two equal -- a cost measured under one
@@ -319,7 +325,8 @@ _CHILD = (
     "    sys.exit(%d)\n"
     "for encoded in lines[1:]:\n"
     "    compiled.search(base64.b64decode(encoded).decode('utf-8'))\n"
-    "print('ok')\n") % (int(MEASURED_FLAGS), COMPILE_FAILED_EXIT)
+    "print('%s')\n") % (int(MEASURED_FLAGS), COMPILE_FAILED_EXIT,
+                        CHILD_DONE)
 
 # Patterns already measured and passed, in this process. A model searching for
 # the same thing across several scopes would otherwise pay for a child each
@@ -559,7 +566,23 @@ def measure_cost(pattern: str) -> None:
             # `_matcher` turns that into a ToolError. Returned rather than
             # remembered -- nothing was measured, so there is no pass to cache.
             return
-        if done.returncode != 0:
+        # `returncode == 0` alone is not proof the measurement ran. The
+        # child prints "ok" as its last statement precisely so there is
+        # something to check, and the parent was discarding it -- so any
+        # future path that exits zero without matching (a `-c` that fails
+        # to reach the loop, an interpreter shim that swallows the
+        # program) would have been cached as a measured pass. The same
+        # shape as the `"error" not in stderr` test this replaced: a
+        # proxy for "did it finish" standing in for the answer.
+        if done.returncode == 0 and done.stdout.strip() != CHILD_DONE:
+            verdict = (
+                "this server's safety check on that pattern exited "
+                "cleanly without reporting that it had finished, so it "
+                "will not run the pattern either -- a match that cannot "
+                "be interrupted is not something to risk on a check whose "
+                "result did not arrive. Search for a plain substring by "
+                "leaving regex off.")
+        elif done.returncode != 0:
             # A child that died for any other reason: killed by a signal, out
             # of memory, or a `sys.executable` that is not an interpreter.
             # Refused, because this is the bound.

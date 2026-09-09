@@ -655,11 +655,23 @@ class TestTheMeasurementFailsClosedOnEveryAbnormalExit(unittest.TestCase):
         pattern_safety._PASSED.clear()
         self.addCleanup(pattern_safety._PASSED.clear)
 
-    def child(self, returncode, stderr=""):
-        """Make the measurement's child exit however this test needs."""
+    def child(self, returncode, stderr="", stdout=None):
+        """Make the measurement's child exit however this test needs.
+
+        `stdout` defaults to what the real child prints when it has
+        finished matching. A clean exit is not proof the measurement ran --
+        the child says "ok" as its last statement for exactly that reason
+        -- so a fake standing in for a *successful* child has to say it
+        too, or it is standing in for a different child.
+        """
         class Done:
             def __init__(self):
-                self.returncode, self.stderr, self.stdout = returncode, stderr, ""
+                self.returncode = returncode
+                self.stderr = stderr
+                self.stdout = (self.safety_done if stdout is None
+                               else stdout)
+
+        Done.safety_done = self.safety.CHILD_DONE
         self.safety.subprocess.run = lambda *a, **k: Done()
 
     # Every abnormal exit the docstring names, and the stderr each really
@@ -720,6 +732,24 @@ class TestTheMeasurementFailsClosedOnEveryAbnormalExit(unittest.TestCase):
         self.child(0, "")
         self.safety.measure_cost("Gold[0-9]+")
         self.assertIn("Gold[0-9]+", self.safety._PASSED)
+
+    def test_a_clean_child_that_says_nothing_is_refused(self):
+        """Exit zero is not evidence the measurement happened.
+
+        The child prints its sentinel as the last statement after matching
+        every subject, so a zero exit without it means the program did not
+        reach the end -- an interpreter shim that swallows `-c`, or any
+        future path that returns before the loop. The parent was
+        discarding that output, which is the same shape as the `"error"
+        not in stderr` test this file records: a proxy for "did it finish"
+        standing in for the answer.
+        """
+        self.child(0, "", stdout="")
+        with self.assertRaises(self.safety.PatternTooCostly):
+            self.safety.measure_cost("Gold[0-9]+")
+        self.assertNotIn("Gold[0-9]+", self.safety._PASSED,
+                         "a pattern whose check did not report finishing "
+                         "was cached as measured")
 
     def test_a_real_child_still_measures_a_real_pattern(self):
         """End to end, with no fake: the fix must not break the gate."""

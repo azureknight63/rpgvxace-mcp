@@ -1057,6 +1057,64 @@ class TestEveryCollectorIsShared(unittest.TestCase):
                          "excused and no longer collecting: "
                          + ", ".join(stale))
 
+    # Classes that hold a findings list of their own, and why. The scan
+    # above walks module-level functions, so a collector that is an
+    # *object* is invisible to it -- and that is the shape the history is
+    # about: `check_tilesets`' bug was that it guarded `findings` while its
+    # loop appended to `checker.findings`.
+    COLLECTOR_CLASSES = {
+        "_Findings": "the run's collector itself -- the one every rule is "
+                     "handed, and the thing the other entries here are "
+                     "measured against",
+        "_AssetChecker": "four walks share one, which is why the ceiling "
+                         "lives on the collector rather than at the call "
+                         "sites -- the one site that carried the guard had "
+                         "written it against the wrong list. `validate` "
+                         "builds one for the whole run and every walk that "
+                         "collects assets takes it.",
+    }
+
+    def collector_classes(self):
+        """Every class in the linter holding a `list[Finding]` attribute."""
+        import ast
+        package = (Path(__file__).resolve().parent.parent / "src"
+                   / "rpgvxace_mcp" / "analysis" / "lint")
+        found = {}
+        for path in sorted(package.glob("*.py")):
+            if path.name == "__init__.py":
+                continue
+            for node in ast.parse(path.read_text(encoding="utf-8")).body:
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                body = ast.unparse(node)
+                if "list[Finding] = []" in body or ": list[Finding]" in body:
+                    found[node.name] = path.stem
+        return found
+
+    def test_every_collector_class_is_accounted_for(self):
+        """The shape the function scan cannot see, named and reasoned about.
+
+        Not a defect on its own -- an object that owns a ceiling is how
+        `_AssetChecker` is *meant* to work. What was wrong is that no test
+        could see it, so the one collector still standing outside the run's
+        was invisible to the rule written to find exactly that.
+        """
+        found = self.collector_classes()
+        self.assertTrue(found, "found no collector classes, so this "
+                               "checked nothing")
+        unexplained = sorted(set(found) - set(self.COLLECTOR_CLASSES))
+        self.assertEqual(
+            unexplained, [],
+            "these hold a findings list of their own and nothing says why: "
+            + ", ".join("%s (%s)" % (n, found[n]) for n in unexplained))
+
+    def test_no_reason_outlives_its_class(self):
+        idle = sorted(set(self.COLLECTOR_CLASSES)
+                      - set(self.collector_classes()))
+        self.assertEqual(idle, [],
+                         "explained and no longer a collector: "
+                         + ", ".join(idle))
+
     def test_the_shared_collector_is_what_bounds_a_whole_run(self):
         """`_Findings.given` is the mechanism, so it has to be reachable."""
         from rpgvxace_mcp.analysis.lint.findings import _Findings
@@ -1229,6 +1287,41 @@ class TestEveryCollectorReturnsWhatItCollected(unittest.TestCase):
             "so a caller reading the collector is not shown the finding: "
             + ", ".join(wrong))
 
+
+class TestOneAssetCheckerForAWholeRun(ToolTest):
+    """The count the ceiling comment claims, measured.
+
+    `check_tilesets` built a second `_AssetChecker`, so a whole-scope run
+    held two independently-bounded lists of five thousand where the comment
+    said one -- and nothing inside its row loop appended to `findings`, so
+    `findings.full` never became true there and the sheet walk could build
+    a full five thousand for `findings.extend` to drop all but one of.
+
+    Counted by construction, because the count is the claim.
+    """
+
+    def test_the_run_builds_one(self):
+        """The claim the reason above makes, measured rather than asserted.
+
+        `check_tilesets` built a second one, so a whole-scope run held two
+        independently-bounded lists of five thousand where the comment said
+        one. Counted by construction, because the count is the claim.
+        """
+        from rpgvxace_mcp.analysis.lint import assets
+        built = []
+        original = assets._AssetChecker.__init__
+
+        def counting(inner, project):
+            built.append(1)
+            return original(inner, project)
+
+        self.addCleanup(setattr, assets._AssetChecker, "__init__", original)
+        assets._AssetChecker.__init__ = counting
+        self.call("validate")
+        self.assertEqual(built, [1],
+                         "a whole-scope validate built %d asset checkers, "
+                         "so the ceiling is %d times MAX_FINDINGS"
+                         % (len(built), len(built)))
 
 # Last in the file, deliberately. It used to sit mid-module,
 # and module statements run in order -- so running this file directly

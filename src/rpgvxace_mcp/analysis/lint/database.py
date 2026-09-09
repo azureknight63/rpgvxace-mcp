@@ -33,7 +33,8 @@ from .assets import _AssetChecker
 
 def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
                    budget: "WalkBudget | None" = None,
-                   collected: "_Findings | None" = None) -> list[Finding]:
+                   collected: "_Findings | None" = None,
+                   checker: "_AssetChecker | None" = None) -> list[Finding]:
     """VX Ace only: every map names a tileset, and tilesets name graphics."""
     if not project.profile.has_tileset_database:
         return []
@@ -42,10 +43,19 @@ def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
     if tileset_ids is None:
         return findings.items
 
-    # The sheet names are asset references, so they go through the same checker
-    # as every other one: it is what knows about the RTP and about names that
-    # differ only in case.
-    checker = _AssetChecker(project)
+    # The sheet names are asset references, so they go through the same
+    # checker as every other one: it is what knows about the RTP and about
+    # names that differ only in case.
+    #
+    # The run's checker when there is one. This built its own, which is a
+    # second ceiling of MAX_FINDINGS on top of whatever `findings` already
+    # held -- and nothing inside the row loop appends to `findings`, so
+    # `findings.full` never became true there and the sheet walk could
+    # build a full five thousand for `findings.extend` to drop all but one
+    # of. Build-then-truncate, and the same "two ceilings are a ceiling of
+    # twice that" this package has now fixed five times.
+    own = checker is None
+    checker = _AssetChecker(project) if own else checker
     for entry_id, tileset in tables.rows_of("tilesets"):
         # `checker.full` is the bound that matters, because this loop
         # appends there: the guard here used to test the map loop's
@@ -80,7 +90,12 @@ def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
     # returning two independently-bounded lists was this file's own example
     # of "two ceilings of MAX_FINDINGS are a ceiling of twice that", which
     # is `_parent_cycles`' phrase in `maps.py`.
-    findings.extend(checker.findings)
+    # Only what this call collected, and only when the checker is this
+    # call's own: a shared one is read into `findings` once, by the assets
+    # scope, and extending here as well would report every sheet finding
+    # twice.
+    if own:
+        findings.extend(checker.findings)
     return findings.items
 
 

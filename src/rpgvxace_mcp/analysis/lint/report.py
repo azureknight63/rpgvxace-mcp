@@ -98,7 +98,8 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
         ran.append("map tree, map properties and encounters")
         check_map_tree(project, walk_budget, findings)
         check_maps(project, ids, tables, walk_budget, findings)
-        check_tilesets(project, ids, tables, walk_budget, findings)
+        check_tilesets(project, ids, tables, walk_budget, findings,
+                       shared_checker)
     if "events" in scopes and findings.room:
         ran.append("event command structure and references (plus every common "
                    "event and troop page, which belong to the project rather "
