@@ -156,6 +156,9 @@ NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
 BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
 INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
 AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
+SUBJECTS = ("tests/test_tools.py::TestEveryNamedCharacterIsMeasured::")
+SEARCHWORK = ("tests/test_tools.py::TestSearchBoundsItsTotalWork::")
+FAILCLOSED = "tests/test_tools.py::TestTheMeasurementFailsClosed::"
 
 GUARDS = [
     Guard(
@@ -1402,6 +1405,54 @@ GUARDS = [
          AMPLIFY + "test_validate_stops_and_says_so"],
         'a 7 KB map whose objects share children renders as five million commands: event_get takes 36 seconds, search 20 and validate 13, on a server the user cannot interrupt',
     ),
+    Guard(
+        'the measurement fails closed', SAFETY,
+        '            verdict = (\n                "this server\'s safety check on that pattern exited abnormally "',
+        '            verdict = None\n            _unused = (\n                "this server\'s safety check on that pattern exited abnormally "',
+        [FAILCLOSED + "test_a_child_killed_by_a_signal_is_refused",
+         FAILCLOSED + "test_a_child_that_exits_nonzero_silently_is_refused"],
+        'a child that dies for any reason but a bad pattern is recorded as a measured pass and cached, so an unmeasured pattern then runs in-process',
+    ),
+    Guard(
+        'a nullable atom does not break a run', SAFETY,
+        '        if not atom.nullable and span and not seen.intersects(atom.charset):',
+        '        if span and not seen.intersects(atom.charset):',
+        [MEASURED + "test_every_costly_pattern_is_refused"],
+        '"=?~?" repeated twenty-four times scores 2 -- every adjacent pair is literal-disjoint -- and runs over thirty seconds against a line of "=", which is what a stock VX Ace script separator is',
+    ),
+    Guard(
+        'every named character reaches the measurement', SAFETY,
+        '    every = "".join(char * run for char in ordered)',
+        '    every = "".join(char * run for char in ordered[:0])',
+        [SUBJECTS + "test_a_hidden_character_still_reaches_a_subject",
+         SUBJECTS + "test_every_character_of_a_wide_alphabet_reaches_one"],
+        'a pattern naming nine or more characters pushes its dangerous one out of every synthetic subject, so the child returns in milliseconds and the pass is cached',
+    ),
+    Guard(
+        'one search cannot outrun its deadline', SEARCH_TOOLS,
+        '        if self._clock() >= self._deadline:',
+        '        if False:',
+        [SEARCHWORK + "test_the_matcher_stops_when_its_time_is_spent",
+         SEARCHWORK + "test_a_search_that_stopped_early_says_so"],
+        'a pattern measured at 0.2s against one 2000-character subject is then applied to every string in the project -- a hundred thousand of them -- and nothing stops it, while `limit` cannot help because a pattern picked to be slow matches nothing',
+    ),
+    Guard(
+        'a search that gave up says so', SEARCH_TOOLS,
+        '''        spent = matcher.note() if matcher is not None else None
+        if spent:''',
+        '''        spent = None
+        if spent:''',
+        [SEARCHWORK + "test_a_search_that_stopped_early_says_so"],
+        'a search that stopped on its deadline returns the same shape as one that read the whole project, so "no hits" reads as "there are none"',
+    ),
+    Guard(
+        'a walk stops on the deadline, not only on the limit', SEARCH_TOOLS,
+        '''        return self.full or (self.matcher is not None
+                             and self.matcher.exhausted)''',
+        '''        return self.full''',
+        [SEARCHWORK + "test_a_search_that_gave_up_does_not_claim_the_later_scopes"],
+        'the text test answers False for the rest of the project while every scope still loads and decodes all of it, so the deadline bounds the matching and nothing bounds the walk',
+    ),
 ]
 
 
@@ -1495,15 +1546,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true",
                         help="List the guards without proving them.")
-    parser.add_argument("--only", metavar="TEXT",
-                        help="Only guards whose name contains TEXT.")
+    parser.add_argument("--only", metavar="TEXT", action="append",
+                        help="Only guards whose name contains TEXT. Repeat it "
+                             "to prove several: a round's guards are proven "
+                             "together, which is how they are written.")
     parser.add_argument("--check", action="store_true",
                         help="Only check that every anchor still matches its "
                              "file exactly once. Runs no tests, so it is "
                              "seconds rather than minutes.")
     args = parser.parse_args()
 
-    guards = [g for g in GUARDS if not args.only or args.only.lower() in g.name.lower()]
+    wanted = [text.lower() for text in args.only or ()]
+    guards = [g for g in GUARDS
+              if not wanted or any(text in g.name.lower() for text in wanted)]
+    if wanted and not guards:
+        # Silently proving nothing reads exactly like proving everything.
+        print("no guard's name contains %s" % " or ".join(args.only))
+        return 1
     if args.check:
         return check_anchors(guards)
     if args.list:

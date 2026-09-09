@@ -9,9 +9,15 @@ because an empty result means nothing otherwise.
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
-from ..analysis import CommandBudget, Location, iter_command_lists
+from ..analysis import (
+    MAX_COMMANDS_WALKED,
+    CommandBudget,
+    Location,
+    iter_command_lists,
+)
 from ..commands import command_name, summarize
 from ..project import ProjectError
 from ..rubytypes import RubyObject, RubyString, _bare_name
@@ -47,6 +53,23 @@ MAX_PATTERN_CHARS = 512
 # the subject; a hit past this point is not one a person was looking for.
 MAX_SUBJECT_CHARS = 2000
 
+# How long one search may spend applying its pattern.
+#
+# `pattern_safety.measure_cost` bounds one match -- about 0.2s against a
+# 2000-character subject. It says nothing about how many matches there are,
+# and this walks every script line and every string field in the project. A
+# pattern sitting just under the measurement's clock therefore passed the gate
+# and then cost that much again per candidate, with `limit` no help: a pattern
+# picked to be slow matches nothing, so the collector never fills.
+#
+# A character budget cannot bound that product -- usable means megabytes, and
+# megabytes bounds nothing. Time does compose: one match is bounded above, so
+# the sum is bounded by a deadline. It is checked *between* matches, which is
+# the only place it can be checked, because `re` holds the GIL for the length
+# of a match and no timeout or signal reaches it. So a search overruns this by
+# at most one match, and the reply says when it stopped.
+MAX_SEARCH_SECONDS = 10.0
+
 SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
 
 
@@ -62,7 +85,11 @@ SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
     "the scan stopped on reaching the limit rather than running out of "
     "project. That last one is not the same as validate's \"truncated\": this "
     "scan stops at the limit and so never drops a hit it found, while "
-    "validate collects first and then cuts.",
+    "validate collects first and then cuts. A search also gives up after "
+    "%g seconds of matching, and after %s commands walked, saying so as "
+    "\"text_scan_stopped\" or \"command_walk_stopped\". Either one means the "
+    "hits are real but the absences are not."
+    % (MAX_SEARCH_SECONDS, "{:,}".format(MAX_COMMANDS_WALKED)),
     schema({
         "query": prop(STR, "Text to look for (case-insensitive substring, or "
                            "a regular expression when regex is true). At most "
@@ -118,21 +145,21 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 "neither. Drop regex, or search for text instead.")
 
     matcher = _matcher(args, query)
-    found = _Hits(limit)
+    found = _Hits(limit, matcher)
 
     # A command_code search only has anything to look at in event command
     # lists, so the other scopes are skipped for it. Each scope stops of its
     # own accord once the collector is full, so reaching the limit in the
     # first scope does not read the rest.
     if "events" in scopes:
-        _search_events(ctx, found, matcher, code_filter)
+        _search_events(ctx, found, code_filter)
     if code_filter is None:
         for scope, walk in (("database", _search_database),
                             ("maps", _search_maps),
                             ("scripts", _search_scripts)):
-            if scope in scopes and not found.full:
-                walk(ctx, found, matcher)
-    return found.reply(matcher)
+            if scope in scopes and not found.done:
+                walk(ctx, found)
+    return found.reply()
 
 class _Hits:
     """One search's results, and everything the reply has to say about them.
@@ -149,12 +176,16 @@ class _Hits:
     one script slot.
     """
 
-    __slots__ = ("rows", "limit", "searched", "unsearchable", "unreadable",
-                 "walk")
+    __slots__ = ("rows", "limit", "matcher", "searched", "unsearchable",
+                 "unreadable", "walk")
 
-    def __init__(self, limit: int):
+    def __init__(self, limit: int, matcher: "_Matcher | None"):
         self.rows: list[dict[str, Any]] = []
         self.limit = limit
+        # Held here rather than passed to each walk as well. Threading it both
+        # ways meant `done` could not see the matcher's deadline, and only the
+        # reply knew the text test had given up.
+        self.matcher = matcher
         self.searched: list[str] = []
         self.unsearchable: dict[str, str] = {}
         self.unreadable: list[int] = []
@@ -166,7 +197,25 @@ class _Hits:
 
     @property
     def full(self) -> bool:
+        """The caller's limit is reached. Distinct from `done` on purpose.
+
+        `may_have_more` means "there are hits past this page", which is what a
+        full page implies and a spent deadline does not -- that one gets its
+        own note, because "I stopped early" and "here is a full page" are
+        different things to tell a caller.
+        """
         return len(self.rows) >= self.limit
+
+    @property
+    def done(self) -> bool:
+        """Nothing further this search does can change the answer.
+
+        Either the page is full, or the text test has spent its deadline and
+        now answers False without looking -- in which case walking the rest of
+        the project only costs the loading and decoding.
+        """
+        return self.full or (self.matcher is not None
+                             and self.matcher.exhausted)
 
     def searching(self, scope: str) -> None:
         """Record a scope as read. Called once its file has actually loaded."""
@@ -185,7 +234,7 @@ class _Hits:
             row.update(extra)
         self.rows.append(row)
 
-    def reply(self, matcher: "_Matcher | None") -> dict[str, Any]:
+    def reply(self) -> dict[str, Any]:
         """One search's answer, saying what it looked at as well as what it found.
 
         An empty result means nothing without knowing where the search went: a
@@ -207,6 +256,7 @@ class _Hits:
             "may_have_more": self.full,
             "scopes_searched": self.searched,
         }
+        matcher = self.matcher
         if matcher is not None and matcher.clipped:
             out["strings_clipped_to_first_chars"] = {
                 "characters": MAX_SUBJECT_CHARS, "count": matcher.clipped}
@@ -227,17 +277,22 @@ class _Hits:
             out["command_walk_stopped"] = stopped
             # So an empty result cannot read as "there are none".
             out["may_have_more"] = True
+        spent = matcher.note() if matcher is not None else None
+        if spent:
+            out["text_scan_stopped"] = spent
+            out["may_have_more"] = True
         return out
 
-def _search_events(ctx: Context, found: _Hits, matcher: "_Matcher | None",
+def _search_events(ctx: Context, found: _Hits,
                    code_filter: "int | None") -> None:
     """Every event command list on every map, plus common events and troops."""
     found.searching("events")
+    matcher = found.matcher
     for location, commands in iter_command_lists(ctx.project, None, found.walk):
-        if found.full:
+        if found.done:
             return
         for index, command in enumerate(commands):
-            if found.full:
+            if found.done:
                 return
             if not isinstance(command, RubyObject):
                 continue
@@ -251,14 +306,14 @@ def _search_events(ctx: Context, found: _Hits, matcher: "_Matcher | None",
             for text in _command_texts(ctx, command):
                 if matcher and matcher(text):
                     found.add(location.at(index), text, named)
-                    if found.full:
+                    if found.done:
                         return
 
-def _search_database(ctx: Context, found: _Hits,
-                     matcher: "_Matcher | None") -> None:
+def _search_database(ctx: Context, found: _Hits) -> None:
     """Every string field of every entry of every id-indexed table."""
+    matcher = found.matcher
     for key, entry in ctx.project.data_files.items():
-        if found.full:
+        if found.done:
             return
         if entry.container not in (ARRAY, HASH):
             continue
@@ -271,7 +326,7 @@ def _search_database(ctx: Context, found: _Hits,
         # not claim the scope. Per-table failures go to `unsearchable`.
         found.searching("database")
         for entry_id, item in rows:
-            if found.full:
+            if found.done:
                 return
             if not isinstance(item, RubyObject):
                 continue
@@ -283,12 +338,12 @@ def _search_database(ctx: Context, found: _Hits,
                     found.add(Location("database", table=key,
                                        entry_id=entry_id,
                                        field=_bare_name(field)), text)
-                    if found.full:
+                    if found.done:
                         return
 
-def _search_maps(ctx: Context, found: _Hits,
-                 matcher: "_Matcher | None") -> None:
+def _search_maps(ctx: Context, found: _Hits) -> None:
     """The map names in the tree. The maps themselves are the events scope."""
+    matcher = found.matcher
     try:
         rows = ctx.project.entries("map_infos")
     except (ProjectError, ValueError) as exc:
@@ -298,7 +353,7 @@ def _search_maps(ctx: Context, found: _Hits,
     # have been searched.
     found.searching("maps")
     for map_id, info in rows:
-        if found.full:
+        if found.done:
             return
         if not isinstance(info, RubyObject):
             continue
@@ -307,9 +362,9 @@ def _search_maps(ctx: Context, found: _Hits,
         if text and matcher and matcher(text):
             found.add(Location("map", map_id=map_id, field="name"), text)
 
-def _search_scripts(ctx: Context, found: _Hits,
-                    matcher: "_Matcher | None") -> None:
+def _search_scripts(ctx: Context, found: _Hits) -> None:
     """Every line of every script slot that inflates."""
+    matcher = found.matcher
     try:
         scripts_list = ctx.project.load_scripts()
     except (ProjectError, ValueError) as exc:
@@ -317,7 +372,7 @@ def _search_scripts(ctx: Context, found: _Hits,
         return
     found.searching("scripts")
     for script in scripts_list:
-        if found.full:
+        if found.done:
             return
         if "code" not in script:
             # A slot whose body would not inflate was not searched, and saying
@@ -328,7 +383,7 @@ def _search_scripts(ctx: Context, found: _Hits,
             if matcher and matcher(line):
                 found.add(_script_at(script, line_number), line.strip(),
                           {"script_name": script.get("name")})
-                if found.full:
+                if found.done:
                     return
 
 def _script_at(script: dict[str, Any], line: int) -> Location:
@@ -384,7 +439,7 @@ def _matcher(args: dict[str, Any], query: str | None) -> "_Matcher | None":
                     whole=False)
 
 class _Matcher:
-    """One search's text test, and how much text it did not look at.
+    """One search's text test: how much text it skipped, and when it gave up.
 
     A regex is matched against the first MAX_SUBJECT_CHARS of each candidate
     while a plain substring search reads all of it. That difference used to be
@@ -393,19 +448,50 @@ class _Matcher:
     same shape as a search that had genuinely looked everywhere. So the
     shortfall is counted and `search` reports it, because a caller that cannot
     tell those apart will trust the wrong one.
+
+    The deadline is the same argument one level up. `measure_cost` bounds one
+    match; the number of matches is the size of the project, so the total was
+    unbounded. See MAX_SEARCH_SECONDS. Once ``exhausted``, every later test
+    answers False without looking -- a search that has given up must not keep
+    paying for matches whose results it will not report as absences anyway.
+
+    ``clock`` and ``seconds`` are injected only by the tests: a bound whose
+    only test is "it finished in time" is a race, so they drive a clock they
+    control instead.
     """
 
-    __slots__ = ("_test", "whole", "clipped")
+    __slots__ = ("_test", "whole", "clipped", "_clock", "_deadline",
+                 "seconds", "exhausted")
 
-    def __init__(self, test, whole: bool):
+    def __init__(self, test, whole: bool, clock=time.monotonic,
+                 seconds: "float | None" = None):
         self._test = test
         self.whole = whole
         self.clipped = 0
+        self._clock = clock
+        self.seconds = MAX_SEARCH_SECONDS if seconds is None else seconds
+        self._deadline = clock() + self.seconds
+        self.exhausted = False
 
     def __call__(self, text: str) -> bool:
+        if self.exhausted:
+            return False
+        if self._clock() >= self._deadline:
+            self.exhausted = True
+            return False
         if not self.whole and len(text) > MAX_SUBJECT_CHARS:
             self.clipped += 1
         return self._test(text)
+
+    def note(self) -> "str | None":
+        """What the reply says when the deadline stopped the search."""
+        if not self.exhausted:
+            return None
+        return (
+            "this search spent its %g seconds of matching before reaching the "
+            "end of the project, so it stopped there. The hits below are real; "
+            "text it did not reach is not reported as absent. Narrow the "
+            "pattern, or pass one scope at a time." % self.seconds)
 
 def _command_texts(ctx: Context, command: RubyObject) -> list[str]:
     out = []

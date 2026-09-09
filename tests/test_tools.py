@@ -2625,6 +2625,18 @@ class TestSearchPatternsStayFast(ToolTest):
         ("[a-z]+[a-z]+!", LETTERS, "two quantifiers, one class"),
         (r"\w+\d+!", DIGITS, "two quantifiers, overlapping classes"),
 
+        # A nullable atom does not separate its neighbours: it can match
+        # empty, so the atoms either side of it stay adjacent in the subject.
+        # Scoring 2 before the fix, and over thirty seconds against a run of
+        # "=" -- which is what a stock VX Ace script separator line is. The
+        # first shape also names eight cheap characters so that the dangerous
+        # one was pushed out of every measured subject. Both measured.
+        ("[]?"
+         + "=?~?" * 24 + "!", "=" * MAX_SUBJECT_CHARS,
+         "nullable filler, dangerous character hidden from the subjects"),
+        ("=?~?" * 24 + "!", "=" * MAX_SUBJECT_CHARS,
+         "nullable filler between competing atoms"),
+
         # Lookaround: refused outright, because each runs its own match at
         # every position and there is no way to bound that here.
         (r"Fire(?=Sword)", LETTERS, "lookahead"),
@@ -4088,3 +4100,189 @@ class TestArgumentDescriptionsComeFromTheTables(ToolTest):
         properties = (REGISTRY["event_edit"].schema["properties"]["ops"]
                       ["items"]["properties"])
         self.assertIn("RPG::CommonEvent", properties["patch"]["description"])
+
+
+class TestTheMeasurementFailsClosed(unittest.TestCase):
+    """The bound must refuse when it could not run, not pass.
+
+    `measure_cost`'s docstring promises a child that cannot produce an answer
+    is treated as a refusal. The branch for a child that died for a
+    non-pattern reason assigned `verdict = None` -- a no-op on a variable
+    already None -- under a comment ending "anything else is [refused]". So a
+    child killed by a signal, by the OOM killer, or a `sys.executable` that is
+    not an interpreter was recorded as a measured pass and cached, and the
+    pattern then ran in-process where `re` cannot be interrupted.
+    """
+
+    def setUp(self):
+        from rpgvxace_mcp.tools import pattern_safety
+        self.safety = pattern_safety
+        self.addCleanup(self.safety._MEASURED.clear)
+
+    def run_with_child(self, pattern, **fields):
+        import subprocess
+
+        class Fake:
+            returncode = fields.get("returncode", 0)
+            stdout = fields.get("stdout", "ok")
+            stderr = fields.get("stderr", "")
+
+        original = subprocess.run
+        self.addCleanup(setattr, subprocess, "run", original)
+        subprocess.run = lambda *a, **k: Fake()
+        self.safety.measure_cost(pattern)
+
+    def test_a_child_killed_by_a_signal_is_refused(self):
+        with self.assertRaises(PatternTooCostly) as caught:
+            self.run_with_child("killed-by-signal", returncode=-9, stderr="")
+        self.assertIn("safety check", str(caught.exception))
+
+    def test_a_child_that_exits_nonzero_silently_is_refused(self):
+        with self.assertRaises(PatternTooCostly):
+            self.run_with_child("silent-failure", returncode=1, stderr="")
+
+    def test_a_compile_error_is_still_left_to_re_compile(self):
+        """`re` reports a syntax error better than this could."""
+        self.run_with_child("(unclosed", returncode=1,
+                            stderr="re.error: missing ), unterminated subpattern")
+
+    def test_a_clean_child_still_passes(self):
+        self.run_with_child("Potion", returncode=0)
+
+
+class TestEveryNamedCharacterIsMeasured(unittest.TestCase):
+    """No character a pattern names may be missing from its measured subjects.
+
+    `_subjects` selected the first eight of the alphabet by code point, so a
+    pattern could name eight cheap characters and hide the expensive one
+    behind them: eight control characters in a class pushed "=" out of every
+    subject, the child returned in milliseconds, and the pass was cached for a
+    pattern that takes over thirty seconds on a line of "=".
+    """
+
+    def setUp(self):
+        from rpgvxace_mcp.tools import pattern_safety
+        self.safety = pattern_safety
+
+    def measured_text(self, pattern):
+        return "".join(self.safety._subjects(pattern))
+
+    def test_a_hidden_character_still_reaches_a_subject(self):
+        hide = "".join(chr(c) for c in range(1, 9))
+        pattern = "[" + hide + "]?=+=+!"
+        text = self.measured_text(pattern)
+        self.assertIn("=", text,
+                      "the character that makes this pattern expensive was "
+                      "not in any measured subject")
+
+    def test_every_character_of_a_wide_alphabet_reaches_one(self):
+        letters = "".join(chr(ord("a") + i) for i in range(20))
+        text = self.measured_text("[" + letters + "]+!")
+        for char in letters:
+            self.assertIn(char, text)
+
+    def test_a_run_long_enough_to_backtrack_is_given_to_each(self):
+        """One occurrence is not enough: competing atoms need a run."""
+        text = self.measured_text("[abc]+!")
+        for char in "abc":
+            self.assertIn(char * 8, text)
+
+
+class TestSearchBoundsItsTotalWork(ToolTest):
+    """A pattern measured against 2 KB then runs over the whole project.
+
+    `measure_cost` bounds *one* match: up to two seconds across ten subjects
+    of 2000 characters, so about 0.2s against any one candidate. Nothing
+    bounded how many candidates there are. `search` applies the pattern once
+    per script line and once per string field in the project -- of the order of
+    a hundred thousand candidates -- so a pattern chosen to sit just under that
+    clock passed the gate and then cost that much again per candidate. `limit`
+    does not help: a pattern picked to be slow is one that matches nothing, so
+    the collector never fills and every scope runs to the end.
+
+    A character budget cannot fix this. To be a real worst-case bound it would
+    have to be about ten thousand characters, which is not a usable search; to
+    be usable it would have to be megabytes, which bounds nothing. Time
+    composes where characters do not -- one match is bounded by the
+    measurement, so the sum can be bounded by a deadline checked between
+    matches, which is the one place it *can* be checked, since `re` cannot be
+    interrupted mid-match.
+
+    The clock is injected so these tests do not race a real one.
+    """
+
+    def matcher_with_clock(self, ticks, seconds=1.0):
+        """A matcher whose clock returns each of `ticks` in turn."""
+        from rpgvxace_mcp.tools import search_tools
+        readings = iter(ticks)
+        return search_tools._Matcher(lambda text: False, whole=True,
+                                     clock=lambda: next(readings),
+                                     seconds=seconds)
+
+    def test_the_matcher_stops_when_its_time_is_spent(self):
+        # First reading sets the deadline at 0.0 + 1.0; the third is past it.
+        matcher = self.matcher_with_clock([0.0, 0.5, 1.5, 2.0])
+        self.assertFalse(matcher("x"))
+        self.assertFalse(matcher.exhausted, "stopped while it still had time")
+        matcher("x")
+        self.assertTrue(matcher.exhausted, "ran past its deadline")
+
+    def test_an_exhausted_matcher_does_not_test_again(self):
+        """Once stopped it must stay stopped, and must not read the clock.
+
+        The iterator runs out after the reading that exhausts it, so a later
+        call reaching the clock raises StopIteration rather than passing
+        quietly.
+        """
+        matcher = self.matcher_with_clock([0.0, 1.5])
+        matcher("x")
+        self.assertTrue(matcher.exhausted)
+        self.assertFalse(matcher("x"))
+        self.assertFalse(matcher("x"))
+
+    def test_a_search_that_stopped_early_says_so(self):
+        from rpgvxace_mcp.tools import search_tools
+        original = search_tools.MAX_SEARCH_SECONDS
+        self.addCleanup(setattr, search_tools, "MAX_SEARCH_SECONDS", original)
+        # No time at all, so the first candidate string exhausts it.
+        search_tools.MAX_SEARCH_SECONDS = 0.0
+
+        out = self.call("search", query="zzz-nothing-matches-this")
+        self.assertIn("text_scan_stopped", out)
+        self.assertTrue(out["may_have_more"],
+                        "a scan that stopped must not read as 'no hits'")
+        self.assertEqual(out["count"], 0)
+
+    def test_a_stopped_search_keeps_what_it_found(self):
+        """Stopping is not failing: the hits already collected are real."""
+        from rpgvxace_mcp.tools import search_tools
+        original = search_tools.MAX_SEARCH_SECONDS
+        self.addCleanup(setattr, search_tools, "MAX_SEARCH_SECONDS", original)
+        search_tools.MAX_SEARCH_SECONDS = 0.0
+        out = self.call("search", query="Potion")
+        self.assertIn("text_scan_stopped", out)
+        self.assertIsInstance(out["hits"], list)
+
+    def test_a_search_that_gave_up_does_not_claim_the_later_scopes(self):
+        """A scope records itself before it tests anything in it.
+
+        So a search that has spent its deadline must *stop*, not walk on
+        answering False: walking on would load and decode the rest of the
+        project and then report all four scopes as searched, which is the
+        defect `searching()` exists to prevent -- one step further along.
+        """
+        from rpgvxace_mcp.tools import search_tools
+        original = search_tools.MAX_SEARCH_SECONDS
+        self.addCleanup(setattr, search_tools, "MAX_SEARCH_SECONDS", original)
+        search_tools.MAX_SEARCH_SECONDS = 0.0
+
+        out = self.call("search", query="Potion")
+        self.assertEqual(out["scopes_searched"], ["events"],
+                         "a search that gave up in the first scope reported "
+                         "reading the ones it never tested: %s"
+                         % out["scopes_searched"])
+
+    def test_an_ordinary_search_does_not_stop(self):
+        out = self.call("search", query="Potion")
+        self.assertNotIn("text_scan_stopped", out)
+        self.assertTrue(out["hits"], "the fixture project has a Potion")

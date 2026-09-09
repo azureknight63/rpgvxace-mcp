@@ -157,32 +157,83 @@ class _Charset:
                 for theirs in other.categories:
                     if frozenset((mine, theirs)) not in _CATEGORY_DISJOINT:
                         return True
-        # A literal against a category: assume they can meet. Deciding it
-        # properly means reimplementing the category tables, and guessing
-        # "disjoint" would be the direction that lets a real chain through.
-        if (self.literals and other.categories) \
-                or (self.categories and other.literals):
+        # A literal against a category is decided, not assumed. Assuming they
+        # meet was safe in the refusing direction but chained everything
+        # together: `item\s*=\s*\d+` scored 262144, because "=" was held to
+        # possibly match \s and "m" to possibly match \d, so the two \s* and
+        # the \d+ all counted as competing. One character against one category
+        # is a question Python answers exactly.
+        if _literals_meet_categories(self.literals, other.categories):
+            return True
+        if _literals_meet_categories(other.literals, self.categories):
             return True
         return False
+
+
+# What each category actually matches, as a test on one character. Written out
+# rather than assumed, because assuming a literal might match any category made
+# every literal a bridge between the atoms either side of it -- which is how an
+# ordinary `item\s*=\s*\d+` came to be scored as five competing parts.
+_CATEGORY_TESTS = {
+    "CATEGORY_DIGIT": lambda c: c.isdigit(),
+    "CATEGORY_NOT_DIGIT": lambda c: not c.isdigit(),
+    "CATEGORY_SPACE": lambda c: c.isspace(),
+    "CATEGORY_NOT_SPACE": lambda c: not c.isspace(),
+    "CATEGORY_WORD": lambda c: c.isalnum() or c == "_",
+    "CATEGORY_NOT_WORD": lambda c: not (c.isalnum() or c == "_"),
+    "CATEGORY_LINEBREAK": lambda c: c == "\n",
+    "CATEGORY_NOT_LINEBREAK": lambda c: c != "\n",
+}
+
+
+def _literals_meet_categories(literals: "set[int]",
+                              categories: "set[str]") -> bool:
+    """Whether any of these characters falls in any of these categories.
+
+    A category this module does not model counts as matching, which is the
+    direction that refuses more.
+    """
+    if not literals or not categories:
+        return False
+    for name in categories:
+        test = _CATEGORY_TESTS.get(name)
+        if test is None:
+            return True
+        for point in literals:
+            if 0 <= point < 0x110000 and test(chr(point)):
+                return True
+    return False
 
 
 _ANYTHING = _Charset(anything=True)
 
 
 class _Atom:
-    """One element of a flattened pattern: what it matches, and how many ways.
+    r"""One element of a flattened pattern: what it matches, how many ways, and
+    whether it can match nothing at all.
 
     ``freedom`` is the number of lengths this atom can match -- 1 for a
     literal, 2 for ``a?``, ``UNBOUNDED_WEIGHT`` for ``a+``. Multiplying the
     freedoms of atoms that can compete for the same characters is what
     estimates the backtracking.
+
+    ``nullable`` is whether it can match the empty string. It is tracked
+    separately from ``charset`` because the two answer different questions,
+    and conflating them was wrong in both directions. A nullable atom does not
+    *separate* its neighbours -- they stay adjacent in the subject however
+    disjoint they look in the pattern, which is how ``=?~?`` repeated
+    twenty-four times scored 2 and ran for over thirty seconds. But it still
+    only *matches* its own body, so reporting it as matching anything refused
+    ``item\s*=\s*\d+``, which is an ordinary search that costs nothing.
     """
 
-    __slots__ = ("freedom", "charset")
+    __slots__ = ("freedom", "charset", "nullable")
 
-    def __init__(self, freedom: int, charset: _Charset):
+    def __init__(self, freedom: int, charset: _Charset,
+                 nullable: bool = False):
         self.freedom = freedom
         self.charset = charset
+        self.nullable = nullable
 
 
 # How long the child gets to match the pattern against every subject built
@@ -197,6 +248,12 @@ PREFLIGHT_SECONDS = 2.0
 # to each candidate string, so the measurement is of the worst case the tool
 # can actually reach.
 PREFLIGHT_SUBJECT_CHARS = 2000
+
+# How many characters of a pattern's alphabet get a homogeneous subject of
+# their own. Beyond this they share one subject that gives each a run, so a
+# wide alphabet cannot push a dangerous character out of the measurement --
+# which selecting the first eight by code point allowed.
+MAX_SUBJECTS_PER_CHARACTER = 8
 
 # One representative character per character category, for building a subject
 # out of a pattern's own alphabet. A homogeneous run of the characters a
@@ -290,11 +347,23 @@ def _subjects(pattern: str) -> "list[str]":
         alphabet = set()
     # Bounded, so a pattern naming a hundred literals does not spawn a child
     # with a hundred 2000-character subjects.
-    chosen = sorted(alphabet)[:8] or ["a"]
+    ordered = sorted(alphabet) or ["a"]
+    # A run of each of the first few, individually -- one homogeneous run is
+    # what makes competing atoms backtrack.
+    chosen = ordered[:MAX_SUBJECTS_PER_CHARACTER]
     subjects = [char * PREFLIGHT_SUBJECT_CHARS for char in chosen]
     if len(chosen) > 1:
         pair = (chosen[0] + chosen[1]) * PREFLIGHT_SUBJECT_CHARS
         subjects.append(pair[:PREFLIGHT_SUBJECT_CHARS])
+    # And one subject holding a run of *every* character the pattern names,
+    # because selecting the first few by code point let a pattern hide its
+    # dangerous character behind eight cheaper ones: eight control characters
+    # in a class pushed "=" out of every subject above, so the measurement
+    # returned in milliseconds and cached a pass for a pattern that takes
+    # thirty seconds on a line of "=".
+    run = max(1, PREFLIGHT_SUBJECT_CHARS // max(len(ordered), 1))
+    every = "".join(char * run for char in ordered)
+    subjects.append(every[:PREFLIGHT_SUBJECT_CHARS])
     subjects.append(("a1 " * PREFLIGHT_SUBJECT_CHARS)[:PREFLIGHT_SUBJECT_CHARS])
     return subjects
 
@@ -308,10 +377,13 @@ def measure_cost(pattern: str) -> None:
     interrupted in-process, so a pattern that runs long in here would run long
     in the server with no way out but killing it.
 
-    A child that cannot be started at all is treated as a refusal, not as a
-    pass. Failing open would mean the guarantee quietly disappears on a machine
-    where spawning is not allowed, which is the direction that ends in a
-    wedged server.
+    Every way the check can fail to produce an answer is a refusal, not a
+    pass: a child that cannot be started, one that times out, and one that
+    dies for any reason other than a bad pattern. Failing open on any of them
+    would mean the guarantee quietly disappears -- on a machine where spawning
+    is not allowed, or under an OOM killer -- which is the direction that ends
+    in a wedged server. The one carve-out is a compile error, which the
+    caller's own `re.compile` reports better.
     """
     import base64
 
@@ -330,11 +402,22 @@ def measure_cost(pattern: str) -> None:
         done = subprocess.run(command, capture_output=True, text=True,
                               timeout=PREFLIGHT_SECONDS)
         if done.returncode != 0 and "error" not in (done.stderr or "").lower():
-            # A child that died for a reason other than a bad pattern. The
-            # caller's own re.compile will report a syntax error better than
-            # this could, so a compile failure is deliberately not refused
-            # here; anything else is.
-            verdict = None
+            # A child that died for a reason other than a bad pattern: killed
+            # by a signal, out of memory, or a `sys.executable` that is not an
+            # interpreter. Refused, because this is the bound -- and `verdict
+            # = None` sat here under this same comment, which is a no-op on a
+            # variable already None, so an unmeasured pattern was recorded as
+            # a measured pass and then run in-process.
+            #
+            # A compile failure is the one exception, deliberately: the
+            # caller's own `re.compile` reports a syntax error far better than
+            # this could, and `_matcher` turns that into a ToolError.
+            verdict = (
+                "this server's safety check on that pattern exited abnormally "
+                "(code %d), so it will not run the pattern either -- a match "
+                "that cannot be interrupted is not something to risk on a "
+                "check that did not complete. Search for a plain substring by "
+                "leaving regex off." % done.returncode)
     except subprocess.TimeoutExpired:
         verdict = (
             "that pattern did not finish matching in %.1f seconds against "
@@ -555,7 +638,10 @@ def _repeat_atom(av: Any) -> _Atom:
         freedom = min(max(int(maximum) - int(minimum) + 1, 1), MAX_BOUNDED_WEIGHT)
         freedom *= inner_freedom
     charset = inner[0].charset if inner else _ANYTHING
-    return _Atom(min(freedom, MAX_BACKTRACK_PATHS + 1), charset)
+    # `{0,n}` can match nothing, so it does not separate its neighbours. See
+    # `_Atom`: this is reported rather than faked by widening the charset.
+    return _Atom(min(freedom, MAX_BACKTRACK_PATHS + 1), charset,
+                 nullable=int(minimum) == 0)
 
 
 def _branch_atom(branches: Any) -> _Atom:
@@ -592,23 +678,46 @@ def _branch_atom(branches: Any) -> _Atom:
 def _worst_run(atoms: "list[_Atom]") -> "tuple[int, int]":
     """The largest product of freedoms over neighbouring, competing atoms.
 
-    Atoms multiply while each consecutive pair can match the same character:
-    that is the condition under which one atom's choices force the next to be
-    retried. ``Gold\\s+\\d+`` therefore costs nothing -- a space and a digit
-    cannot compete -- while ``a?a?a?...`` multiplies all the way along.
+    Atoms multiply while they can compete for the same characters: that is the
+    condition under which one atom's choices force another to be retried.
+    ``Gold\\s+\\d+`` therefore costs nothing -- a space and a digit cannot
+    compete, and the required ``Gold`` separates them -- while ``a?a?a?...``
+    multiplies all the way along.
+
+    Two rules, and the first version of this had only half of each:
+
+    * The run is compared against the *union* of what it has seen, not against
+      the immediately preceding atom. Two atoms with a third between them are
+      still competing if all three can match the same text.
+    * Only a *non-nullable* atom can break the run. One that may match nothing
+      does not stand between its neighbours, so ``=?~?`` repeated -- where
+      every adjacent pair is literal-disjoint -- scored 2 and ran for over
+      thirty seconds on a line of ``=``.
 
     Returns the product and how many atoms produced it, so the refusal can say
     where in the pattern the cost is.
     """
     worst, worst_span = 1, 0
     product, span = 1, 0
-    previous: _Charset | None = None
+    seen = _Charset()
     for atom in atoms:
-        if previous is not None and not previous.intersects(atom.charset):
+        if not atom.nullable and span and not seen.intersects(atom.charset):
+            # A required atom that cannot match anything this run has matched:
+            # the text before it and the text after it are separated by it, so
+            # nothing across it competes. This is what keeps `\\s*=\\s*` cheap.
             product, span = 1, 0
+            seen = _Charset()
         product *= atom.freedom
         span += 1
         if product > worst:
             worst, worst_span = product, span
-        previous = atom.charset
+        seen = _union(seen, atom.charset)
     return worst, worst_span
+
+
+def _union(left: _Charset, right: _Charset) -> _Charset:
+    """Everything either charset can match."""
+    if left.anything or right.anything:
+        return _ANYTHING
+    return _Charset(literals=left.literals | right.literals,
+                    categories=left.categories | right.categories)
