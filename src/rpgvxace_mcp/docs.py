@@ -11,15 +11,26 @@ wrong.
 
 from __future__ import annotations
 
+from typing import Any
+
 from .commands import (
+    CHARACTER_TARGETS,
+    COMPARISONS,
+    CONDITION_KINDS,
     CONTINUATION_CODES,
     MOVE_COMMAND_NAMES,
+    SHARED_VARIABLE_OPERANDS,
+    SWITCH_OPERATIONS,
+    VARIABLE_OPERATIONS,
+    VARIABLE_OP_CODES,
+    VX_VARIABLE_OPERANDS,
     command_table,
     param_specs,
 )
 from .project import CHANGE_LOG, WORK_DIR, Project
 from .schema import (
     TILESET_FLAG_BITS,
+    TRIGGER_NAMES,
     TILESET_FLAG_BITS_NOTE,
     TILE_ID_RANGES,
     TILE_ID_RANGES_NOTE,
@@ -101,6 +112,62 @@ CONTAINER_SHAPES = {
 
 def _bullets(mapping: "dict[str, str]") -> list[str]:
     return ["* `%s` -- %s" % (key, value) for key, value in mapping.items()]
+
+
+def _numbered(mapping: "dict[int, Any]") -> str:
+    """A code-to-meaning mapping as one readable clause."""
+    return ", ".join("%s %s" % (code, meaning)
+                     for code, meaning in sorted(mapping.items(),
+                                                 key=lambda pair: pair[0]))
+
+
+def _shared_values(engine: str) -> list[str]:
+    """The parameter values several commands share, from the live tables.
+
+    Hand-typed, this was six copies of six dicts, and one of them had drifted
+    into contradicting the module it describes: it stated the Control
+    Variables operand types as a closed set while `commands.py` records that
+    only 0-2 are shared and that VX Ace reorganised the rest into a layout
+    this server does not model. Generated, a table and its description cannot
+    disagree -- which is the argument `_bullets` already makes for the tileset
+    flag bits.
+
+    Engine-keyed for the operands, because that is the one entry here whose
+    answer really does differ between the two.
+    """
+    operands = (VX_VARIABLE_OPERANDS if engine == "vx"
+                else SHARED_VARIABLE_OPERANDS)
+    lines = [
+        "* Switch and self-switch operations: %s."
+        % _numbered({code: "turns it %s" % name
+                     for code, name in SWITCH_OPERATIONS.items()}),
+        # The symbols are what `summarize` prints in a rendered script; the
+        # words are what the authoring DSL accepts. A model reads one and
+        # writes the other, so both are named.
+        "* Variable operations: %s. The DSL spells these %s."
+        % (_numbered(VARIABLE_OPERATIONS),
+           ", ".join(sorted(set(VARIABLE_OP_CODES) - set("=+-*/%")))),
+        "* Variable operand types: %s." % _numbered(operands),
+    ]
+    if engine != "vx":
+        # Said here rather than left to be inferred: the numbers above 2 exist
+        # on VX Ace and mean something else, and a model that reads a closed
+        # list will write one of them.
+        lines.append(
+            "  VX Ace uses higher operand numbers as well, and their layout is"
+            " not confirmed here -- read a working Control Variables (122)"
+            " with `event_get include_raw` and copy the shape.")
+    lines += [
+        "* Comparisons in a Conditional Branch: %s." % _numbered(COMPARISONS),
+        "* Conditional Branch types: %s." % _numbered(CONDITION_KINDS),
+        # The mapping covers the two special values; any other number is an
+        # event id, which is the part a generated list cannot say for itself.
+        "* Character targets: %s, and any other number is an event id."
+        % _numbered(CHARACTER_TARGETS),
+        "* Event triggers: %s." % _numbered(
+            {code: name for code, name in TRIGGER_NAMES.items()}),
+    ]
+    return lines
 
 
 def data_format_reference(project: Project) -> str:
@@ -265,16 +332,7 @@ def command_reference_document(project: Project) -> str:
         "",
         "## Shared parameter values",
         "",
-        "* Switch and self-switch operations: 0 turns it ON, 1 turns it OFF.",
-        "* Variable operations: 0 set, 1 add, 2 subtract, 3 multiply, 4 divide,",
-        "  5 modulo. Operand types: 0 constant, 1 variable, 2 random range.",
-        "* Comparisons in a Conditional Branch: 0 ==, 1 >=, 2 <=, 3 >, 4 <, 5 !=.",
-        "* Conditional Branch types: 0 switch, 1 variable, 2 self switch, 3 timer,",
-        "  4 actor, 5 enemy, 6 character, 7 gold, 8 item, 9 weapon, 10 armor,",
-        "  11 button, 12 script.",
-        "* Character targets: -1 the player, 0 this event, otherwise an event id.",
-        "* Event triggers: 0 action button, 1 player touch, 2 event touch,",
-        "  3 autorun, 4 parallel process.",
+        *_shared_values(engine),
         "",
         "## Move route commands",
         "",

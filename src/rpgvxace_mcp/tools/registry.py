@@ -6,7 +6,7 @@ import contextlib
 from typing import Any, Callable, Iterator
 
 from ..convert import TextCodec
-from ..rubytypes import _bare_name as bare_name
+from ..rubytypes import MAX_NAMES_LISTED, _bare_name as bare_name, named
 from ..project import Project
 
 # How much of a caller's own value is quoted back in an error. Without this, a
@@ -38,26 +38,6 @@ def echo(value: Any) -> str:
     if len(shown) > MAX_ECHO_CHARS:
         shown = shown[:MAX_ECHO_CHARS] + "... (%d characters)" % len(shown)
     return shown
-
-
-# How many field names a refusal lists before it says how many more there are.
-# The names come out of the project file, so their number is not this server's
-# to choose: an entry carrying five thousand instance variables produced a
-# fifty-nine-kilobyte error message, and `_tool_error` does not truncate.
-MAX_NAMES_LISTED = 40
-
-
-def named(names: "Any", limit: int = MAX_NAMES_LISTED) -> str:
-    """A list of field names for a message, capped and counted.
-
-    Sorted by the caller where order matters; this only bounds it. The count
-    is kept because "it carries 40 fields" and "it carries 5000" are different
-    facts, and the one a caller needs is usually the second.
-    """
-    names = list(names)
-    if len(names) <= limit:
-        return ", ".join(names)
-    return "%s and %d more" % (", ".join(names[:limit]), len(names) - limit)
 
 
 class Context:

@@ -5189,7 +5189,7 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
         it would let this suite report full coverage of a set it had quietly
         narrowed -- the same defect the suite exists to catch.
         """
-        found = {}
+        found: dict[str, tuple[str, str]] = {}
         root = Path(__file__).resolve().parent.parent / "src"
         for path in sorted(root.rglob("*.py")):
             for line in path.read_text(encoding="utf-8").split("\n"):
@@ -5203,10 +5203,24 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
                 if not re.fullmatch(r"[0-9_.<*\s]+", expression):
                     continue
                 try:
-                    found[match.group(1)] = str(eval(expression, {}, {}))
+                    value = str(eval(expression, {}, {}))
                 except (SyntaxError, TypeError, ValueError):
                     continue
+                name = match.group(1)
+                # Keyed by name, so a name defined twice used to overwrite
+                # itself here and only one of the two was ever checked. The
+                # file comes back with the value, and
+                # `test_no_ceiling_is_defined_twice` reads it.
+                if name in found:
+                    found[name] = (found[name][0],
+                                   "%s and %s" % (found[name][1], path.name))
+                else:
+                    found[name] = (value, path.name)
         return found
+
+    def values(self):
+        """Just the numbers, for the tests that only compare those."""
+        return {name: value for name, (value, _) in self.ceilings().items()}
 
     def advertised(self):
         """Everything a caller can read before calling: descriptions and schemas.
@@ -5227,12 +5241,29 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
 
     def test_the_source_has_ceilings_to_check(self):
         """So a broken scan cannot make this suite vacuously pass."""
-        self.assertGreater(len(self.ceilings()), 30)
+        self.assertGreater(len(self.values()), 30)
+
+    def test_no_ceiling_is_defined_twice(self):
+        """Two definitions of one ceiling are two facts nothing keeps equal.
+
+        `MAX_MAP_ID` was defined in project.py and again in schema.py, both
+        9999: the tools imported project's while `schema.map_filename`
+        enforced schema's, so the id range a tool accepts and the id range a
+        filename can express could drift apart silently. This scan keys by
+        name, so it could not see that at all until it kept the file too --
+        which is the same defect one level up from the one it checks for.
+        """
+        twice = sorted("%s (in %s)" % (name, where)
+                       for name, (_, where) in self.ceilings().items()
+                       if " and " in where)
+        self.assertEqual(twice, [],
+                         "these ceilings are defined more than once; keep one "
+                         "definition and import it")
 
     def test_every_ceiling_is_declared_or_named_internal(self):
         surface = self.advertised()
         undeclared = []
-        for name, value in sorted(self.ceilings().items()):
+        for name, value in sorted(self.values().items()):
             if name in self.INTERNAL:
                 continue
             forms = {value, str(int(float(value)))}
@@ -5256,7 +5287,7 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
             "to INTERNAL with the reason it is unreachable.")
 
     def test_the_internal_list_has_not_gone_stale(self):
-        names = set(self.ceilings())
+        names = set(self.values())
         gone = sorted(set(self.INTERNAL) - names)
         self.assertEqual(gone, [],
                          "INTERNAL names ceilings that no longer exist, so it "
@@ -6163,3 +6194,120 @@ class TestATileTallyUsesTheBuffer(ToolTest):
         data = self.project.load_map(1).get("data")
         counts = map_tools._tile_counts(data)
         self.assertEqual(sorted(counts), sorted(str(z) for z in range(data.zsize)))
+
+
+class TestTheMapScopeStopsCollecting(ToolTest):
+    """`check_maps` accumulates, so `check_maps` is what has to stop.
+
+    One map with thousands of encounters pointing at a troop that is not
+    there is thousands of findings from one file -- and the encounter list's
+    length comes out of the file, so it is not a bound.
+    """
+
+    CEILING = 4
+    ENCOUNTERS = 5000
+
+    def setUp(self):
+        super().setUp()
+        from rpgvxace_mcp import analysis
+        self.analysis = analysis
+        original = analysis.MAX_FINDINGS
+        self.addCleanup(setattr, analysis, "MAX_FINDINGS", original)
+        analysis.MAX_FINDINGS = self.CEILING
+
+    def craft_bad_encounters(self):
+        """Map 1, with an encounter list full of a troop id nothing defines."""
+        troop_ids = {entry_id for entry_id, _ in self.project.entries("troops")}
+        missing = max(troop_ids) + 1 if troop_ids else 99
+        game_map = self.project.load_map(1)
+        if self.ace:
+            entry = RubyObject("RPG::Map::Encounter")
+            entry.set("troop_id", missing)
+            entry.set("weight", 10)
+            entry.set("region_set", [])
+            encounters = [entry] * self.ENCOUNTERS
+        else:
+            encounters = [missing] * self.ENCOUNTERS
+        game_map.set("encounter_list", encounters)
+        game_map.set("encounter_step", 30)
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.project = Project(self.tmp / "project")
+        self.ctx = Context(self.project)
+        return missing
+
+    def craft_bad_encounters_everywhere(self):
+        """The same list on every map file, so the outer loop is the subject."""
+        troop_ids = {entry_id for entry_id, _ in self.project.entries("troops")}
+        missing = max(troop_ids) + 1 if troop_ids else 99
+        ids = sorted(self.project.map_ids_on_disk())
+        for map_id in ids:
+            game_map = self.project.load_map(map_id)
+            if self.ace:
+                entry = RubyObject("RPG::Map::Encounter")
+                entry.set("troop_id", missing)
+                entry.set("weight", 10)
+                entry.set("region_set", [])
+                encounters = [entry] * self.ENCOUNTERS
+            else:
+                encounters = [missing] * self.ENCOUNTERS
+            game_map.set("encounter_list", encounters)
+            game_map.set("encounter_step", 30)
+            self.project.path_for(self.project.map_file(map_id)).write_bytes(
+                marshal_rb.dump(game_map))
+        self.project = Project(self.tmp / "project")
+        self.ctx = Context(self.project)
+        return ids
+
+    def test_the_map_scope_stops_at_the_ceiling(self):
+        """Across maps, which is where the discarded guard shows.
+
+        One map cannot show it: `_check_encounters` caps its own list at
+        MAX_FINDINGS, so a single map returns at most that many. The defect is
+        that `check_maps` then throws that list away and starts a fresh one
+        for the next map -- so N maps contribute N times the ceiling, and the
+        map count comes from the project.
+        """
+        maps = self.craft_bad_encounters_everywhere()
+        self.assertGreater(len(maps), 1, "this needs more than one map")
+        tables = self.analysis._Tables(self.project)
+        found = self.analysis.check_maps(self.project, maps, tables)
+        self.assertLessEqual(
+            len(found), self.CEILING,
+            "check_maps collected %d findings from %d maps against a ceiling "
+            "of %d, because the guard was on a list it discards"
+            % (len(found), len(maps), self.CEILING))
+
+    def test_the_encounter_walk_stops_too(self):
+        """Directly, so the sub-walk is bounded and not just its caller."""
+        missing = self.craft_bad_encounters()
+        game_map = self.project.load_map(1)
+        troop_ids = {entry_id for entry_id, _ in self.project.entries("troops")}
+        self.assertNotIn(missing, troop_ids)
+        found = self.analysis._check_encounters(
+            self.project, 1, game_map, troop_ids)
+        self.assertLessEqual(len(found), self.CEILING)
+
+    def test_a_real_encounter_list_is_still_checked(self):
+        """The ceiling must not stop a project's genuine findings."""
+        self.analysis.MAX_FINDINGS = 5000
+        missing = self.craft_bad_encounters()
+        tables = self.analysis._Tables(self.project)
+        found = self.analysis.check_maps(self.project, [1], tables)
+        self.assertTrue(found, "no finding at all for a missing troop")
+        self.assertTrue(any(f.rule == "missing_troop" for f in found),
+                        [f.rule for f in found])
+        self.assertIn(str(missing), " ".join(f.message for f in found))
+
+    def test_the_dimension_check_still_runs(self):
+        """`check_maps` calls two sub-checks; stopping must not lose the other."""
+        self.analysis.MAX_FINDINGS = 5000
+        game_map = self.project.load_map(1)
+        game_map.set("width", 999)          # disagrees with the tile table
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.project = Project(self.tmp / "project")
+        tables = self.analysis._Tables(self.project)
+        found = self.analysis.check_maps(self.project, [1], tables)
+        self.assertTrue(any("999" in f.message for f in found),
+                        [f.message for f in found])

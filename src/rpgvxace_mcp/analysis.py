@@ -859,6 +859,48 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
     return report
 
 
+class _Findings:
+    """A findings list that stops collecting at MAX_FINDINGS.
+
+    The ceiling belongs here because it has been written against the wrong
+    list three times: `_AssetChecker`'s four callers (only one of which had a
+    guard, and that one tested a list its loop never touched), `check_tilesets`
+    in the same shape, and `_check_encounters` -- which guarded its own local
+    list while `check_maps` discarded it per map and had no guard of its own,
+    so two maps against a ceiling of four collected eight.
+
+    `room` is for a walk that wants to stop looping rather than merely stop
+    appending; `add` is safe either way, so a caller that forgets `room` still
+    cannot exceed the ceiling. That is the difference between this and a guard
+    at a call site.
+    """
+
+    __slots__ = ("items",)
+
+    def __init__(self) -> None:
+        self.items: list[Finding] = []
+
+    @property
+    def full(self) -> bool:
+        return len(self.items) >= MAX_FINDINGS
+
+    @property
+    def room(self) -> bool:
+        """Whether there is space for another finding. The loop condition."""
+        return not self.full
+
+    def add(self, finding: Finding) -> None:
+        if not self.full:
+            self.items.append(finding)
+
+    def extend(self, findings: "list[Finding]") -> None:
+        """Take what fits. For a sub-check that is bounded by its own inputs."""
+        for finding in findings:
+            if self.full:
+                return
+            self.items.append(finding)
+
+
 def check_map_tree(project: Project) -> list[Finding]:
     """The editor's map tree against the files on disk."""
     findings = []
@@ -966,56 +1008,79 @@ def _parent_cycles(infos: dict[Any, Any]) -> list[Finding]:
 
 def check_maps(project: Project, map_ids: list[int],
                tables: _Tables) -> list[Finding]:
-    """Per-map properties: readability, encounters and the tile table."""
-    findings = []
+    """Per-map properties: readability, encounters and the tile table.
+
+    Collects into a `_Findings`, so the ceiling holds across maps as well as
+    within one. This loop used to build a fresh list per map and discard the
+    one `_check_encounters` had carefully bounded, which made that guard
+    describe nothing: two maps against a ceiling of four collected eight, and
+    the map count comes out of the project rather than from anything here.
+    """
+    findings = _Findings()
     troop_ids = tables.ids("troops")
 
     for map_id in map_ids:
+        if not findings.room:
+            break
         try:
             game_map = project.load_map(map_id)
         except (ProjectError, ValueError, OSError) as exc:
-            findings.append(Finding(
+            findings.add(Finding(
                 ERROR, "map_unreadable",
                 "map %s could not be read: %s. Restore it from a backup, or "
                 "delete it and its MapInfos entry." % (map_id, exc),
                 _map_at(map_id)))
             continue
         if not isinstance(game_map, RubyObject):
-            findings.append(Finding(
+            findings.add(Finding(
                 ERROR, "map_unreadable",
                 "map %s does not hold an RPG::Map object, so nothing about it "
                 "could be checked" % map_id, _map_at(map_id)))
             continue
-        findings += _check_encounters(project, map_id, game_map, troop_ids)
-        findings += _check_map_dimensions(map_id, game_map)
-    return findings
+        # The collector is passed down rather than the return value being
+        # extended, so a map's findings are never built only to be truncated.
+        # `extend` would bound it either way -- that is where the ceiling
+        # lives -- so this is an efficiency refinement and carries no guard.
+        _check_encounters(project, map_id, game_map, troop_ids, findings)
+        # Bounded by the map's own fields rather than by anything from the
+        # file, so `extend` is enough: it takes what fits.
+        findings.extend(_check_map_dimensions(map_id, game_map))
+    return findings.items
 
 
 def _check_encounters(project: Project, map_id: int, game_map: RubyObject,
-                      troop_ids: set[int] | None) -> list[Finding]:
-    findings: list[Finding] = []
+                      troop_ids: "set[int] | None",
+                      findings: "_Findings | None" = None) -> list[Finding]:
+    """Encounters against the Troops table, and the encounter step.
+
+    Appends to the caller's collector when given one, which is what makes the
+    ceiling hold across maps: this used to bound a list of its own that
+    `check_maps` then discarded. The return value is kept for the tests and
+    for any caller that wants just this check.
+    """
+    findings = _Findings() if findings is None else findings
     encounters = _seq(game_map.get("encounter_list"))
     if troop_ids is not None:
         for entry in encounters:
             # The list length comes out of the file, and one bad troop id
             # repeated is one finding each.
-            if len(findings) >= MAX_FINDINGS:
+            if not findings.room:
                 break
             troop_id = _encounter_troop_id(entry)
             if troop_id is not None and troop_id not in troop_ids:
-                findings.append(_missing(
+                findings.add(_missing(
                     "missing_troop",
                     "map %s can encounter troop %s" % (map_id, troop_id),
                     "Point that encounter at a troop in the Troops table, or "
                     "remove the entry.",
                     _map_at(map_id, "encounter_list")))
     if encounters and not game_map.get("encounter_step"):
-        findings.append(Finding(
+        findings.add(Finding(
             WARNING, "zero_encounter_step",
             "map %s has encounters but an encounter_step of 0. Set it to the "
             "number of steps between battles (the editor's default is 30)."
             % map_id, _map_at(map_id, "encounter_step")))
-    return findings
+    return findings.items
 
 
 def _check_map_dimensions(map_id: int, game_map: RubyObject) -> list[Finding]:

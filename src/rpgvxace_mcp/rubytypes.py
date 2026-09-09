@@ -31,6 +31,33 @@ CELL_MODULUS = 0x10000
 CELL_MASK = 0xFFFF
 
 
+# How many field names a refusal lists before it says how many more there
+# are. The names come out of the project file, so their number is not this
+# server's to choose: an entry carrying five thousand instance variables
+# produced a fifty-nine-kilobyte error message, and `_tool_error` does not
+# truncate.
+MAX_NAMES_LISTED = 40
+
+
+def named(names: "Any", limit: int = MAX_NAMES_LISTED) -> str:
+    """A list of field names for a message, capped and counted.
+
+    Sorted by the caller where order matters; this only bounds it. The count
+    is kept because "it carries 40 fields" and "it carries 5000" are different
+    facts, and the one a caller needs is usually the second.
+
+    Here rather than in the tools layer because `convert` needs it too and
+    sits below that layer -- which is exactly the objection its own copy of
+    this function raised, and the reason for a shared home rather than a
+    second copy. The two had already drifted: one grew a `limit` parameter and
+    the other hard-coded the constant.
+    """
+    names = list(names)
+    if len(names) <= limit:
+        return ", ".join(names)
+    return "%s and %d more" % (", ".join(names[:limit]), len(names) - limit)
+
+
 def printable_text(text: str) -> str:
     """Text that is safe to put in a JSON response.
 

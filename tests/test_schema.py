@@ -259,3 +259,80 @@ class TestSchemaReportProvenance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheReferenceAgreesWithTheTables(unittest.TestCase):
+    """Every shared-value list in the document comes from the live table.
+
+    Hand-typing them is what let one of the six drift into contradicting the
+    module it describes. Generated, they cannot.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="docs-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        build(self.tmp / "ace", "vx_ace")
+        build(self.tmp / "vx", "vx")
+        self.ace = Project(self.tmp / "ace")
+        self.vx = Project(self.tmp / "vx")
+
+    def document(self, project):
+        return command_reference_document(project)
+
+    def test_every_switch_operation_is_named(self):
+        from rpgvxace_mcp.commands import SWITCH_OPERATIONS
+        text = self.document(self.ace)
+        for code, name in SWITCH_OPERATIONS.items():
+            self.assertIn(str(code), text)
+            self.assertIn(name, text, "%d -> %s missing" % (code, name))
+
+    def test_every_variable_operation_is_named(self):
+        from rpgvxace_mcp.commands import VARIABLE_OPERATIONS
+        text = self.document(self.ace)
+        for code in VARIABLE_OPERATIONS:
+            self.assertIn(str(code), text)
+
+    def test_every_comparison_is_named(self):
+        from rpgvxace_mcp.commands import COMPARISONS
+        text = self.document(self.ace)
+        for name in COMPARISONS.values():
+            self.assertIn(name, text, "comparison %s missing" % name)
+
+    def test_the_ace_document_does_not_claim_the_unknown_operands(self):
+        """The drift, stated as a test.
+
+        `commands.py` says VX Ace reorganised operand types above 2 and that
+        this server does not claim to know the layout. The document said
+        "Operand types: 0 constant, 1 variable, 2 random range." with no
+        qualification, which reads as a closed set.
+        """
+        text = self.document(self.ace)
+        section = text[text.index("Shared parameter values"):]
+        marker = section[:section.index("##", 3)] if "##" in section[3:] else section
+        self.assertTrue(
+            "not known" in marker or "read a working" in marker
+            or "confirmed" in marker,
+            "the VX Ace reference states the operand types without saying "
+            "the higher ones are not modelled for this engine")
+
+    def test_the_vx_document_names_the_operands_vx_really_has(self):
+        from rpgvxace_mcp.commands import VX_VARIABLE_OPERANDS
+        text = self.document(self.vx)
+        for name in VX_VARIABLE_OPERANDS.values():
+            self.assertIn(name, text,
+                          "VX operand %r is in the table and not in the VX "
+                          "document" % name)
+
+    def test_the_two_documents_differ(self):
+        """An engine-keyed document whose sections are identical is not one."""
+        self.assertNotEqual(self.document(self.ace), self.document(self.vx))
+
+    def test_a_condition_type_is_not_typed_out_twice(self):
+        """The Conditional Branch types come from the COND_* constants."""
+        from rpgvxace_mcp import commands
+        names = {value: name for name, value in vars(commands).items()
+                 if name.startswith("COND_")}
+        self.assertTrue(names, "no COND_ constants to generate from")
+        text = self.document(self.ace)
+        for code in names:
+            self.assertIn(str(code), text)

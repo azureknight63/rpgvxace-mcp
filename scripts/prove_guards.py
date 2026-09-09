@@ -57,6 +57,7 @@ SAFETY = "src/rpgvxace_mcp/tools/pattern_safety.py"
 SEARCH_TOOLS = "src/rpgvxace_mcp/tools/search_tools.py"
 RAW_TOOLS = "src/rpgvxace_mcp/tools/raw_tools.py"
 COMMANDS = "src/rpgvxace_mcp/commands.py"
+RUBYTYPES = "src/rpgvxace_mcp/rubytypes.py"
 
 
 class Guard:
@@ -157,6 +158,8 @@ NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
 BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
 INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
 AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
+MAPSCOPE = ("tests/test_tools.py::TestTheMapScopeStopsCollecting::")
+DOCSAGREE = ("tests/test_schema.py::TestTheReferenceAgreesWithTheTables::")
 PREVIEW = ("tests/test_tools.py::TestEveryPreviewReadsAsAPreview::")
 NARROW = ("tests/test_tools.py::TestNarrowingValidateActuallyNarrowsIt::")
 TILEBUF = ("tests/test_tools.py::TestATileTallyUsesTheBuffer::")
@@ -1414,7 +1417,7 @@ GUARDS = [
         'filling in a nil field is refused with "set a field inside it instead", and there is no field inside nil',
     ),
     Guard(
-        'a refusal cannot grow with the file', REGISTRY,
+        'a refusal cannot grow with the file', RUBYTYPES,
         'def named(names: "Any", limit: int = MAX_NAMES_LISTED) -> str:',
         'def named(names: "Any", limit: int = 10 ** 9) -> str:',
         [BOUNDED + "test_an_unknown_field_refusal_is_capped"],
@@ -1828,6 +1831,29 @@ GUARDS = [
         [NARROW + "test_a_narrowed_run_does_not_parse_every_map",
          NARROW + "test_a_transfer_to_an_undersized_map_is_still_caught"],
         'the map-size lookup was built from every map on disk, so validate map_ids=[5] cost 74% of a whole-project run and the argument that exists to make a run cheap bought nothing -- measured on the real 39-map project, now 23%',
+    ),
+    Guard(
+        'the map scope collects into one bounded list', ANALYSIS,
+        # `full` rather than one of its three readers -- the loop condition,
+        # `add` and `extend` all consult it, so reverting any one of them
+        # leaves the other two holding the line. Defence in depth is worth
+        # having and does mean this is the only decisive anchor.
+        """    @property
+    def full(self) -> bool:
+        return len(self.items) >= MAX_FINDINGS""",
+        """    @property
+    def full(self) -> bool:
+        return False""",
+        [MAPSCOPE + "test_the_map_scope_stops_at_the_ceiling"],
+        "_check_encounters bounded a list of its own that check_maps then discarded per map, while check_maps had no guard at all -- two maps against a ceiling of four collected eight, and the map count comes out of the project. Third time the ceiling was written against the wrong list, after _AssetChecker's four callers and check_tilesets",
+    ),
+    Guard(
+        'the command reference is generated from its own tables', DOCS,
+        '        *_shared_values(engine),',
+        """        "* Variable operations: 0 set, 1 add, 2 subtract, 3 multiply, 4 divide,",
+        "  5 modulo. Operand types: 0 constant, 1 variable, 2 random range.",""",
+        [DOCSAGREE + "test_the_ace_document_does_not_claim_the_unknown_operands"],
+        'six live tables were hand-typed into the document as prose and one had already drifted into contradicting the module it describes: it stated the Control Variables operand types as a closed set while commands.py records that VX Ace reorganised everything above 2 into a layout this server does not model -- in the one section of an engine-keyed document that was not engine-aware',
     ),
 ]
 

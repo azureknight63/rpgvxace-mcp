@@ -39,6 +39,7 @@ from .schema import (
     DataFile,
     EngineProfile,
     HASH,
+    MAX_MAP_ID,
     PROFILES,
     SCRIPTS,
     SINGLE,
@@ -65,7 +66,11 @@ MAX_STRING_SCAN_DEPTH = 12
 MAX_STRING_SCAN_NODES = 200_000
 
 # The highest map id the editor's Map%03d naming can express.
-MAX_MAP_ID = 9999
+# MAX_MAP_ID is imported from `schema` above rather than defined here.
+# There used to be a definition in each: the tools import this module's, and
+# `schema.map_filename` enforces schema's, so the highest id a tool would
+# accept and the highest a filename could express were two independent 9999s
+# with nothing holding them equal.
 
 # The largest data file this server will read into memory. A real project's
 # largest file is a few megabytes; this leaves room above that while turning a

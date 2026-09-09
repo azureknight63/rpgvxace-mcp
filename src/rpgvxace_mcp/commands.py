@@ -259,7 +259,6 @@ SHARED_VARIABLE_OPERANDS = {0: "constant", 1: "variable", 2: "random"}
 VX_VARIABLE_OPERANDS = {**SHARED_VARIABLE_OPERANDS,
                         3: "item", 4: "actor", 5: "enemy", 6: "character",
                         7: "other"}
-VARIABLE_OPERANDS = SHARED_VARIABLE_OPERANDS
 
 # Names accepted for a variable operation in the authoring DSL.
 VARIABLE_OP_CODES = {"set": 0, "=": 0, "add": 1, "+": 1, "sub": 2, "-": 2,
@@ -297,6 +296,27 @@ COND_WEAPON = 9
 COND_ARMOR = 10
 COND_BUTTON = 11
 COND_SCRIPT = 12
+
+# What each one tests, named once. `describe_condition` dispatches on the
+# constants above and `docs.py` builds its reference from this, so the numbers
+# and their meanings exist in one place -- they used to exist in three, and
+# eight of the thirteen constants were dead while the function that should
+# have used them spelled their numbers out.
+CONDITION_KINDS = {
+    COND_SWITCH: "switch",
+    COND_VARIABLE: "variable",
+    COND_SELF_SWITCH: "self switch",
+    COND_TIMER: "timer",
+    COND_ACTOR: "actor",
+    COND_ENEMY: "enemy",
+    COND_CHARACTER: "character",
+    COND_GOLD: "gold",
+    COND_ITEM: "item",
+    COND_WEAPON: "weapon",
+    COND_ARMOR: "armor",
+    COND_BUTTON: "button",
+    COND_SCRIPT: "script",
+}
 COMPARISON_CODES = {v: k for k, v in COMPARISONS.items()}
 
 # Move route command codes (advisory: taken from the shared XP/VX/Ace move
@@ -472,23 +492,23 @@ def describe_condition(params: list[Any], codec: TextCodec) -> str:
     if kind == COND_SELF_SWITCH:
         return "self switch %s is %s" % (_text(p(1, ""), codec),
                                          SWITCH_OPERATIONS.get(p(2), p(2)))
-    if kind == 3:
+    if kind == COND_TIMER:
         return "timer %s %ss" % (">=" if p(2) == 0 else "<=", p(1))
-    if kind == 4:
+    if kind == COND_ACTOR:
         return "actor %s (check type %s)" % (p(1), p(2))
-    if kind == 5:
+    if kind == COND_ENEMY:
         return "enemy %s (check type %s)" % (p(1), p(2))
-    if kind == 6:
+    if kind == COND_CHARACTER:
         return "character %s faces %s" % (_character(p(1)), p(2))
-    if kind == 7:
+    if kind == COND_GOLD:
         return "gold %s %s" % (">=" if p(2) == 0 else "<=", p(1))
-    if kind == 8:
+    if kind == COND_ITEM:
         return "party has item %s" % p(1)
-    if kind == 9:
+    if kind == COND_WEAPON:
         return "party has weapon %s" % p(1)
-    if kind == 10:
+    if kind == COND_ARMOR:
         return "party has armor %s" % p(1)
-    if kind == 11:
+    if kind == COND_BUTTON:
         return "button %s pressed" % _text(p(1, ""), codec)
     if kind == COND_SCRIPT:
         return "script: %s" % _text(p(1, ""), codec)

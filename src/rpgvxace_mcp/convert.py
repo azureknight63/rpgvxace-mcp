@@ -37,9 +37,11 @@ from .rubytypes import (
     RubyUClass,
     RubyUserDef,
     RubyUserMarshal,
+    MAX_NAMES_LISTED,
     Table,
     Tone,
     _bare_name,
+    named,
     printable_text,
 )
 
@@ -668,21 +670,6 @@ def apply_patch(target: Any, patch: dict[str, Any], codec: TextCodec,
     return changes
 
 
-# How many field names a refusal lists. The names come out of the file, so
-# their number is not this module's to choose. Kept here rather than imported
-# from the tools layer, which sits above this one.
-MAX_NAMES_LISTED = 40
-
-
-def _named(names: Any) -> str:
-    """Field names for a message, capped and counted."""
-    names = list(names)
-    if len(names) <= MAX_NAMES_LISTED:
-        return ", ".join(names)
-    return "%s and %d more" % (", ".join(names[:MAX_NAMES_LISTED]),
-                               len(names) - MAX_NAMES_LISTED)
-
-
 def _refuse_invented_fields(target: RubyObject, patch: dict[str, Any],
                             path: str) -> None:
     """Refuse a nested field the object being merged into does not carry.
@@ -728,7 +715,7 @@ def _refuse_invented_fields(target: RubyObject, patch: dict[str, Any],
         "\"__class__\" to replace the whole object."
         % (path, target.cls, "s" if len(unknown) > 1 else "",
            ", ".join(repr(name) for name in unknown),
-           _named(target.fields()) or "no fields at all"))
+           named(target.fields()) or "no fields at all"))
 
 
 def refuse_invented_in_replacement(existing: Any, replacement: Any,
@@ -780,7 +767,7 @@ def refuse_invented_in_replacement(existing: Any, replacement: Any,
                 % (path or "the value", replacement.cls,
                    "s" if len(unknown) > 1 else "",
                    ", ".join(repr(name) for name in unknown),
-                   existing.cls, _named(existing.fields())))
+                   existing.cls, named(existing.fields())))
         for name in replacement.fields():
             refuse_invented_in_replacement(
                 existing.get(name), replacement.get(name),
