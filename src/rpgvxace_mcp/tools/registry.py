@@ -257,6 +257,12 @@ BOOL = "boolean"
 ARR = "array"
 OBJ = "object"
 
+
+REFRESH = prop(BOOL, "Re-read the file from disk instead of using the copy "
+                     "already in memory. Use after the RPG Maker editor has "
+                     "saved.")
+
+
 DRY_RUN = prop(BOOL, "Report what would change without writing anything to disk.")
 
 # What a preview calls each key a completed write would name in the past
@@ -362,10 +368,6 @@ def write_reply(body: dict[str, Any], dry_run: bool) -> dict[str, Any]:
                      for item in value]
         out[PREVIEW_NAMES.get(key, key)] = value
     return out
-
-REFRESH = prop(BOOL, "Re-read the file from disk instead of using the copy already "
-                     "in memory. Use after the RPG Maker editor has saved.")
-
 
 # ---------------------------------------------------------------------------
 # Argument accessors
@@ -656,6 +658,25 @@ def opt_int(args: dict[str, Any], key: str, default: int | None = None,
             return None
         return as_int(default, "the default for %s" % key, minimum, maximum)
     return as_int(args[key], key, minimum, maximum)
+
+
+def opt_int_default(args: dict[str, Any], key: str, default: int,
+                    minimum: int | None = None,
+                    maximum: int | None = None) -> int:
+    """:func:`opt_int` where a default is given, so the answer is an int.
+
+    Thirteen callers wrote `opt_int(args, key, default, ...) or default`, and
+    that `or` is unreachable: `opt_int` returns None only when the default
+    *is* None. Worse, `or 0` also fires on a legitimate 0 -- harmless, and
+    it reads as though None were possible, which is what made nine people
+    write it. This says in its signature what `opt_int` says in its body.
+
+    The fallback is written out rather than asserted: a None here would
+    mean this server's own two readers disagree, and answering `default` is
+    what every one of those `or` tails was doing anyway.
+    """
+    value = opt_int(args, key, default, minimum, maximum)
+    return default if value is None else value
 
 
 def ops_arg(args: dict[str, Any], key: str = "ops") -> list[dict[str, Any]]:

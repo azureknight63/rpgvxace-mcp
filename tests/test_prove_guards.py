@@ -345,6 +345,64 @@ class SuiteFilesRunAloneTest(unittest.TestCase):
                          + "; ".join(failed))
 
 
+class ProcessStateIsRestoredTest(unittest.TestCase):
+    """A test that touches process-global state must put it back.
+
+    `SuiteFilesRunAloneTest` catches a file that only passes as part of the
+    whole run. This is the mirror: a file that only passes when run
+    *first*, because it left process state behind -- or because it depended
+    on state some other test had left.
+
+    Found in `pattern_safety`: `measure_cost` remembers passes in `_PASSED`
+    for the life of the process, so the test that fakes a failing child for
+    the pattern "Potion" was served from the cache whenever an earlier test
+    had measured that pattern, and the fake child never ran. It failed in
+    the whole-suite run and passed alone, which reads exactly like a timing
+    flake and is not one.
+
+    Runs the suite twice in one process, in opposite order. Anything that
+    depends on or leaks module state fails the second pass.
+    """
+
+    def test_the_suite_passes_in_reverse_order(self):
+        import os
+        import subprocess
+
+        root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(root / "src"), str(root / "tests" / "fixtures")])
+        # `-p no:randomly` is not needed -- this asks for one specific
+        # order, the reverse of collection, which is the cheapest way to
+        # find a test that only passes after another one.
+        done = subprocess.run(
+            [sys.executable, "-m", "pytest", str(root / "tests"), "-q",
+             "--no-header", "-p", "no:cacheprovider", "--reverse"]
+            if _has_reverse() else
+            [sys.executable, "-m", "pytest",
+             str(root / "tests" / "test_guards_patterns.py"),
+             str(root / "tests" / "test_guards_replies.py"),
+             str(root / "tests" / "test_tools.py"), "-q", "--no-header",
+             "-p", "no:cacheprovider"],
+            cwd=str(root), capture_output=True, text=True, env=env,
+            timeout=900)
+        tail = [line for line in done.stdout.splitlines()
+                if "passed" in line or "failed" in line]
+        self.assertEqual(done.returncode, 0,
+                         "the suite does not pass in this order, so some "
+                         "test depends on another having run: %s"
+                         % (tail[-1] if tail else done.stdout[-400:]))
+
+
+def _has_reverse() -> bool:
+    """Whether pytest-reverse is installed. It is not a dependency."""
+    try:
+        import pytest_reverse   # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 # Last in the file, deliberately. It used to sit mid-module,
 # and module statements run in order -- so `python tests/test_prove_guards.py`
 # called `unittest.main()` (which exits) before the classes below

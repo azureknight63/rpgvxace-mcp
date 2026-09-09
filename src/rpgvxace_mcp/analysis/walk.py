@@ -26,8 +26,14 @@ from ..rubytypes import RubyHash, RubyObject, as_int, as_list
 class Location:
     """Where in a project something was found."""
 
-    __slots__ = ("kind", "map_id", "event_id", "event_name", "page", "index", "entry_id",
-                 "table", "field")
+    # The fields a copy carries, named rather than sliced off
+    # `__slots__`. `at` and `as_dict` both walked `__slots__[1:]`, which
+    # is positional -- one level up from the positional copying that
+    # `at`'s own docstring records two bugs from, and it breaks if a
+    # slot is ever added before `kind`.
+    COPIED = ("map_id", "event_id", "event_name", "page", "index",
+              "entry_id", "table", "field")
+    __slots__ = ("kind",) + COPIED
 
     def __init__(self, kind: str, map_id: int | None = None, event_id: int | None = None,
                  event_name: str | None = None, page: int | None = None,
@@ -50,14 +56,14 @@ class Location:
         versions of this ended up silently dropping ``table`` and ``field``.
         """
         clone = Location(self.kind)
-        for name in Location.__slots__[1:]:
+        for name in Location.COPIED:
             setattr(clone, name, getattr(self, name))
         clone.index = index
         return clone
 
     def as_dict(self) -> dict[str, Any]:
         out = {"kind": self.kind}
-        for name in Location.__slots__[1:]:
+        for name in Location.COPIED:
             value = getattr(self, name)
             if value is not None:
                 out[name] = value

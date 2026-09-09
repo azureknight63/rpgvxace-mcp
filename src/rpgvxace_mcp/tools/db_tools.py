@@ -38,6 +38,7 @@ from .registry import (
     need_str,
     one_of,
     opt_bool,
+    opt_int_default,
     opt_int,
     opt_str,
     prop,
@@ -83,6 +84,7 @@ MAX_EXTRA_FIELDS = 32
 # How many rows one listing returns. `offset` is what paging is for; a listing
 # larger than this is not one a caller reads.
 MAX_ROWS = 500
+
 
 TABLE_LIST = ", ".join(ALL_DATABASE_TABLES)
 
@@ -231,8 +233,8 @@ def db_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     # the reply: `MAX_ROWS` capped what came back while every matching row
     # was built first, so an Items array of a million links to one row made
     # a million reply dicts before the window was taken.
-    offset = opt_int(args, "offset", 0, minimum=0) or 0
-    limit = opt_int(args, "limit", 50, minimum=1, maximum=MAX_ROWS) or 50
+    offset = opt_int_default(args, "offset", 0, minimum=0)
+    limit = opt_int_default(args, "limit", 50, minimum=1, maximum=MAX_ROWS)
 
     rows = []
     matching = 0

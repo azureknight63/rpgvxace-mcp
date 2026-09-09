@@ -39,18 +39,17 @@ from .walk import (
 DEFAULT_REFERENCE_LIMIT = 200
 
 
+# Not a database table. It is a key of REFERENCE_RULES below because
+# Transfer Player names a map the same way the others name an entry, and the
+# walk that checks one should check the other.
+MAP_TARGET = "maps"
+
+
 # Which command parameters hold an id from which table. ``requires`` pins other
 # parameters that must match for the rule to apply (a Conditional Branch only
 # refers to an item when its type parameter says so). Only layouts confirmed
 # against the engines' own interpreters are listed, and they are the layouts VX
 # Ace and VX share.
-#
-# MAP_TARGET is not a database table; it is here because Transfer Player names a
-# map the same way these name an entry, and the walk that checks one should
-# check the other.
-MAP_TARGET = "maps"
-
-
 REFERENCE_RULES: dict[str, list[dict[str, Any]]] = {
     "items": [
         {"code": 126, "index": 0},

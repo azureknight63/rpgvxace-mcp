@@ -50,6 +50,7 @@ from .rubytypes import (
     Tone,
 )
 
+
 MAJOR_VERSION = 4
 MINOR_VERSION = 8
 

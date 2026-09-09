@@ -85,7 +85,8 @@ MAX_BOUNDED_WEIGHT = 64
 # What the parser raises for a pattern that is merely malformed, as opposed
 # to one this module could not cope with. Imported from `re` rather than
 # caught as `Exception`, so the two cases can be told apart.
-_RE_ERROR = __import__("re").error
+_RE_ERROR = re.error
+
 
 _REPEATS = ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT")
 _MAXREPEAT = _sre_parse.MAXREPEAT
@@ -255,7 +256,7 @@ PREFLIGHT_SUBJECT_CHARS = 2000
 # their own. Beyond this they share one subject that gives each a run, so a
 # wide alphabet cannot push a dangerous character out of the measurement --
 # which selecting the first eight by code point allowed.
-MAX_SUBJECTS_PER_CHARACTER = 8
+MAX_SINGLE_CHARACTER_SUBJECTS = 8
 
 # One representative character per character category, for building a subject
 # out of a pattern's own alphabet. A homogeneous run of the characters a
@@ -293,6 +294,7 @@ COMPILE_FAILED_EXIT = 17
 # set of flags says nothing about a match made under another.
 MEASURED_FLAGS = re.IGNORECASE
 
+
 _CHILD = (
     "import base64, re, sys\n"
     "lines = sys.stdin.read().split()\n"
@@ -320,11 +322,8 @@ _CHILD = (
 # here, so a refusal that ever got stored would be served as a pass -- which
 # is why only `_remember` writes to this, and only on a pass.
 #
-# A dict whose values are never read, rather than a set, purely for the
-# insertion order: eviction has to be oldest-first. An earlier version of this
-# comment claimed it was a set and that "there is nowhere to put" a refusal,
-# directly above a `dict[str, None]`, and the sentence about insertion order
-# sat on MAX_MEASURED_CACHED where it described neither.
+# A dict rather than a set purely for the insertion order: eviction has to be
+# oldest-first.
 _PASSED: "dict[str, None]" = {}
 
 # A ceiling, since a caller can supply endlessly many distinct patterns.
@@ -403,7 +402,7 @@ def _subjects(pattern: str) -> "list[str]":
     The count and the cap are interpolated rather than written out, because
     this sentence said "plus two mixtures" against three of them and "each
     character" against a capped eight.
-    """ % MAX_SUBJECTS_PER_CHARACTER
+    """ % MAX_SINGLE_CHARACTER_SUBJECTS
     try:
         alphabet = _alphabet(_sre_parse.parse(pattern))
     except Exception:
@@ -413,7 +412,7 @@ def _subjects(pattern: str) -> "list[str]":
     ordered = sorted(alphabet) or ["a"]
     # A run of each of the first few, individually -- one homogeneous run is
     # what makes competing atoms backtrack.
-    chosen = ordered[:MAX_SUBJECTS_PER_CHARACTER]
+    chosen = ordered[:MAX_SINGLE_CHARACTER_SUBJECTS]
     subjects = [char * PREFLIGHT_SUBJECT_CHARS for char in chosen]
     if len(chosen) > 1:
         pair = (chosen[0] + chosen[1]) * PREFLIGHT_SUBJECT_CHARS

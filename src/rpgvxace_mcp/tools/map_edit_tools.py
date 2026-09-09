@@ -29,6 +29,7 @@ from .registry import (
     one_of,
     opt_bool,
     opt_dict,
+    opt_int_default,
     opt_int,
     opt_str,
     prop,
@@ -392,7 +393,7 @@ def _new_map_id(ctx: Context, args: dict[str, Any], infos: Any) -> int:
 
 def _new_tileset_id(ctx: Context, args: dict[str, Any]) -> int:
     """Which tileset a new map uses, on an engine that has a Tilesets table."""
-    tileset_id = opt_int(args, "tileset_id", 1, minimum=1) or 1
+    tileset_id = opt_int_default(args, "tileset_id", 1, minimum=1)
     if not ctx.project.profile.has_tileset_database:
         if args.get("tileset_id") is not None:
             raise ToolError(
@@ -412,7 +413,7 @@ def _new_tree_info(ctx: Context, args: dict[str, Any], name: str) -> Any:
     """The MapInfos entry for a new map: its name, parent and tree position."""
     order = max([info.get("order") or 0
                  for _, info in ctx.project.entries("map_infos")] or [0]) + 1
-    parent_id = opt_int(args, "parent_id", 0, minimum=0) or 0
+    parent_id = opt_int_default(args, "parent_id", 0, minimum=0)
     if parent_id and parent_id not in {i for i, _ in
                                        ctx.project.entries("map_infos")}:
         raise ToolError(

@@ -23,12 +23,14 @@ from .registry import (
     need_int,
     one_of,
     opt_bool,
+    opt_int_default,
     opt_int,
     prop,
     schema,
     tool,
     decoded,
 )
+
 
 MAP_PROPERTY_FIELDS = (
     "width", "height", "scroll_type", "autoplay_bgm", "autoplay_bgs",
@@ -99,7 +101,7 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     # while `MAX_TOOL_RESULT_CHARS` rejected the answer afterwards. That
     # constant "bounds the response and not the work", as this module's own
     # comment on MAX_EVENT_SUMMARY_ROWS says.
-    offset = opt_int(args, "offset", 0, minimum=0) or 0
+    offset = opt_int_default(args, "offset", 0, minimum=0)
     limit = opt_int(args, "limit", MAX_MAP_ROWS, minimum=1,
                     maximum=MAX_MAP_ROWS) or MAX_MAP_ROWS
 

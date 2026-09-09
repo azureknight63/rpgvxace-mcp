@@ -895,7 +895,9 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
         "MAX_BOUNDED_WEIGHT": "one atom's weight in the shape score",
         "MAX_BACKTRACK_PATHS": "the shape score's own budget",
         "UNBOUNDED_WEIGHT": "one atom's weight in the shape score",
-        "MAX_SUBJECTS_PER_CHARACTER": "how many subjects the measurement builds",
+        "MAX_SINGLE_CHARACTER_SUBJECTS": "how many of a pattern's characters "
+                                         "get a homogeneous subject of "
+                                         "their own",
         "MAX_MEASURED_CACHED": "how many passed patterns are remembered",
         # Server plumbing, not a tool contract.
         "MAX_BATCH_MESSAGES": "JSON-RPC batch size",

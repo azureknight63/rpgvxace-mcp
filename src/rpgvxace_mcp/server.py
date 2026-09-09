@@ -45,6 +45,7 @@ from .tools.registry import (
     all_tools,
 )
 
+
 SERVER_NAME = "rpgvxace-mcp"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {PROTOCOL_VERSION, "2025-03-26", "2024-11-05"}

@@ -148,7 +148,9 @@ ACE_ONLY_COMMANDS: dict[int, str] = {
     405: "Scrolling Text Line",
 }
 
+
 ACE_COMMAND_NAMES: dict[int, str] = {**BASE_COMMAND_NAMES, **ACE_ONLY_COMMANDS}
+
 
 ENGINE_COMMANDS: dict[str, dict[int, str]] = {
     "vx_ace": ACE_COMMAND_NAMES,
@@ -263,6 +265,7 @@ VX_VARIABLE_OPERANDS = {**SHARED_VARIABLE_OPERANDS,
 # Names accepted for a variable operation in the authoring DSL.
 VARIABLE_OP_CODES = {"set": 0, "=": 0, "add": 1, "+": 1, "sub": 2, "-": 2,
                      "mul": 3, "*": 3, "div": 4, "/": 4, "mod": 5, "%": 5}
+
 
 COMPARISONS = {0: "==", 1: ">=", 2: "<=", 3: ">", 4: "<", 5: "!="}
 
@@ -568,6 +571,7 @@ def render_script(commands: list[Any], codec: TextCodec) -> list[str]:
 # ---------------------------------------------------------------------------
 # Authoring DSL
 # ---------------------------------------------------------------------------
+
 
 MESSAGE_LINES_PER_BOX = 4
 

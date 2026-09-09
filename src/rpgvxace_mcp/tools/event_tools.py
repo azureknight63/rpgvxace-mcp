@@ -58,6 +58,7 @@ from .registry import (
     ToolError,
     one_of,
     opt_bool,
+    opt_int_default,
     opt_int,
     opt_list,
     opt_str,
@@ -724,7 +725,7 @@ class _EventRequest:
     def page_index(self, raw_op: dict[str, Any], pages: list,
                    event_id: int) -> int:
         """Which page an op names, checked against the ones that exist."""
-        index = opt_int(raw_op, "page", 0) or 0
+        index = opt_int_default(raw_op, "page", 0)
         if 0 <= index < len(pages):
             return index
         if not pages:
@@ -787,8 +788,8 @@ def _op_create(request: _EventRequest, raw_op: dict[str, Any],
     elif event_id in used:
         raise ToolError("event %d already exists on this map" % event_id)
 
-    x = opt_int(raw_op, "x", 0, minimum=0) or 0
-    y = opt_int(raw_op, "y", 0, minimum=0) or 0
+    x = opt_int_default(raw_op, "x", 0, minimum=0)
+    y = opt_int_default(raw_op, "y", 0, minimum=0)
     _check_bounds(x, y, request.width, request.height)
     event = normalize_strings(
         new_event(event_id, opt_str(raw_op, "name") or "", x, y),

@@ -24,6 +24,7 @@ from .registry import (
     need_int,
     one_of,
     opt_bool,
+    opt_int_default,
     opt_int,
     opt_list,
     prop,
@@ -72,9 +73,9 @@ class _Rect:
         # past the fit check below, because the default width was computed
         # from it, and then failed deep in the Table with an error the model
         # could not act on.
-        self.x = opt_int(args, "x", 0, minimum=0, maximum=data.xsize - 1) or 0
-        self.y = opt_int(args, "y", 0, minimum=0, maximum=data.ysize - 1) or 0
-        self.z = opt_int(args, "z", 0, minimum=0) or 0
+        self.x = opt_int_default(args, "x", 0, minimum=0, maximum=data.xsize - 1)
+        self.y = opt_int_default(args, "y", 0, minimum=0, maximum=data.ysize - 1)
+        self.z = opt_int_default(args, "z", 0, minimum=0)
         if self.z >= data.zsize:
             # Named rather than bounded generically, so the message says which
             # layers this map actually has.

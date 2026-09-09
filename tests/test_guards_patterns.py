@@ -306,12 +306,30 @@ class TestTheMeasurementFailsClosed(unittest.TestCase):
         self.addCleanup(self.safety._PASSED.clear)
 
     def run_with_child(self, pattern, **fields):
+        """Run `measure_cost` against a child whose exit we choose.
+
+        The cache is emptied first, and that is not tidiness: `_PASSED`
+        lives for the process, so a pattern any *earlier* test measured
+        successfully is served from it and the fake child never runs --
+        `measure_cost` returns, nothing raises, and the assertion fails.
+        Found when `test_a_child_that_merely_mentions_an_error_is_refused`
+        failed in a whole-suite run and passed alone: another test had
+        already measured "Potion".
+
+        Restored rather than just cleared, so this suite cannot make a
+        later one fail the same way in reverse.
+        """
         import subprocess
 
         class Fake:
             returncode = fields.get("returncode", 0)
             stdout = fields.get("stdout", "ok")
             stderr = fields.get("stderr", "")
+
+        remembered = dict(self.safety._PASSED)
+        self.addCleanup(self.safety._PASSED.update, remembered)
+        self.addCleanup(self.safety._PASSED.clear)
+        self.safety._PASSED.clear()
 
         original = subprocess.run
         self.addCleanup(setattr, subprocess, "run", original)

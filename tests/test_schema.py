@@ -435,10 +435,14 @@ class TestOneBlankLineConvention(unittest.TestCase):
                 + [root / "scripts" / "prove_guards.py"])
 
     def test_every_top_level_definition_has_two_blank_lines_above_it(self):
+        # The look-ahead covers a top-level CONSTANT as well as a
+        # definition: four constants placed after a function had one blank
+        # line where the rest of the project uses two, and the narrower
+        # pattern could not see them.
         thin = []
         for path in self.modules():
             text = path.read_text(encoding="utf-8")
-            for match in re.finditer(r"[^\n]\n\n(?=(?:def |class |@)\S)",
+            for match in re.finditer(r"[^\n]\n\n(?=(?:def |class |@)\S|[A-Z_]{2,}\s*[:=])",
                                      text):
                 line = text.count("\n", 0, match.end()) + 1
                 thin.append("%s:%d" % (path.name, line))

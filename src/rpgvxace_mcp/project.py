@@ -40,6 +40,9 @@ from .schema import (
     DataFile,
     EngineProfile,
     HASH,
+    # Imported rather than defined here: there used to be one of each,
+    # so the highest id a tool accepted and the highest a filename
+    # could express were two independent 9999s.
     MAX_MAP_ID,
     PROFILES,
     SCRIPTS,
@@ -47,6 +50,7 @@ from .schema import (
     VX_PROFILE,
     map_filename,
 )
+
 
 WORK_DIR = ".rpgvxace-mcp"
 BACKUP_DIR = "backups"
@@ -65,13 +69,6 @@ MAX_STRING_SCAN_DEPTH = 12
 # and it walks several files, so the sampler's own ceiling is one shared budget
 # passed to each call. This is the per-call default for every other caller.
 MAX_STRING_SCAN_NODES = 200_000
-
-# The highest map id the editor's Map%03d naming can express.
-# MAX_MAP_ID is imported from `schema` above rather than defined here.
-# There used to be a definition in each: the tools import this module's, and
-# `schema.map_filename` enforces schema's, so the highest id a tool would
-# accept and the highest a filename could express were two independent 9999s
-# with nothing holding them equal.
 
 # The largest data file this server will read into memory. A real project's
 # largest file is a few megabytes; this leaves room above that while turning a
@@ -391,7 +388,7 @@ class Project:
         # describes, during construction, before the server can answer
         # anything.
         budget = [MAX_STRING_SCAN_NODES]
-        sources = list(ENCODING_SAMPLE_TABLES)
+        sources = ENCODING_SAMPLE_TABLES
         # Dialogue lives in maps, not in the database, so sample one: a project
         # with an ASCII database and Japanese event text is otherwise reported
         # as settled when it is not.
@@ -570,8 +567,8 @@ class Project:
         path = self.path_for(filename)
         if not path.is_file():
             raise ProjectError("%s does not exist in %s" % (filename, self.data_dir))
-        stat = path.stat()
-        if stat.st_size > MAX_DATA_FILE_BYTES:
+        info = path.stat()
+        if info.st_size > MAX_DATA_FILE_BYTES:
             # Checked before reading, not after: a damaged or crafted file of
             # a few gigabytes raised MemoryError, which is not a ProjectError
             # and so escaped Project.__init__ as a traceback rather than being
@@ -580,7 +577,7 @@ class Project:
                 "%s is %.1f MB, above the %d MB this server reads. A real "
                 "data file is a few megabytes; this one is damaged, or is not "
                 "project data."
-                % (filename, stat.st_size / (1024 * 1024),
+                % (filename, info.st_size / (1024 * 1024),
                    MAX_DATA_FILE_BYTES // (1024 * 1024)))
         raw = path.read_bytes()
         try:
@@ -588,7 +585,7 @@ class Project:
         except marshal_rb.MarshalError as exc:
             raise ProjectError("%s is not valid Marshal data: %s" % (filename, exc)) from exc
         self._cache[filename] = CachedFile(
-            value, stat.st_mtime_ns, stat.st_size, warnings,
+            value, info.st_mtime_ns, info.st_size, warnings,
             hashlib.blake2b(raw, digest_size=16).digest())
         # After the new entry is in, so the file just asked for is the last
         # thing eviction would consider rather than the first.
@@ -823,8 +820,8 @@ class Project:
             temp_path.unlink(missing_ok=True)
             raise ProjectError("could not write %s: %s" % (filename, exc)) from exc
 
-        stat = path.stat()
-        cached.mtime_ns, cached.size = stat.st_mtime_ns, stat.st_size
+        info = path.stat()
+        cached.mtime_ns, cached.size = info.st_mtime_ns, info.st_size
         cached.digest = hashlib.blake2b(encoded, digest_size=16).digest()
         self._log_change(tool, filename, summary)
         result["written"] = str(path)
@@ -833,9 +830,9 @@ class Project:
     def _assert_not_stale(self, filename: str, path: Path, cached: CachedFile) -> None:
         if not path.exists():
             return  # a new file; nothing to clobber
-        stat = path.stat()
-        unchanged = (stat.st_mtime_ns == cached.mtime_ns
-                     and stat.st_size == cached.size)
+        info = path.stat()
+        unchanged = (info.st_mtime_ns == cached.mtime_ns
+                     and info.st_size == cached.size)
         if cached.digest is not None:
             # The content decides, not the timestamp. Modification times are
             # coarse on FAT and on many network shares -- one or two seconds --
@@ -855,19 +852,21 @@ class Project:
                     "%s could not be re-read to check whether it changed (%s), "
                     "which usually means another program has it open. Close "
                     "the editor and try again." % (filename, exc)) from exc
-            if current is not None:
-                if current == cached.digest:
-                    # Same bytes; a rewritten timestamp is not a change.
-                    cached.mtime_ns, cached.size = stat.st_mtime_ns, stat.st_size
-                    return
-                unchanged = False
+            # No `if current is not None` here any more: `current` comes
+            # from a digest three lines up and the only failure path raises,
+            # so that condition could not be false.
+            if current == cached.digest:
+                # Same bytes; a rewritten timestamp is not a change.
+                cached.mtime_ns, cached.size = info.st_mtime_ns, info.st_size
+                return
+            unchanged = False
         if unchanged:
             return
-        if stat.st_size == cached.size:
+        if info.st_size == cached.size:
             detail = "its contents differ from what was read (still %d bytes)" \
-                % stat.st_size
+                % info.st_size
         else:
-            detail = "it is now %d bytes rather than %d" % (stat.st_size,
+            detail = "it is now %d bytes rather than %d" % (info.st_size,
                                                             cached.size)
         raise StaleFileError(
             "%s changed on disk after this server read it: %s. The %s editor "
@@ -1264,8 +1263,8 @@ class Project:
             filename = self.filename_for(key)
             path = self.path_for(filename)
             try:
-                stat = path.stat()
-                present, size = True, stat.st_size
+                info = path.stat()
+                present, size = True, info.st_size
             except OSError:
                 present, size = False, 0
             files.append({

@@ -43,6 +43,7 @@ from .registry import (
     need_str,
     one_of,
     opt_bool,
+    opt_int_default,
     opt_int,
     opt_str,
     prop,
@@ -265,7 +266,8 @@ def validate(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         ctx.project.forget_cached()
         ctx.project.forget_assets()
     return run_validate(ctx.project, scopes, map_ids,
-                        opt_int(args, "limit", DEFAULT_FINDING_LIMIT) or DEFAULT_FINDING_LIMIT)
+                        opt_int_default(args, "limit",
+                                        DEFAULT_FINDING_LIMIT))
 
 
 @tool(

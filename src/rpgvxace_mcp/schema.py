@@ -56,6 +56,7 @@ from .rubytypes import (
     _bare_name,
 )
 
+
 DATA_DIR = "Data"
 
 # Marker for how a data file's top-level container is shaped.
@@ -113,11 +114,13 @@ _SHARED_FILES = [
              "rows, one per slot"),
 ]
 
+
 ACE_DATA_FILES = _data_file_registry(
     *_SHARED_FILES,
     DataFile("tilesets", "Tilesets", ARRAY, "RPG::Tileset",
              "Tilesets: their nine graphic files and per-tile passage flags"),
 )
+
 
 VX_DATA_FILES = _data_file_registry(
     *_SHARED_FILES,
@@ -321,6 +324,7 @@ SHARED_CLASS_FIELDS: dict[str, dict[str, str]] = {
     },
 }
 
+
 _MAP_FIELDS_SHARED = {
     "width": "Map width in tiles",
     "height": "Map height in tiles",
@@ -341,6 +345,7 @@ _MAP_FIELDS_SHARED = {
     "data": "Table of tile ids",
     "events": "Hash of event id => RPG::Event",
 }
+
 
 ACE_CLASS_FIELDS: dict[str, dict[str, str]] = {
     "RPG::Map": {**_MAP_FIELDS_SHARED, **{
@@ -399,6 +404,7 @@ ACE_CLASS_FIELDS: dict[str, dict[str, str]] = {
     },
 }
 
+
 VX_CLASS_FIELDS: dict[str, dict[str, str]] = {
     "RPG::Map": {**_MAP_FIELDS_SHARED, **{
         "data": "Table of tile ids, width x height x 3 layers",
@@ -439,12 +445,14 @@ TILE_ID_RANGES = {
     "A4": (5888, 8191),
 }
 
+
 ACE_MAP_LAYERS = {
     0: "lower layer (ground, A tiles)",
     1: "upper layer (B-E tiles placed over the ground)",
     2: "shadow layer (4-bit mask per tile, 0 for none)",
     3: "region layer (region id 0-63, 0 for none)",
 }
+
 
 VX_MAP_LAYERS = {
     0: "lower layer (ground, A tiles)",
@@ -769,6 +777,7 @@ ACE_PROFILE = EngineProfile(
     ],
 )
 
+
 VX_PROFILE = EngineProfile(
     key="vx",
     label="RPG Maker VX",
@@ -793,6 +802,7 @@ VX_PROFILE = EngineProfile(
         _editor_note("RPG Maker VX"),
     ],
 )
+
 
 PROFILES = {profile.key: profile for profile in (ACE_PROFILE, VX_PROFILE)}
 

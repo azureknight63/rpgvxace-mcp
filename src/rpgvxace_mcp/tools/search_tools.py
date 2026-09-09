@@ -41,6 +41,7 @@ from .registry import (
     STR,
     ToolError,
     opt_bool,
+    opt_int_default,
     opt_int,
     opt_str,
     prop,
@@ -55,7 +56,9 @@ from .registry import (
 # the size of a caller-supplied pattern.
 MAX_HITS = 1000
 
+
 MAX_HIT_CHARS = 300
+
 
 MAX_PATTERN_CHARS = 512
 
@@ -87,6 +90,7 @@ MAX_SEARCH_SECONDS = 10.0
 # command is clipped, small enough that a crafted one cannot make a
 # gigabyte of `str` between two deadline checks.
 MAX_TEXTS_PER_COMMAND = 64
+
 
 SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
 
@@ -143,7 +147,7 @@ def search(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     nothing without knowing where the search went.
     """
     scopes = scopes_arg(args, "scopes", SEARCH_SCOPES)
-    limit = opt_int(args, "limit", 100, minimum=1, maximum=MAX_HITS) or 100
+    limit = opt_int_default(args, "limit", 100, minimum=1, maximum=MAX_HITS)
     code_filter = opt_int(args, "command_code")
     query = opt_str(args, "query")
     if code_filter is None and not query:

@@ -30,6 +30,11 @@ from ..rubytypes import (
     Table,
     _bare_name,
 )
+# STRUCTURAL_MAP_FIELDS: the map fields whose value has to agree with
+# the tile table. Imported rather than repeated -- this file's own copy
+# and map_edit's had already drifted, and only one of them had
+# "events", so a patch could move an event off the map through the
+# tool that validates while the escape hatch refused it.
 from ..schema import ALL_TABLE_KEYS, STRUCTURAL_MAP_FIELDS
 from .registry import (
     write_reply,
@@ -63,18 +68,6 @@ RAW_OP_ARGS = {
     "get": {"op", "table", "map_id", "path", "tables", "refresh"},
     "set": {"op", "table", "map_id", "path", "value", "dry_run", "refresh"},
 }
-
-# Map fields whose value has to agree with the tile table or with the map's own
-# structure. raw_data is the unvalidated escape hatch, but writing one of these
-# on its own produces a file the editor refuses to open, which is not reach --
-# it is just breakage.
-# The same list map_edit refuses in a patch, imported rather than repeated:
-# the two were written separately and had already drifted apart -- this one had
-# "events" and map_edit's did not, so a patch could move an event off the map
-# through the tool that validates while the escape hatch refused it.
-#
-# Read under its imported name; the local alias this comment used to sit on
-# had one reader and gave the same list a second spelling.
 
 # The path is the one argument whose cost is a *product* of its own length and
 # the file's. `_read_hash_pairs` registers a hash in the link table before it

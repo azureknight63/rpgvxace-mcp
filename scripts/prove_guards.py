@@ -39,6 +39,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parent.parent
 CODEC = "src/rpgvxace_mcp/marshal_rb.py"
 SCHEMA = "src/rpgvxace_mcp/schema.py"
@@ -226,6 +227,7 @@ CEILWALK = "tests/test_guards_bounds.py::TestTheCeilingStopsTheWalkingToo::"
 SUBJECTS = "tests/test_guards_patterns.py::TestEveryNamedCharacterIsMeasured::"
 SEARCHWORK = "tests/test_guards_bounds.py::TestSearchBoundsItsTotalWork::"
 FAILCLOSED = "tests/test_guards_patterns.py::TestTheMeasurementFailsClosed::"
+
 
 GUARDS = [
     Guard(
@@ -607,10 +609,8 @@ GUARDS = [
     ),
     Guard(
         "staleness compares content, not just timestamps", PROJECT,
-        """            if current is not None:
-                if current == cached.digest:""",
-        """            if current is not None:
-                if True:""",
+        """            if current == cached.digest:""",
+        """            if True:""",
         [STALE + "test_a_same_size_rewrite_is_still_detected"],
         "a coarse filesystem timestamp lets an editor save be silently "
         "overwritten when the byte count happens to match",
