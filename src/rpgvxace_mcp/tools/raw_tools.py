@@ -131,6 +131,26 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         raise ToolError("pass exactly one of table or map_id")
     refresh = opt_bool(args, "refresh")
 
+    if table == "scripts":
+        # Before the load, not after it. This refusal is unconditional for
+        # this table, so unmarshalling the file first was work whose result
+        # could never be used -- and it left a cache entry for a table nothing
+        # here can act on. `map_edit_tools` fixes the same ordering, with a
+        # comment saying the check "used to run after the tree entry had been
+        # added to the cache".
+        #
+        # Both directions, which is what the description says and what db_get
+        # already does. Reading was allowed, and handed back every slot body
+        # as base64 of compressed Ruby -- bytes no caller can use, in a
+        # response large enough to crowd out everything else, from a table
+        # whose whole point is that the scripts tool decompresses it.
+        raise ToolError(
+            "the scripts table cannot be read or written through raw_data: a "
+            "slot body is zlib-compressed Ruby, so reading it here gives you "
+            "base64 of compressed bytes, and writing it as anything else "
+            "stops the game booting. Use the scripts tool, which decompresses "
+            "and compresses it for you.")
+
     if map_id is not None:
         filename = ctx.project.map_file(map_id)
         root = ctx.project.load_map(map_id, refresh)
@@ -140,19 +160,6 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 
     path = [p for p in (opt_str(args, "path") or "").split("/") if p]
     mode = one_of(args, "tables", list(TABLE_MODES), TABLE_MODES[0])
-
-    if table == "scripts":
-        # Both directions, which is what the description says and what db_get
-        # already does. Reading was allowed, and handed back every slot body as
-        # base64 of compressed Ruby -- bytes no caller can use, in a response
-        # large enough to crowd out everything else, from a table whose whole
-        # point is that the scripts tool decompresses it.
-        raise ToolError(
-            "the scripts table cannot be read or written through raw_data: a "
-            "slot body is zlib-compressed Ruby, so reading it here gives you "
-            "base64 of compressed bytes, and writing it as anything else "
-            "stops the game booting. Use the scripts tool, which decompresses "
-            "and compresses it for you.")
 
     if op == "get":
         value = _resolve(root, path, ctx.codec)

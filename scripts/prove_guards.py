@@ -161,6 +161,9 @@ NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
 BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
 INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
 AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
+TYPED = ("tests/test_tools.py::TestADeclaredTypeIsChecked::")
+BEFOREWORK = ("tests/test_tools.py::TestARefusalComesBeforeTheWork::")
+SLOTID = ("tests/test_tools.py::TestAScriptSlotIdIsCalledAnId::")
 CACHEBOUND = ("tests/test_tools.py::TestTheFileCacheIsBounded::")
 FOREIGN = ("tests/test_tools.py::TestAForeignBackupDirectoryIsSkipped::")
 ONCE = ("tests/test_tools.py::TestAMapEditResolvesEachArgumentOnce::")
@@ -1924,6 +1927,35 @@ GUARDS = [
         [FOREIGN + "test_the_real_snapshots_are_still_pruned",
          FOREIGN + "test_pruning_does_not_fail_because_of_it"],
         "is_symlink() is False for an NTFS directory junction, so the filter that meant to step over a directory this server did not create stepped into one and _contained then failed the prune for the whole project. Not the data loss a review predicted -- rmtree refuses a junction on 3.11 and _contained raises before it -- but one foreign directory stopping the work, with a message about containment rather than about a directory that was never ours",
+    ),
+    Guard(
+        'the gate holds the type it declares', REGISTRY,
+        '''        if not isinstance(value, (int, float)):
+            raise ToolError(
+                "%s must be an integer, got %s. %s"
+                % (key, type(value).__name__, echo(value)))''',
+        '''        if False:
+            raise ToolError(
+                "%s must be an integer, got %s. %s"
+                % (key, type(value).__name__, echo(value)))''',
+        [TYPED + "test_a_string_for_an_integer_is_refused_by_the_gate"],
+        "check_args' docstring says it holds a call to the schema its tool declares, and it checked unknown keys, maxItems and integer bounds but never `type` -- so a string sent for a declared integer fell through to whichever accessor reached it first, reported from a different layer in different words",
+    ),
+    Guard(
+        'a refusal that always follows a read comes before it', RAW_TOOLS,
+        '''    if table == "scripts":
+        # Before the load, not after it.''',
+        '''    if False:
+        # Before the load, not after it.''',
+        [BEFOREWORK + "test_the_scripts_table_is_refused_without_being_read"],
+        'raw_data unmarshalled the whole file and then refused the scripts table unconditionally, so the read could never be used and left a cache entry for a table nothing there can act on',
+    ),
+    Guard(
+        'a script slot id is called an id', PROJECT,
+        '                "id": slot_id,',
+        '                "magic": slot_id,',
+        [SLOTID + "test_the_reply_names_it_id"],
+        'schema documents the file as "Array of [id, name, zlib code]" and docs renders that to the model, while the code called the first element a magic number -- and scripts op="get" hands that row to the caller verbatim, so the name in the code is the one a model reads',
     ),
 ]
 

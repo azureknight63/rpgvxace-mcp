@@ -837,7 +837,7 @@ def _op_set_page(request: _EventRequest, raw_op: dict[str, Any],
             "summary": "updated page %d of event %d" % (page_index, event_id)}
 
 
-def _op_set_commands(request: _EventRequest, raw_op: dict[str, Any],
+def _op_write_commands(request: _EventRequest, raw_op: dict[str, Any],
                      op: str) -> dict[str, Any]:
     event_id, event = request.event(raw_op, op)
     pages = request.pages(event, event_id)
@@ -860,8 +860,8 @@ _EVENT_OPS = {
     "set_page": _op_set_page,
     "add_page": _op_add_page,
     "delete_page": _op_delete_page,
-    "set_commands": _op_set_commands,
-    "append_commands": _op_set_commands,
+    "set_commands": _op_write_commands,
+    "append_commands": _op_write_commands,
 }
 
 

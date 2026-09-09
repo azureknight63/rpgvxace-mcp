@@ -514,9 +514,31 @@ def _check_declared(key: str, value: Any, spec: dict[str, Any]) -> None:
             and len(value) > spec["maxItems"]:
         raise ToolError("%s takes at most %d entries, got %d"
                         % (key, spec["maxItems"], len(value)))
-    if spec.get("type") == INT and isinstance(value, (int, float)) \
-            and not isinstance(value, bool):
+    declared = spec.get("type")
+    if declared == INT:
+        # Only the wrong *kind* is refused here. `as_int` below owns the two
+        # numeric cases -- a bool, and a float that is not whole -- and says
+        # why in words this could not improve on; delegating also means the
+        # gate and every reader refuse them identically. An integral float is
+        # accepted because JSON has no integer type of its own, so a client
+        # may legitimately send 2.0 for 2.
+        if not isinstance(value, (int, float)):
+            raise ToolError(
+                "%s must be an integer, got %s. %s"
+                % (key, type(value).__name__, echo(value)))
         as_int(value, key, spec.get("minimum"), spec.get("maximum"))
+    elif declared == STR and not isinstance(value, str):
+        raise ToolError("%s must be a string, got %s. %s"
+                        % (key, type(value).__name__, echo(value)))
+    elif declared == BOOL and not isinstance(value, bool):
+        raise ToolError("%s must be true or false, got %s. %s"
+                        % (key, type(value).__name__, echo(value)))
+    elif declared == ARR and not isinstance(value, list):
+        raise ToolError("%s must be an array, got %s. %s"
+                        % (key, type(value).__name__, echo(value)))
+    elif declared == OBJ and not isinstance(value, dict):
+        raise ToolError("%s must be an object, got %s. %s"
+                        % (key, type(value).__name__, echo(value)))
     # Deliberately no enum check here. `one_of` and `_table_arg` already
     # enforce those, and they can say which tables *this project* has and why
     # one is absent -- a generic list of every engine's tables is a worse

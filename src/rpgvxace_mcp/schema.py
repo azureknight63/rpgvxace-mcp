@@ -108,7 +108,8 @@ _SHARED_FILES = [
     DataFile("map_infos", "MapInfos", HASH, "RPG::MapInfo",
              "The map tree: names, parents and ordering"),
     DataFile("scripts", "Scripts", SCRIPTS, "-",
-             "The script editor contents, zlib-compressed"),
+             "The script editor contents: an array of [id, name, zlib code] "
+             "rows, one per slot"),
 ]
 
 ACE_DATA_FILES = _data_file_registry(

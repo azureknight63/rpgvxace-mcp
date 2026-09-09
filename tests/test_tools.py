@@ -6874,3 +6874,121 @@ class TestAForeignBackupDirectoryIsSkipped(ToolTest):
         link, _ = self.plant_junction()
         would = self.project.prune_backups(dry_run=True)
         self.assertNotIn(link.name, would)
+
+
+class TestAScriptSlotIdIsCalledAnId(ToolTest):
+    """`schema` and `docs` both call it an id; only the code said "magic".
+
+    `scripts op="get"` returns the project layer's row verbatim, so whatever
+    the code calls the field is what the model reads.
+    """
+
+    def test_the_reply_names_it_id(self):
+        slot = self.call("scripts", op="list")["scripts"][0]["index"]
+        out = self.call("scripts", op="get", index=slot)
+        self.assertIn("id", out)
+        self.assertNotIn("magic", out,
+                         "the reply calls the slot id a magic number: %s"
+                         % sorted(out))
+
+    def test_the_documented_shape_agrees(self):
+        """The two descriptions the model reads before calling."""
+        from rpgvxace_mcp.schema import ACE_DATA_FILES
+        self.assertIn("id", ACE_DATA_FILES["scripts"].description.lower())
+
+    def test_the_value_is_still_the_slot_id(self):
+        """Renaming must not change what is reported."""
+        rows = self.call("scripts", op="list")["scripts"]
+        for row in rows:
+            got = self.call("scripts", op="get", index=row["index"])
+            self.assertEqual(got["index"], row["index"])
+
+
+class TestAnOpDispatcherIsNamedForWhatItDoes(unittest.TestCase):
+    """`_op_set_commands` also appended, and branched on `op` to decide."""
+
+    def test_the_write_dispatcher_says_write(self):
+        from rpgvxace_mcp.tools import event_tools
+        self.assertTrue(hasattr(event_tools, "_op_write_commands"),
+                        "the function handling both set and append is still "
+                        "named for only one of them")
+        self.assertFalse(hasattr(event_tools, "_op_set_commands"))
+
+    def test_both_ops_still_dispatch_to_it(self):
+        """The two ops whose shared handler the old name described as one."""
+        from rpgvxace_mcp.tools import event_tools
+        for op in ("set_commands", "append_commands"):
+            self.assertIs(event_tools._EVENT_OPS[op],
+                          event_tools._op_write_commands,
+                          "%s no longer reaches the writer" % op)
+
+
+class TestARefusalComesBeforeTheWork(ToolTest):
+    """raw_data refused the scripts table after unmarshalling the whole file.
+
+    The refusal is unconditional for that table, so the read could never be
+    used -- and `map_edit_tools` fixes this same ordering, with a comment
+    saying the check "used to run after the tree entry had been added to the
+    cache".
+    """
+
+    def test_the_scripts_table_is_refused_without_being_read(self):
+        loaded = []
+        original = self.project.load_data
+
+        def spy(key, refresh=False):
+            loaded.append(key)
+            return original(key, refresh)
+
+        self.project.load_data = spy
+        self.addCleanup(setattr, self.project, "load_data", original)
+
+        with self.assertRaises(ToolError):
+            self.call("raw_data", table="scripts", path="0")
+        self.assertNotIn("scripts", loaded,
+                         "the file was unmarshalled before the refusal that "
+                         "always follows it")
+
+    def test_an_ordinary_table_is_still_read(self):
+        out = self.call("raw_data", table="system", path="game_title")
+        self.assertIn("value", out)
+
+
+class TestADeclaredTypeIsChecked(ToolTest):
+    """`check_args` says it holds a call to the schema its tool declares.
+
+    It enforced unknown keys, maxItems and integer bounds, and not `type`, so
+    a string sent for a declared integer fell through to the handler's own
+    accessor -- which reports it, but as a different problem, from a different
+    layer, in different words depending on which accessor got there first.
+    """
+
+    def test_a_string_for_an_integer_is_refused_by_the_gate(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("map_get", map_id="1")
+        message = str(caught.exception)
+        self.assertIn("map_id", message)
+        self.assertIn("integer", message.lower())
+
+    def test_an_integer_for_a_string_is_refused_too(self):
+        with self.assertRaises(ToolError) as caught:
+            self.call("db_list", table=7)
+        self.assertIn("table", str(caught.exception))
+
+    def test_a_boolean_is_not_an_integer(self):
+        """`True` is an int in Python and is not one in a schema."""
+        with self.assertRaises(ToolError):
+            self.call("map_get", map_id=True)
+
+    def test_an_integral_float_is_still_accepted(self):
+        """The house rule: 2.0 is a whole number a caller may send.
+
+        `as_int` exists for this, and every tool already accepts it, so the
+        type check must not start refusing what the readers accept.
+        """
+        out = self.call("map_get", map_id=1.0)
+        self.assertEqual(out["map_id"], 1)
+
+    def test_the_right_types_still_pass(self):
+        self.assertIn("maps", self.call("map_list"))
+        self.assertIn("entries", self.call("db_list", table="items"))

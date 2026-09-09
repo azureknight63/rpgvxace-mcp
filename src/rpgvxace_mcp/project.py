@@ -712,10 +712,16 @@ class Project:
             if not isinstance(row, list) or len(row) < 3:
                 scripts.append({"index": index, "error": "unexpected row shape"})
                 continue
-            magic, name, packed = row[0], row[1], row[2]
+            # `id`, not `magic`. It is the slot's id: `schema` documents
+            # this file as "Array of [id, name, zlib code]" and `docs`
+            # renders that to the model, and this was the only place calling
+            # it a magic number -- while `scripts op="get"` hands this row
+            # straight to the caller, so the code's name is the one the model
+            # reads.
+            slot_id, name, packed = row[0], row[1], row[2]
             entry: dict[str, Any] = {
                 "index": index,
-                "magic": magic,
+                "id": slot_id,
                 "name": self.codec.decode(name.data) if isinstance(name, RubyString) else "",
             }
             if not isinstance(packed, RubyString):
