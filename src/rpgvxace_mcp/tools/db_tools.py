@@ -43,6 +43,7 @@ from .registry import (
     prop,
     schema,
     tool,
+    decoded,
 )
 
 # Extra fields worth showing beside the name when listing a table.
@@ -172,8 +173,14 @@ def _table_arg(ctx: Context, args: dict[str, Any],
 
 
 def _brief_field(ctx: Context, value: Any) -> Any:
+    """One field of a listing row, small enough to scan.
+
+    A string goes through `decoded`, which caps and sanitises it: this is a
+    listing, so one crafted name would otherwise be repeated into every row
+    of the reply.
+    """
     if isinstance(value, RubyString):
-        return ctx.codec.decode(value.data)
+        return decoded(ctx, value)
     if isinstance(value, list):
         return {"count": len(value)}
     if isinstance(value, RubyObject):

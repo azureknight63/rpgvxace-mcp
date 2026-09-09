@@ -161,6 +161,8 @@ NILFILL = "tests/test_tools.py::TestRawDataCanFillANilField::"
 BOUNDED = "tests/test_tools.py::TestRefusalsAreBounded::"
 INERT = "tests/test_tools.py::TestSearchRefusesAnInertRegexFlag::"
 AMPLIFY = "tests/test_tools.py::TestSharedChildrenCannotAmplifyAWalk::"
+ONCE = ("tests/test_tools.py::TestAMapEditResolvesEachArgumentOnce::")
+CRAFTED = ("tests/test_tools.py::TestACraftedNameIsBoundedInAReplyToo::")
 ASSETSTALE = ("tests/test_tools.py::TestAnAssetAddedMidSessionIsSeen::")
 SPELLINGS = ("tests/test_tools.py::TestTwoSpellingsOfOneArgumentAgree::")
 MAPSCOPE = ("tests/test_tools.py::TestTheMapScopeStopsCollecting::")
@@ -765,7 +767,10 @@ GUARDS = [
         "raises TypeError out of the whole run",
     ),
     Guard(
-        "quoted project text is length-capped", ANALYSIS,
+        # The cap moved to `convert` with the decode itself, so it now covers
+        # replies as well as findings -- four copies in the tools layer had
+        # neither the cap nor the sanitising.
+        "quoted project text is length-capped", CONVERT,
         'MAX_TEXT_CHARS = 200',
         'MAX_TEXT_CHARS = 100_000_000',
         [VHOST + "test_an_event_name_of_absurd_length",
@@ -874,11 +879,16 @@ GUARDS = [
         "does not have, which is the shape the editor refuses to open",
     ),
     Guard(
+        # Now `_MapEdit.require_tree_entry`, which is both the lookup and the
+        # check -- the reason that value is the one thing the request object
+        # cannot simply re-derive.
         "both halves of a map edit are checked first", MAP_EDIT,
-        '    if name is not None:\n'
-        '        info = ctx.project.get_entry("map_infos", map_id)',
-        '    if False:\n'
-        '        info = ctx.project.get_entry("map_infos", map_id)',
+        '        if self.name is None:\n'
+        '            return\n'
+        '        self.info = self.ctx.project.get_entry("map_infos", self.map_id)',
+        '        if self.name is not None:\n'
+        '            return\n'
+        '        self.info = self.ctx.project.get_entry("map_infos", self.map_id)',
         [MAPW + "test_a_rename_of_a_map_with_no_tree_entry_writes_nothing"],
         "the map file is written before the rename half is validated, so a "
         "caller is told the call failed with half of it already on disk",
@@ -1875,6 +1885,21 @@ GUARDS = [
         [SPELLINGS + "test_both_spellings_answer_a_high_id_the_same_way",
          SPELLINGS + "test_the_schema_declares_the_same_bound_on_both"],
         'db_get ids=[999999999] was accepted while db_get id=999999999 was refused -- one request, two spellings, two answers about what is a legal entry id',
+    ),
+    Guard(
+        'a map edit resolves each argument once', MAP_EDIT,
+        '    _refuse_structural(request.patch)',
+        '    _refuse_structural(opt_dict(args, "patch"))',
+        [ONCE + "test_a_patch_is_read_once"],
+        'name and patch existed twice in one call chain: map_edit refused one copy and _apply_map_edit wrote another, equal only because opt_str and opt_dict are pure and nothing mutates args between them -- a property of the readers, in the one place where the value checked has to be the value written',
+    ),
+    Guard(
+        'a name from a file is capped wherever it is printed', REGISTRY,
+        '    return decoded_text(ctx.codec, value)',
+        '    return ctx.codec.decode(value.data) if value is not None else ""',
+        [CRAFTED + "test_map_list_caps_a_crafted_name",
+         CRAFTED + "test_map_list_sanitises_control_characters"],
+        'four copies of this decode in the tools layer had neither the cap nor the sanitising that analysis._text has, and that docstring says why: a value out of a file this server did not write would otherwise be repeated whole into every message about it. Measured -- a 1,000,006-character map name carrying an ANSI escape went into map_list intact while the same name in a finding came back capped',
     ),
 ]
 

@@ -37,6 +37,7 @@ from .registry import (
     schema,
     scopes_arg,
     tool,
+    decoded,
 )
 
 
@@ -403,7 +404,7 @@ def _search_maps(ctx: Context, found: _Hits) -> None:
         if not isinstance(info, RubyObject):
             continue
         name = info.get("name")
-        text = ctx.codec.decode(name.data) if isinstance(name, RubyString) else ""
+        text = decoded(ctx, name)
         if text and matcher and matcher(text):
             found.add(Location("map", map_id=map_id, field="name"), text)
 

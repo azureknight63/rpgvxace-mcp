@@ -12,7 +12,7 @@ from ..convert import TABLE_MODES, new_walk, to_json
 from ..project import MAX_MAP_ID, ProjectError
 from ..rubytypes import RubyHash, RubyObject, RubyString, Table
 from ..schema import TILE_ID_RANGES, TRIGGER_NAMES, unreadable_events_note
-from .map_common import MAX_CELLS_PER_WALK, _check_budget, _name
+from .map_common import MAX_CELLS_PER_WALK, _check_budget
 from .registry import (
     BOOL,
     Context,
@@ -26,6 +26,7 @@ from .registry import (
     prop,
     schema,
     tool,
+    decoded,
 )
 
 MAP_PROPERTY_FIELDS = (
@@ -50,7 +51,7 @@ def _map_names(ctx: Context) -> dict[int, str]:
     try:
         for map_id, info in ctx.project.entries("map_infos"):
             if isinstance(info, RubyObject):
-                names[map_id] = _name(ctx, info.get("name"))
+                names[map_id] = decoded(ctx, info.get("name"))
     except (ProjectError, ValueError):
         # map_list reports the tree itself and validate reports the file, so an
         # empty mapping here means "no names to show" rather than hiding a bug.
@@ -87,7 +88,7 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             continue
         row: dict[str, Any] = {
             "id": map_id,
-            "name": _name(ctx, info.get("name")),
+            "name": decoded(ctx, info.get("name")),
             "parent_id": parent,
             "order": info.get("order"),
             "file": ctx.project.map_file(map_id),
@@ -108,7 +109,7 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                     row["events_note"] = unreadable
                 bgm = game_map.get("bgm")
                 if isinstance(bgm, RubyObject) and game_map.get("autoplay_bgm"):
-                    row["bgm"] = _name(ctx, bgm.get("name"))
+                    row["bgm"] = decoded(ctx, bgm.get("name"))
             except (ProjectError, ValueError) as exc:
                 row["error"] = str(exc)
         rows.append(row)
@@ -344,13 +345,13 @@ def _event_summaries(ctx: Context, game_map: RubyObject
                 "page": index,
                 "trigger": TRIGGER_NAMES.get(page.get("trigger"), page.get("trigger")),
                 "commands": len(commands),
-                "graphic": _name(ctx, graphic.get("character_name"))
+                "graphic": decoded(ctx, graphic.get("character_name"))
                 if isinstance(graphic, RubyObject) else "",
                 "conditions": _conditions(page.get("condition")),
             })
         out.append({
             "id": event_id,
-            "name": _name(ctx, event.get("name")),
+            "name": decoded(ctx, event.get("name")),
             "x": event.get("x"),
             "y": event.get("y"),
             "pages": page_rows,

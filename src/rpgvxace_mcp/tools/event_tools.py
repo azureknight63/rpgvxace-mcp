@@ -25,7 +25,7 @@ from ..convert import (
 )
 from ..analysis import WalkBudget
 from ..project import MAX_MAP_ID
-from ..rubytypes import RubyHash, RubyObject, RubyString
+from ..rubytypes import RubyHash, RubyObject
 from ..schema import (
     TRIGGER_NAMES,
     unreadable_events_note,
@@ -62,6 +62,7 @@ from .registry import (
     prop,
     schema,
     tool,
+    decoded,
 )
 
 # The highest event id a map will hold. The editor numbers events from 1 and no
@@ -215,10 +216,6 @@ def _one_target(args: dict[str, Any], verb: str) -> "tuple[int | None, int | Non
     return common_id, map_id
 
 
-def _text(ctx: Context, value: Any) -> str:
-    return ctx.codec.decode(value.data) if isinstance(value, RubyString) else ""
-
-
 def _page_view(ctx: Context, page: RubyObject, index: int,
                include_raw: bool, walk: Any,
                budget: "WalkBudget | None" = None) -> dict[str, Any]:
@@ -321,7 +318,7 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         triggers = {0: "none", 1: "autorun", 2: "parallel"}
         result: dict[str, Any] = {
             "common_event_id": common_id,
-            "name": _text(ctx, common.get("name")),
+            "name": decoded(ctx, common.get("name")),
             "trigger": triggers.get(common.get("trigger"), common.get("trigger")),
             "switch_id": common.get("switch_id"),
             "command_count": len(commands),
@@ -377,7 +374,7 @@ def event_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             continue
         if wanted and event_id not in wanted:
             continue
-        name = _text(ctx, event.get("name"))
+        name = decoded(ctx, event.get("name"))
         if needle and needle not in name.lower():
             continue
         pages = []

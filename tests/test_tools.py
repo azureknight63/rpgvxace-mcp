@@ -6518,3 +6518,179 @@ class TestAnAssetAddedMidSessionIsSeen(ToolTest):
         out = self.call("validate", refresh=True)
         plain = self.call("validate")
         self.assertEqual(out["counts"], plain["counts"])
+
+
+class TestAMapEditResolvesEachArgumentOnce(ToolTest):
+    """The value that was checked is the value that gets written.
+
+    Counted rather than reasoned about: two `opt_dict(args, "patch")` calls
+    in one request means two objects, and they agree only because the readers
+    happen to be pure. That is a property of the readers, not of this code,
+    and the refusal that runs on one of them is what guards a file the editor
+    would refuse to open.
+    """
+
+    def resolutions_of(self, argument, **arguments):
+        """How many times one argument is read while a request is served."""
+        from rpgvxace_mcp.tools import map_edit_tools, registry
+        seen = []
+
+        def spy(args, key, *rest, **kwargs):
+            if key == argument:
+                seen.append(key)
+            return original(args, key, *rest, **kwargs)
+
+        target = "opt_dict" if argument == "patch" else "opt_str"
+        original = getattr(registry, target)
+        self.addCleanup(setattr, map_edit_tools, target,
+                        getattr(map_edit_tools, target))
+        setattr(map_edit_tools, target, spy)
+        self.call("map_edit", **arguments)
+        return len(seen)
+
+    def test_a_patch_is_read_once(self):
+        count = self.resolutions_of(
+            "patch", op="update", map_id=1, dry_run=True,
+            patch={"encounter_step": 9})
+        self.assertEqual(count, 1,
+                         "the patch was read %d times, so the object "
+                         "_refuse_structural checked is not necessarily the "
+                         "object apply_patch writes" % count)
+
+    def test_a_name_is_read_once(self):
+        count = self.resolutions_of("name", op="update", map_id=1,
+                                    dry_run=True, name="Renamed")
+        self.assertEqual(count, 1,
+                         "the name was read %d times, so the value that "
+                         "proved a tree entry exists is not necessarily the "
+                         "value written into it" % count)
+
+    def test_a_resize_still_reports_what_it_changed(self):
+        out = self.call("map_edit", op="resize", map_id=1, width=25,
+                        height=20, dry_run=True)
+        self.assertIn("resized from 20x15 to 25x20", out["would_change"])
+
+    def test_a_rename_still_needs_a_tree_entry(self):
+        """The check that has to happen before anything is written."""
+        infos = self.project.load_data("map_infos")
+        infos.delete(1)
+        self.project.save_file(self.project.filename_for("map_infos"),
+                               tool="test", summary="drop the entry")
+        self.ctx = self.reopen()
+        with self.assertRaises(ToolError) as caught:
+            self.call("map_edit", op="update", map_id=1, name="Renamed")
+        self.assertIn("MapInfos", str(caught.exception))
+
+    def test_a_structural_patch_is_still_refused(self):
+        with self.assertRaises(ToolError):
+            self.call("map_edit", op="update", map_id=1,
+                      patch={"width": 99}, dry_run=True)
+
+    def test_a_rename_and_a_patch_together_still_work(self):
+        out = self.call("map_edit", op="update", map_id=1, name="Both",
+                        patch={"encounter_step": 7}, dry_run=True)
+        text = str(out)
+        self.assertIn("Both", text)
+        self.assertIn("encounter_step", text)
+
+
+class TestACraftedNameIsBoundedInAReplyToo(ToolTest):
+    """A name from the file is capped and sanitised wherever it is printed.
+
+    `analysis._text` has done this for findings since the round that added it.
+    The tools' own copies of the same one-line decode did neither, so the
+    reasoning in that docstring held on one path out of two.
+    """
+
+    HUGE = 1_000_000
+
+    def name_map_one(self, text):
+        infos = self.project.load_data("map_infos")
+        first = infos.items()[0]
+        first[1].set("name", self.project.codec.make_string(text))
+        self.project.save_file(self.project.filename_for("map_infos"),
+                               tool="test", summary="a crafted name")
+        self.ctx = self.reopen()
+        return first[0]
+
+    def longest_name(self, rows, key="name"):
+        return max((str(row[key]) for row in rows), key=len)
+
+    def test_map_list_caps_a_crafted_name(self):
+        self.name_map_one("A" * self.HUGE)
+        name = self.longest_name(self.call("map_list")["maps"])
+        self.assertLess(
+            len(name), self.HUGE,
+            "a %d-character name went into the reply whole" % len(name))
+
+    def test_map_list_sanitises_control_characters(self):
+        self.name_map_one("Town\x07\x1b[31m")
+        name = self.longest_name(self.call("map_list")["maps"])
+        self.assertNotIn("\x07", name)
+        self.assertNotIn("\x1b", name)
+
+    def test_map_get_caps_it_too(self):
+        map_id = self.name_map_one("B" * self.HUGE)
+        out = self.call("map_get", map_id=map_id)
+        self.assertLess(len(str(out.get("name", ""))), self.HUGE)
+
+    def test_a_capped_name_says_it_was_capped(self):
+        """Silently truncating a name is how a caller looks for the wrong map."""
+        self.name_map_one("C" * self.HUGE)
+        name = self.longest_name(self.call("map_list")["maps"])
+        self.assertIn("bytes", name,
+                      "the reply gives no sign the name was cut: %r"
+                      % name[-40:])
+
+    def test_an_ordinary_name_is_untouched(self):
+        self.name_map_one("Riverbend")
+        names = [str(row["name"]) for row in self.call("map_list")["maps"]]
+        self.assertIn("Riverbend", names)
+
+    def test_an_event_name_is_bounded_as_well(self):
+        game_map = self.project.load_map(1)
+        event = game_map.get("events").sorted_items()[0][1]
+        event.set("name", self.project.codec.make_string("D" * self.HUGE))
+        self.project.path_for(self.project.map_file(1)).write_bytes(
+            marshal_rb.dump(game_map))
+        self.ctx = self.reopen()
+        out = self.call("map_get", map_id=1, include_events=True)
+        self.assertLess(len(self.longest_name(out["events"])), self.HUGE)
+
+
+class TestOneDecodeForTheWholeToolsLayer(unittest.TestCase):
+    """Four spellings of one line, and only one of them was the careful one."""
+
+    def test_the_shared_one_exists(self):
+        from rpgvxace_mcp.tools.registry import decoded
+        self.assertTrue(callable(decoded))
+
+    def test_no_tool_module_defines_its_own(self):
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "src"
+        folder = root / "rpgvxace_mcp" / "tools"
+        copies = []
+        for path in sorted(folder.glob("*.py")):
+            if path.name == "registry.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in tree.body:
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                if node.name in ("_text", "_name", "_decoded"):
+                    copies.append("%s defines %s" % (path.name, node.name))
+        self.assertEqual(copies, [], "; ".join(copies))
+
+    def test_it_agrees_with_the_analysis_one(self):
+        """Two receivers, one implementation -- so they cannot drift."""
+        from rpgvxace_mcp.analysis import _text
+        from rpgvxace_mcp.convert import TextCodec
+        from rpgvxace_mcp.rubytypes import RubyString
+        from rpgvxace_mcp.tools.registry import decoded
+
+        class Holder:
+            codec = TextCodec("utf-8")
+
+        value = RubyString(("E" * 5000).encode("utf-8"))
+        self.assertEqual(decoded(Holder(), value), _text(Holder(), value))

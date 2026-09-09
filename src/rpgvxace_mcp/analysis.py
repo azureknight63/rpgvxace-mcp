@@ -56,7 +56,8 @@ from .project import (
     Project,
     ProjectError,
 )
-from .rubytypes import RubyHash, RubyObject, RubyString, Table, printable_text
+from .convert import MAX_TEXT_CHARS, decoded_text
+from .rubytypes import RubyHash, RubyObject, Table
 from .schema import PAGE_CONDITION_FLAGS, TILESET_SHEET_NAMES, TRIGGER_AUTORUN
 
 # The checks `validate` knows how to run. It implements them, so it owns the
@@ -92,9 +93,6 @@ DEFAULT_LIMIT = 200
 # directly with this patched small, rather than trusting the list above.
 MAX_FINDINGS = 5000
 
-# Text out of a project file, quoted back in a message. A crafted event name can
-# be megabytes; a real one is a few words.
-MAX_TEXT_CHARS = 200
 
 
 class Location:
@@ -218,29 +216,13 @@ def _brief(value: Any) -> str:
 def _text(project: Project, value: Any) -> str:
     """Text from a project file, ready to put in a message.
 
-    Sanitised and length-capped: decoding uses ``surrogateescape``, and one
-    crafted name would otherwise be repeated into every finding about it.
+    A wrapper, so this module keeps the `Project` receiver every caller here
+    passes while the decoding itself lives in `convert` beside the codec --
+    where `registry.decoded` reaches the same implementation. The tools layer
+    had four copies of this that did neither the capping nor the sanitising,
+    so a 1,000,006-character map name went into a reply whole.
     """
-    if isinstance(value, RubyString):
-        # Sliced before decoding: the cap is meant to bound the work as well
-        # as the result, and a crafted name can be megabytes.
-        raw = value.data
-        text = project.codec.decode(raw[:MAX_TEXT_CHARS * 4])
-        if len(raw) > MAX_TEXT_CHARS * 4:
-            return printable_text(text[:MAX_TEXT_CHARS]) + \
-                "... (%d bytes)" % len(raw)
-    elif value is None:
-        return ""
-    elif isinstance(value, (str, int, float, bool)):
-        text = str(value)
-    else:
-        # A name that is an Array or a Hash is not a name. Say what it was
-        # rather than stringify the whole structure.
-        return "<%s>" % type(value).__name__
-    text = printable_text(text)
-    if len(text) > MAX_TEXT_CHARS:
-        return text[:MAX_TEXT_CHARS] + "... (%d characters)" % len(text)
-    return text
+    return decoded_text(project.codec, value)
 
 
 # How many nodes one call may visit on the event walk -- events, pages and

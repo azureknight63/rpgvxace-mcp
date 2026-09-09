@@ -8,8 +8,7 @@ something three of its siblings read -- which is what `map_tools` had become.
 
 from __future__ import annotations
 
-from typing import Any
-from ..rubytypes import CELL_MASK, RubyString
+from ..rubytypes import CELL_MASK
 from .registry import Context, ToolError
 
 # How many cells one windowed read returns or one write covers. The whole of a
@@ -27,9 +26,6 @@ MAX_CELLS_PER_WALK = 4_000_000
 # is a four-bit shadow mask; layer 3 on VX Ace holds region ids, which the
 # editor numbers 0 to 63.
 LAYER_CEILINGS = {2: 15, 3: 63}
-
-def _name(ctx: Context, value: Any) -> str:
-    return ctx.codec.decode(value.data) if isinstance(value, RubyString) else ""
 
 def _check_budget(cells: int, what: str, windowed: bool = True,
                   remedy: str | None = None) -> None:

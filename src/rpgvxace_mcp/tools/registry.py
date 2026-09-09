@@ -5,8 +5,8 @@ from __future__ import annotations
 import contextlib
 from typing import Any, Callable, Iterator
 
-from ..convert import TextCodec
-from ..rubytypes import MAX_NAMES_LISTED, _bare_name as bare_name, named
+from ..convert import TextCodec, decoded_text
+from ..rubytypes import _bare_name as bare_name, named
 from ..project import Project
 
 # How much of a caller's own value is quoted back in an error. Without this, a
@@ -38,6 +38,25 @@ def echo(value: Any) -> str:
     if len(shown) > MAX_ECHO_CHARS:
         shown = shown[:MAX_ECHO_CHARS] + "... (%d characters)" % len(shown)
     return shown
+
+
+def decoded(ctx: "Context", value: Any) -> str:
+    """Text from a project file, ready to put in a reply.
+
+    The tools layer's one spelling of this. There were four -- two named
+    functions and two inline copies -- all of them a bare
+    `ctx.codec.decode(value.data) if isinstance(value, RubyString) else ""`,
+    with no cap and no sanitising, while `analysis._text` did the same job
+    carefully and said why: a value out of a file this server did not write
+    would otherwise be repeated whole into every message about it.
+
+    That reasoning is about where the value came from, so it holds for a reply
+    too. Measured before this: a 1,000,006-character map name carrying an ANSI
+    escape went into map_list's reply intact, while the same name in a
+    validate finding came back capped. Both go through
+    `convert.decoded_text` now, so they cannot differ again.
+    """
+    return decoded_text(ctx.codec, value)
 
 
 class Context:

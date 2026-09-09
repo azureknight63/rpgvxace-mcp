@@ -108,31 +108,73 @@ def map_edit(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     if op == "delete":
         return _delete_map(ctx, map_id, dry_run)
 
-    name = opt_str(args, "name")
-    patch = opt_dict(args, "patch")
-    _refuse_structural(patch)
+    # One object, resolved once. Both halves of the request are validated
+    # before either is written, and the value each check ran against is the
+    # value the write uses -- which is what the two-copies version could only
+    # promise on the readers' behalf.
+    request = _MapEdit(ctx, op, args, map_id)
+    _refuse_structural(request.patch)
+    request.require_tree_entry()
 
-    # Both halves of the request are resolved and validated here, before
-    # either is written: the map file used to be saved first, so a request
-    # that also renamed a map with no tree entry committed the resize and then
-    # told the caller it had failed.
-    info = None
-    if name is not None:
-        info = ctx.project.get_entry("map_infos", map_id)
-        if info is None:
+    with ctx.staged(*request.files()) as write_landed:
+        return _apply_map_edit(request, write_landed)
+
+class _MapEdit:
+    """One map_edit request: resolved once, checked before anything is written.
+
+    `_DbRequest`'s argument, on the tool that needed it more. `name` and
+    `patch` used to be read in `map_edit` for the checks and read again in
+    `_apply_map_edit` for the write, so the object `_refuse_structural`
+    refused and the object `apply_patch` wrote were two objects that happened
+    to be equal -- because the readers are pure, which is a fact about them
+    rather than about this code. Measured at two reads each per request.
+
+    ``args`` is kept for one caller only: `_apply_resize` reads `width` and
+    `height` from it, and resolving those here would run a resize's bounds
+    checks on an `update`.
+    """
+
+    __slots__ = ("ctx", "op", "args", "map_id", "info", "dry_run", "name",
+                 "patch")
+
+    def __init__(self, ctx: Context, op: str, args: dict[str, Any],
+                 map_id: int):
+        self.ctx = ctx
+        self.op = op
+        self.args = args
+        self.map_id = map_id
+        self.dry_run = opt_bool(args, "dry_run")
+        self.name = opt_str(args, "name")
+        self.patch = opt_dict(args, "patch")
+        # Set by `require_tree_entry`, which is also what proves it exists.
+        self.info: Any = None
+
+    def require_tree_entry(self) -> None:
+        """The MapInfos entry a rename needs, proved to exist before any write.
+
+        The one value that cannot simply be re-derived: looking it up is the
+        check. It runs outside the staged block because the map file used to
+        be saved first, so a request that also renamed a map with no tree
+        entry committed the resize and then told the caller it had failed.
+        """
+        if self.name is None:
+            return
+        self.info = self.ctx.project.get_entry("map_infos", self.map_id)
+        if self.info is None:
             raise ToolError(
                 "map %d has no MapInfos entry, so it cannot be renamed. Use "
-                "map_edit op=\"create\" to add the tree entry." % map_id)
+                "map_edit op=\"create\" to add the tree entry." % self.map_id)
         # Encoded now so a name this project's code page cannot hold is
         # refused before anything is written.
-        ctx.codec.encode_strict(name)
+        self.ctx.codec.encode_strict(self.name)
 
-    files = [ctx.project.map_file(map_id)]
-    if info is not None:
-        files.append(ctx.project.filename_for("map_infos"))
-    with ctx.staged(*files) as write_landed:
-        return _apply_map_edit(ctx, op, args, map_id, info, dry_run,
-                               write_landed)
+    def files(self) -> list[str]:
+        """Every file this request may write, for the staged block to hold."""
+        files = [self.ctx.project.map_file(self.map_id)]
+        if self.info is not None:
+            files.append(self.ctx.project.filename_for("map_infos"))
+        return files
+
 
 def _apply_resize(ctx: Context, args: dict[str, Any], game_map: RubyObject,
                   map_id: int) -> list[str]:
@@ -184,20 +226,18 @@ def _apply_resize(ctx: Context, args: dict[str, Any], game_map: RubyObject,
         changes.append("events now outside the map: %s" % out_of_bounds)
     return changes
 
-def _apply_map_edit(ctx: Context, op: str, args: dict[str, Any], map_id: int,
-                    info: Any, dry_run: bool,
+def _apply_map_edit(request: "_MapEdit",
                     write_landed: StagedWrite) -> dict[str, Any]:
     """Run an update or a resize against the cached map. Saves at the end.
 
-    `name` and `patch` are re-read from `args` rather than passed in: both
-    readers are idempotent, and the six-value signature this replaced meant
-    that adding one more resolved value touched the signature, the call site
-    and the docstring together. The one thing that cannot be re-derived is
-    `info`, because looking it up is what proves the map has a tree entry to
-    rename -- and that check has to happen before anything is written.
+    Two parameters where there were seven. The five that went were the ones
+    already resolved by the caller, and two of them -- `name` and `patch` --
+    were re-read here rather than passed, so the value checked and the value
+    written were separate objects. See `_MapEdit`.
     """
-    name = opt_str(args, "name")
-    patch = opt_dict(args, "patch")
+    ctx, op, map_id = request.ctx, request.op, request.map_id
+    args, info, dry_run = request.args, request.info, request.dry_run
+    name, patch = request.name, request.patch
     game_map = ctx.project.load_map(map_id)
     changes: list[str] = []
     writes = []

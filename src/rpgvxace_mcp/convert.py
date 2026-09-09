@@ -37,7 +37,6 @@ from .rubytypes import (
     RubyUClass,
     RubyUserDef,
     RubyUserMarshal,
-    MAX_NAMES_LISTED,
     Table,
     Tone,
     _bare_name,
@@ -811,6 +810,52 @@ def refuse_invented_in_replacement(existing: Any, replacement: Any,
             twin = first_of_class.get(item.cls)
             if twin is not None:
                 refuse_invented_in_replacement(twin, item, here, depth + 1)
+
+
+# How much of one string from a project file is put into a message or a
+# reply. The value comes out of a file this server did not write, and a
+# crafted name would otherwise be repeated into every finding about it.
+#
+# Moved here from `analysis`, where it applied to findings only while four
+# copies of the same decode in the tools layer applied it to nothing: a
+# 1,000,006-character map name went into map_list's reply whole, carrying an
+# ANSI escape, while the same value in a finding came back capped.
+MAX_TEXT_CHARS = 200
+
+
+def decoded_text(codec: TextCodec, value: Any) -> str:
+    """Text from a project file, ready to put in a message or a reply.
+
+    Sanitised and length-capped. Sliced *before* decoding, because the cap is
+    meant to bound the work as well as the result and a crafted name can be
+    megabytes; and it says how many bytes or characters there really were,
+    because a name silently cut is how a caller ends up looking for the wrong
+    map.
+
+    Moved here verbatim from `analysis._text` rather than written fresh: the
+    four copies in the tools layer answered "" for everything that was not a
+    RubyString, and this distinguishes a name that is absent from a name that
+    is an Array -- which is the more useful answer in a reply as well as in a
+    finding.
+    """
+    if isinstance(value, RubyString):
+        raw = value.data
+        text = codec.decode(raw[:MAX_TEXT_CHARS * 4])
+        if len(raw) > MAX_TEXT_CHARS * 4:
+            return (printable_text(text[:MAX_TEXT_CHARS])
+                    + "... (%d bytes)" % len(raw))
+    elif value is None:
+        return ""
+    elif isinstance(value, (str, int, float, bool)):
+        text = str(value)
+    else:
+        # A name that is an Array or a Hash is not a name. Say what it was
+        # rather than stringify the whole structure.
+        return "<%s>" % type(value).__name__
+    text = printable_text(text)
+    if len(text) > MAX_TEXT_CHARS:
+        return text[:MAX_TEXT_CHARS] + "... (%d characters)" % len(text)
+    return text
 
 
 def normalize_strings(value: Any, codec: TextCodec, depth: int = 0) -> Any:
