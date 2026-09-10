@@ -1330,6 +1330,92 @@ class TestOneCommandWalkForAWholeValidate(ToolTest):
         self.assertEqual(self.walks(scopes=["database"]), 0)
 
 
+class TestOneMapPassPerScopeThatNeedsOne(ToolTest):
+    """Three passes over the map set on a default run, not five.
+
+    `check_event_pages`, `_check_map_assets`, `check_commands` and
+    `_check_command_assets` each opened every map. Two of those four are now
+    passengers on the other two -- `report` passes one `_AssetChecker` into
+    the walks that already have the map open and tells `check_assets` the
+    work is done -- and three docstrings say so, each in the words "this
+    would be a second full pass over the map set". Nothing measured it, so
+    the claim was prose and a fourth pass could be added back invisibly.
+
+    Counted at `Project.load_map`, which is the thing being paid for.
+    `iter_maps` is the wrong subject twice over: `check_maps` walks the maps
+    with a direct `load_map` loop -- deliberately, because it is the one
+    rule that reports an unreadable map, which `iter_maps` skips silently --
+    and `iter_command_lists` calls `iter_maps` internally, so a default run
+    counts two where the claim is three, and a regression written in
+    `check_maps`' idiom would not show at all.
+
+    Stated as identities between scopes rather than as four absolute
+    numbers, because two single-map lookups ride along on top of the passes
+    and are not passes: `_check_system` loads the start-position map, and
+    `_check_transfer` loads each map a Transfer Player names, memoised by
+    `_MapSizes`. Both counts come from the fixture's contents; the pass
+    counts do not.
+
+    One caveat, since this counts calls and not reads: `load_file` caches
+    the decoded value (project.py), so a pass is a *traversal* and only the
+    first is necessarily file IO. The saving is real either way -- the
+    traversal is what costs the allowance, and it becomes IO again once
+    `_evict_over_budget` starts evicting on a project bigger than the cache
+    -- but the claim being held here is about traversals.
+    """
+
+    def loads(self, **arguments):
+        """Which maps one validate loads, in order, with repeats."""
+        from rpgvxace_mcp.project import Project
+        original = Project.load_map
+        counted = []
+
+        def counting(project, map_id, refresh=False):
+            counted.append(map_id)
+            return original(project, map_id, refresh)
+
+        # Patched on the class, not on the modules that bound a name: every
+        # caller reaches this through an instance, so there is one place to
+        # patch and no list of importers to keep in step.
+        self.addCleanup(setattr, Project, "load_map", original)
+        Project.load_map = counting
+        self.call("validate", **arguments)
+        return counted
+
+    def maps_on_disk(self):
+        return len(self.project.map_ids_on_disk())
+
+    def test_the_maps_scope_makes_one_pass(self):
+        self.assertEqual(len(self.loads(scopes=["maps"])),
+                         self.maps_on_disk())
+
+    def test_the_events_scope_makes_two_passes(self):
+        """One for the command lists, one for the page rules."""
+        loads = self.loads(scopes=["events"])
+        self.assertGreaterEqual(len(loads), 2 * self.maps_on_disk())
+        self.assertEqual(sorted(loads).count(self.project.map_ids_on_disk()[0]),
+                         2, "the first map was not loaded exactly twice")
+
+    def test_the_assets_scope_alone_makes_two(self):
+        """The fallback: with no events walk to join, it makes its own."""
+        self.assertEqual(len(self.loads(scopes=["assets"])),
+                         2 * self.maps_on_disk())
+
+    def test_adding_the_assets_scope_costs_no_map_pass(self):
+        """The merge, stated as the identity it is."""
+        self.assertEqual(len(self.loads(scopes=["events", "assets"])),
+                         len(self.loads(scopes=["events"])))
+
+    def test_a_default_run_is_the_maps_pass_the_events_passes_and_no_more(self):
+        self.assertEqual(
+            len(self.loads()),
+            len(self.loads(scopes=["maps", "events"]))
+            + len(self.loads(scopes=["database"])),
+            "a default validate loads more maps than the maps scope, the "
+            "events scope and the database scope's one start-position "
+            "lookup account for, so something is walking them again")
+
+
 class TestTheMergedWalkStillFindsBothKinds(ValidateTest):
     """Sharing one loop must not lose either rule's findings.
 
@@ -1369,6 +1455,65 @@ class TestTheMergedWalkStillFindsBothKinds(ValidateTest):
         self.assertNotIn("missing_graphic", found,
                          "the events scope answered an asset question it "
                          "was not asked")
+
+
+class TestTheMergedPageWalkStillFindsTheMapAssets(ValidateTest):
+    """The other half of the merge, which nothing held.
+
+    `check_event_pages` took a `checker` and became the map and page asset
+    walk for any run that selects both scopes -- the default run. Nothing
+    tested it: `if checker is not None:` at both sites in `pages` could be
+    turned off and the whole suite stayed green while a default `validate`
+    silently stopped reporting missing parallaxes, battlebacks, autoplay
+    BGM and BGS, and every event page character graphic.
+
+    Asserted on the *location*, not the rule name: `missing_graphic` is
+    also produced by the Show Text face path, which
+    `TestTheMergedWalkStillFindsBothKinds` covers, so a rule-name test
+    would stay green under exactly the mutation this is for.
+
+    And in both scope combinations, because the default path and the
+    assets-only path are different code: `pages_done=shared_checker is not
+    None` in `report` decides which one walks the maps, so setting that
+    flag unconditionally loses the assets-only walk with the suite equally
+    green. This is also the only thing that holds `assets.map_assets`'
+    "one copy, here" claim -- that both callers reach the same body.
+    """
+
+    def craft_a_missing_parallax_and_page_graphic(self):
+        game_map, _, event = self.first_event(1)
+        make = self.project.codec.make_string
+        game_map.set("parallax_name", make("NoSuchParallax"))
+        page = event.get("pages")[0]
+        page.get("graphic").set("character_name", make("NoSuchCharacter"))
+        self.project.save_file(self.project.map_file(1), tool="test",
+                               summary="crafted")
+        self.ctx = self.reopen()
+
+    def places(self, **arguments):
+        """Where each missing_graphic finding says the name was."""
+        self.craft_a_missing_parallax_and_page_graphic()
+        return [f.get("location", {})
+                for f in self.findings("missing_graphic", **arguments)]
+
+    def assert_both_are_reported(self, places):
+        self.assertIn({"kind": "map", "map_id": 1, "field": "parallax_name"},
+                      [{k: v for k, v in place.items()} for place in places],
+                      "the map's own parallax was not reported")
+        pages = [place for place in places
+                 if place.get("kind") == "map_event"
+                 and place.get("page") == 0]
+        self.assertTrue(pages, "the event page's graphic was not reported")
+
+    def test_a_default_run_reports_both(self):
+        self.assert_both_are_reported(self.places())
+
+    def test_the_assets_scope_alone_reports_both(self):
+        self.assert_both_are_reported(self.places(scopes=["assets"]))
+
+    def test_the_events_scope_alone_reports_neither(self):
+        """The events scope must not answer an asset question."""
+        self.assertEqual(self.places(scopes=["events"]), [])
 
 
 class TestALocationIsBuiltWhenItIsReported(ValidateTest):

@@ -649,7 +649,9 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
                             "caller of `check_event_pages` has charged for",
         "map_assets": "loops over two field pairs of one map -- a fixed "
                       "list in this file, not a length out of the project "
-                      "-- and both its callers charge per map",
+                      "-- and is called once per map file on disk, a count "
+                      "bounded by the filesystem rather than by a length "
+                      "out of a file",
     }
 
     def modules(self):
@@ -1319,6 +1321,50 @@ class TestOneAssetCheckerForAWholeRun(ToolTest):
                          "a whole-scope validate built %d asset checkers, "
                          "so the ceiling is %d times MAX_FINDINGS"
                          % (len(built), len(built)))
+
+
+class TestAFullAssetCheckerDoesNotStopThePageRules(ToolTest):
+    """`check_event_pages` must not return on `checker.full`, and here is why.
+
+    Every other walk that holds an `_AssetChecker` tests `checker.full` and
+    returns, and a reviewer twice proposed that this one should too. It must
+    not: this walk owns `shadowed_pages` and `unstoppable_autorun`, which
+    collect into `findings`, and the checker it carries is a passenger. A
+    `return` on a full checker would silently delete two rules' findings for
+    any project with more missing graphics than the ceiling holds --
+    `_check_map_assets` can test it because there the checker is the only
+    thing it collects into.
+
+    Nothing was saved by the proposed test either: the walk is already
+    bounded by `findings.full`, by the shared `WalkBudget`, and by
+    `_AssetChecker.check` returning on its own first line before it decodes
+    a name or builds a `Location`.
+
+    Written as a test rather than a comment because the next reviewer will
+    propose it again, and a comment saying "do not" is not a thing that
+    fails.
+    """
+
+    def test_the_page_rules_still_report_with_a_full_checker(self):
+        from rpgvxace_mcp.analysis.lint.assets import _AssetChecker
+        from rpgvxace_mcp.analysis.lint.findings import Finding, WARNING
+        from rpgvxace_mcp.analysis.lint.pages import check_event_pages
+        from rpgvxace_mcp.analysis.walk import WalkBudget
+        # An unconditional second page, which hides page 0.
+        self.call("event_edit", map_id=1, ops=[
+            {"op": "add_page", "event_id": 1,
+             "commands": [{"text": "unreachable"}]}])
+        project = self.reopen().project
+        self.lower_the_finding_ceiling(1)
+        checker = _AssetChecker(project)
+        checker.findings.append(Finding(
+            WARNING, "filler", "one finding, and the ceiling is one"))
+        self.assertTrue(checker.full, "the ceiling was not lowered, so this "
+                                      "would pass with any behaviour")
+        found = check_event_pages(project, project.map_ids_on_disk(),
+                                  WalkBudget(), None, checker)
+        self.assertIn("shadowed_pages", {f.rule for f in found})
+
 
 # Last in the file, deliberately. It used to sit mid-module,
 # and module statements run in order -- so running this file directly

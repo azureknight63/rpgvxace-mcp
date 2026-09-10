@@ -33,7 +33,10 @@ from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyHash,
     RubyObject,
 )
-from rpgvxace_mcp.tools.search_tools import MAX_SUBJECT_CHARS  # noqa: E402
+from rpgvxace_mcp.tools.search_tools import (  # noqa: E402
+    MAX_SUBJECT_BYTES,
+    MAX_SUBJECT_CHARS,
+)
 from rpgvxace_mcp.tools.registry import (  # noqa: E402
     Context,
     PARTIAL_SUFFIXES,
@@ -302,12 +305,16 @@ class TestFindingCountsAreTrustworthy(ValidateTest):
 
 
 class TestSearchSaysWhatItDidNotRead(ToolTest):
-    """A regex is matched against a bounded prefix; a caller must be told.
+    """Both searches read a bounded prefix; a caller must be told which.
 
-    A plain substring search reads every string in full and a regex search
-    does not, and the two reported the same shape -- so "no hits" from a regex
-    over a project with long script lines was indistinguishable from a search
-    that had genuinely looked everywhere.
+    "No hits" from a regex over a project with long script lines was
+    indistinguishable from a search that had genuinely looked everywhere.
+    The two windows are different sizes and are measured in different
+    units -- MAX_SUBJECT_CHARS characters of a decoded string for a regex,
+    MAX_SUBJECT_BYTES bytes of the raw string for a plain search -- and
+    this class's own docstring used to say a plain search read every
+    string in full, which was true of the version before `subject_text`
+    sliced.
     """
 
     def long_note(self):
@@ -328,12 +335,33 @@ class TestSearchSaysWhatItDidNotRead(ToolTest):
         self.assertIn("{:,}".format(MAX_SUBJECT_CHARS),
                       out["strings_clipped_note"])
 
-    def test_a_substring_search_reads_the_whole_string(self):
+    def test_a_substring_search_reads_past_the_regex_prefix(self):
+        """Past the regex window, not past its own.
+
+        This asserted a clean reply for a needle 2,500 bytes in and was
+        named for reading the whole string -- which it does not do, and
+        the case below is what tells the two claims apart.
+        """
         self.long_note()
         out = self.call("search", query="NEEDLE", scopes=["database"])
         self.assertEqual(out["count"], 1)
-        # Nothing was clipped, so nothing is claimed to have been.
+        # Inside the plain window, so nothing is claimed to have been cut.
         self.assertNotIn("strings_clipped_note", out)
+
+    def test_a_substring_search_past_its_own_window_says_so(self):
+        item = self.project.get_entry("items", 1)
+        padding = "x" * (MAX_SUBJECT_BYTES + 500)
+        item.set("note", self.project.codec.make_string(padding + "NEEDLE"))
+        self.project.save_file(self.project.filename_for("items"),
+                               tool="test", summary="a very long note")
+        out = self.call("search", query="NEEDLE", scopes=["database"])
+        self.assertEqual(out["hits"], [])
+        self.assertIn("strings_clipped_note", out)
+        # The byte figure, because that is the cut this path made.
+        self.assertIn("{:,}".format(MAX_SUBJECT_BYTES),
+                      out["strings_clipped_note"])
+        # And the flag the tool description says covers anything not read.
+        self.assertTrue(out.get("may_have_more"))
 
 
 class TestCommandReferenceSaysWhoseLayoutsTheseAre(ToolTest):
@@ -1147,6 +1175,54 @@ class TestACodeWithAConstantIsSpelledWithIt(unittest.TestCase):
         self.assertEqual(spelled, [],
                          "these compare a code to a number this module has "
                          "already named: " + "; ".join(spelled))
+
+    def emitted(self, tree):
+        """Every code an emit site names, as (line, node) pairs.
+
+        Every site, not only the ones spelled as a literal: the sanity
+        check below counts these, and counting only literals would read
+        "the emit sites were not found" as the sites got fixed.
+
+        The first argument of `_cmd` and `new_event_command` *is* the code
+        of the command being built, so a number there is the same defect as
+        a number in a comparison -- and once `summarize` dispatches from a
+        table rather than a chain, the comparison scan above no longer
+        reaches the codes it renders, which are the table's keys.
+
+        The `COMMAND_NAMES`, `ALL_PARAM_SPECS` and `CONTINUATION_CODES`
+        keys are deliberately not scanned: those tables are where a code
+        gets its meaning, they cover the whole superset rather than the
+        two dozen codes with names, and half-spelling them would read
+        worse than either extreme.
+        """
+        import ast
+        out = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in ("_cmd", "new_event_command")
+                    and node.args):
+                out.append((node.lineno, node.args[0]))
+            target = (node.target if isinstance(node, ast.AnnAssign)
+                      else node.targets[0] if isinstance(node, ast.Assign)
+                      else None)
+            if (getattr(target, "id", "") == "_SUMMARY_RENDERERS"
+                    and isinstance(node.value, ast.Dict)):
+                out.extend((key.lineno, key) for key in node.value.keys)
+        return out
+
+    def test_no_command_is_built_from_a_number_that_has_a_name(self):
+        import ast
+        known = self.constants()
+        tree = ast.parse(self.module().read_text(encoding="utf-8"))
+        sites = self.emitted(tree)
+        self.assertGreater(len(sites), 25, "the emit sites were not found")
+        spelled = ["line %d: %s should be %s"
+                   % (line, node.value, known[node.value])
+                   for line, node in sites
+                   if isinstance(node, ast.Constant) and node.value in known]
+        self.assertEqual(spelled, [],
+                         "these build or dispatch a command by a number this "
+                         "module has already named: " + "; ".join(spelled))
 
 
 class TestOneVocabularyForAPartialAnswer(ToolTest):

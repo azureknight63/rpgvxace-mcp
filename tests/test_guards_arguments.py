@@ -1164,6 +1164,29 @@ class TestAChoiceBranchIsNeverDropped(ToolTest):
         out = self.compile_choices(["Yes", "No"], [[{"comment": "y"}]])
         self.assertTrue(out)
 
+    def test_branches_that_are_not_a_list_are_refused(self):
+        """The refusal was written after the coercion that made it dead.
+
+        `branches = as_list(entry.get("branches"))` answers `[]` for anything
+        that is not a list, so the `isinstance` test below it could never be
+        true and `{"choices": ["a"], "branches": "nope"}` compiled as though
+        no branches had been asked for -- reporting the same success as a
+        page that got the branches it named. Same defect as this class's own,
+        one argument over.
+        """
+        for given in ("nope", {"0": [{"comment": "y"}]}, 3):
+            with self.subTest(branches=given):
+                with self.assertRaises((ToolError, CommandError)) as caught:
+                    self.compile_choices(["Yes", "No"], given)
+                self.assertIn("branches", str(caught.exception))
+
+    def test_no_branches_at_all_is_still_allowed(self):
+        """Absent is not malformed: Show Choices with no bodies is legal."""
+        out = self.call("event_edit", map_id=1, dry_run=True, ops=[{
+            "op": "set_commands", "event_id": 1, "page": 0,
+            "commands": [{"choices": ["Yes", "No"]}]}])
+        self.assertTrue(out)
+
 
 class TestTwoSpellingsOfOneArgumentAgree(ToolTest):
     """`db_get id=N` and `db_get ids=[N]` are the same request.

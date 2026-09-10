@@ -39,6 +39,9 @@ from rpgvxace_mcp.tools.registry import (  # noqa: E402
     ToolError,
 )
 from rpgvxace_mcp.tools import map_read_tools  # noqa: E402
+from rpgvxace_mcp.tools.search_tools import (  # noqa: E402
+    MAX_SUBJECT_BYTES,
+)
 from tool_case import (  # noqa: E402
     SharedObjectMap,
     ToolTest,
@@ -768,13 +771,13 @@ class TestASearchSaysWhatItDidNotRead(ValidateTest):
     """A plain substring search reports a subject it truncated.
 
     `_Matcher` exists because "a regex reads the first 2,000 characters and
-    a plain search reads all of it" was invisible, and its docstring says
-    so. The command scope then truncated the *text* before the matcher saw
-    it -- `value.data[:MAX_SUBJECT_CHARS * 4]` in `_command_texts` -- while
-    `clipped` is counted only `if not self.whole`. So for a plain search
+    a plain search reads all of it" was invisible, and its docstring said
+    so. Then the slicing moved: `subject_text` cuts every subject at
+    `MAX_SUBJECT_BYTES` before decoding it, whatever the scope, while
+    `clipped` was counted only `if not self.whole`. So for a plain search
     the difference moved out of the matcher and became invisible again:
-    the needle past 8,000 bytes of one script line returns no hits, and the
-    reply says nothing about a subject it cut.
+    a needle past that many bytes of one string returns no hits, and the
+    reply said nothing about a subject it cut.
 
     Both halves are checked here, because the reply being honest matters
     whether or not this particular needle is found: either the hit comes
@@ -782,8 +785,8 @@ class TestASearchSaysWhatItDidNotRead(ValidateTest):
     the defect.
     """
 
-    # Past `MAX_SUBJECT_CHARS * 4`, which is where `_command_texts` cuts.
-    FAR = 9000
+    # Past `MAX_SUBJECT_BYTES`, which is where `subject_text` cuts.
+    FAR = MAX_SUBJECT_BYTES + 1000
 
     def craft_a_long_line(self, needle):
         """One comment line with `needle` past the byte cap."""

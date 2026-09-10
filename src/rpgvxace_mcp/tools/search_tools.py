@@ -29,7 +29,9 @@ from ..rubytypes import (
 )
 from ..schema import ARRAY, HASH
 from .pattern_safety import (
+    MAX_SUBJECT_BYTES,
     MEASURED_FLAGS,
+    PREFLIGHT_SUBJECT_CHARS,
     PatternTooCostly,
     check_pattern,
 )
@@ -66,14 +68,12 @@ MAX_PATTERN_CHARS = 512
 # How much of one candidate string a pattern is matched against. A minified
 # script line can be tens of thousands of characters, and match cost grows with
 # the subject; a hit past this point is not one a person was looking for.
-MAX_SUBJECT_CHARS = 2000
-
-# The same cap in bytes, for slicing before a decode: a UTF-8 character is
-# at most four bytes, so this can never cut a subject the matcher would
-# have read. Named because the product was written twice, once in the
-# slice and once in the test that reports the cut -- and a change to the
-# factor in one of the two makes the report wrong while the slice is right.
-MAX_SUBJECT_BYTES = MAX_SUBJECT_CHARS * 4
+#
+# `pattern_safety`'s, because that is the length its cost measurement runs
+# against and the two have to be the same number for the measurement to
+# mean anything. `MAX_SUBJECT_BYTES` comes from there too, and is
+# re-exported here because this is the module that slices with it.
+MAX_SUBJECT_CHARS = PREFLIGHT_SUBJECT_CHARS
 
 # How long one search may spend applying its pattern.
 #
@@ -127,15 +127,18 @@ SEARCH_SCOPES = ["events", "database", "maps", "scripts"]
         "query": prop(STR, "Text to look for (case-insensitive substring, or "
                            "a regular expression when regex is true). At most "
                            "%d characters, and as a regular expression only "
-                           "%d characters of each string are matched -- the "
-                           "reply says when that clipped anything. "
+                           "%d characters of each string are matched; a "
+                           "plain substring search reads the first %s bytes "
+                           "of each. The reply says when either clipped "
+                           "anything. "
                            "Lookahead, lookbehind and conditional groups are "
                            "refused outright, as are a repeated group that "
                            "can match more than one way -- (a+)+, (a|ab)* -- "
                            "and long chains of optional or repeated parts: "
                            "each can backtrack for longer than this server "
                            "can be interrupted."
-                           % (MAX_PATTERN_CHARS, MAX_SUBJECT_CHARS),
+                           % (MAX_PATTERN_CHARS, MAX_SUBJECT_CHARS,
+                              "{:,}".format(MAX_SUBJECT_BYTES)),
                       maxLength=MAX_PATTERN_CHARS),
         "regex": prop(BOOL, "Treat query as a Python regular expression."),
         "command_code": prop(INT, "Find every event command with this code, "
@@ -618,9 +621,13 @@ def _matcher(args: dict[str, Any], query: str | None) -> "_Matcher | None":
 class _Matcher:
     """One search's text test: how much text it skipped, and when it gave up.
 
-    A regex is matched against the first MAX_SUBJECT_CHARS of each candidate
-    while a plain substring search reads all of it. That difference used to be
-    invisible: a regex search of a project with long script lines or note
+    A regex is matched against the first MAX_SUBJECT_CHARS *characters* of
+    each candidate, and a plain substring search the first
+    MAX_SUBJECT_BYTES *bytes* -- two windows, neither of them the whole
+    string. "A plain search reads all of it" was true of the first version
+    of this and is what four docstrings and one caller-facing timeout
+    message still said after `subject_text` started slicing. That
+    difference used to be invisible: a regex search of a project with long script lines or note
     fields reported "no hits" for text that was there, and reported it in the
     same shape as a search that had genuinely looked everywhere. So the
     shortfall is counted and `search` reports it, because a caller that cannot

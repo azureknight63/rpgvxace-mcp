@@ -257,7 +257,14 @@ VARIABLE_OPERATIONS = {0: "=", 1: "+=", 2: "-=", 3: "*=", 4: "/=", 5: "%="}
 # Operand kinds for Control Variables (122). 0-2 are the same on both engines.
 # The higher numbers are VX's; VX Ace reorganised them, and this server does not
 # claim to know that layout -- read a working 122 with event_get include_raw.
-SHARED_VARIABLE_OPERANDS = {0: "constant", 1: "variable", 2: "random"}
+# Named because `_compile_variable` writes these three numbers and
+# `_variables_line` reads them back, so the meaning of 1 lived in this
+# table, in a bare assignment in the writer and in a bare comparison in
+# the reader -- three places for one fact.
+OPERAND_CONSTANT, OPERAND_VARIABLE, OPERAND_RANDOM = 0, 1, 2
+SHARED_VARIABLE_OPERANDS = {OPERAND_CONSTANT: "constant",
+                            OPERAND_VARIABLE: "variable",
+                            OPERAND_RANDOM: "random"}
 VX_VARIABLE_OPERANDS = {**SHARED_VARIABLE_OPERANDS,
                         3: "item", 4: "actor", 5: "enemy", 6: "character",
                         7: "other"}
@@ -282,15 +289,14 @@ CODE_TRANSFER_PLAYER = 201
 CODE_CALL_COMMON_EVENT = 117
 CODE_SCRIPT, CODE_SCRIPT_MORE = 355, 655
 CODE_COMMENT = 108
-# The three other ways an event can hand control back: for itself,
-# and twice for the game. Named because the autorun rule reads them
-# as a set beside CODE_TRANSFER_PLAYER, and three bare integers in
-# that set were the only members a reader had to look up.
-# The codes `compile_commands` emits. Named because the compiler's
-# dispatch table spelled seven of them as bare integers beside six
-# that had names, in the same chain -- and a module that names some
-# of its codes and not others is one where the next one gets a name
-# only if the author happens to look up.
+# The codes `compile_commands` emits and `summarize` dispatches on --
+# including the three other ways an event hands control back
+# (CODE_EXIT_EVENT for itself, CODE_GAME_OVER and CODE_RETURN_TO_TITLE
+# for the game), which the autorun rule reads as a set beside
+# CODE_TRANSFER_PLAYER. Named because those two tables spelled most of
+# them as bare integers beside a few that had names, and a module that
+# names some of its codes and not others is one where the next one gets
+# a name only if the author happens to look.
 CODE_EXIT_EVENT = 115
 CODE_LOOP = 112
 CODE_BREAK_LOOP = 113
@@ -306,6 +312,13 @@ CODE_RETURN_TO_TITLE = 354
 # above have names -- and it spelled all eight numbers out anyway.
 CODE_TEXT_LINE = 401
 CODE_COMMENT_LINE = 408
+CODE_SHOW_CHOICES = 102
+CODE_CHOICE_BRANCH = 402
+CODE_CONDITIONAL_BRANCH = 111
+CODE_CONTROL_VARIABLES = 122
+CODE_SET_MOVE_ROUTE = 205
+CODE_BATTLE_PROCESSING = 301
+CODE_MOVE_ROUTE_STEP = 505
 
 # Transfer Player (201): designation, map_id, x, y, direction, fade.
 TRANSFER_MAP, TRANSFER_X, TRANSFER_Y = 1, 2, 3
@@ -413,6 +426,122 @@ def _param(params: list[Any], index: int, default: Any = None) -> Any:
     return params[index] if len(params) > index else default
 
 
+class _Params:
+    """One command's parameters, read by position with a default.
+
+    A small callable object rather than the closure the `if` chain used, so
+    that a renderer can take one argument and still reach the whole list:
+    `describe_condition` wants the list, and the choices renderer wants
+    `as_list(p(0))`.
+    """
+
+    __slots__ = ("params",)
+
+    def __init__(self, params: list[Any]):
+        self.params = params
+
+    def __call__(self, index: int, default: Any = None) -> Any:
+        return _param(self.params, index, default)
+
+
+def _show_text_line(p: "_Params", codec: TextCodec, name: str) -> str:
+    face = _text(p(0, ""), codec)
+    detail = "face %s[%s]" % (face, p(1, 0)) if face else "no face"
+    return "%s (%s)" % (name, detail)
+
+
+def _choices_line(p: "_Params", codec: TextCodec, name: str) -> str:
+    # `MAX_CHOICES` is the *authoring* ceiling; this list's length comes out
+    # of the file, so it is not bounded by it. Rendering is capped rather
+    # than the result, because a crafted Array of a million links to one
+    # string is three megabytes on disk.
+    return "%s: %s" % (name, rendered(as_list(p(0)),
+                                      lambda c: _text(c, codec),
+                                      separator=" / "))
+
+
+def _variables_line(p: "_Params", codec: TextCodec, name: str) -> str:
+    target = _id_range(p(0, 0), p(1, 0), "variable", "variables")
+    kind = p(3)
+    if kind == OPERAND_RANDOM:
+        value = "random %s..%s" % (p(4), p(5))
+    elif kind == OPERAND_VARIABLE:
+        value = "variable %s" % p(4)
+    elif kind in SHARED_VARIABLE_OPERANDS:
+        value = _value(p(4), codec)
+    else:
+        # A kind this server does not claim to know: show it rather than
+        # label the parameter as though the layout were confirmed.
+        value = "operand kind %s: %s" % (kind, _value(p(4), codec))
+    return "%s: %s %s %s" % (name, target,
+                             VARIABLE_OPERATIONS.get(p(2), "?"), value)
+
+
+def _move_step_line(p: "_Params", codec: TextCodec, name: str) -> str:
+    move = p(0)
+    if isinstance(move, RubyObject):
+        move_code = move.get("code", CODE_BLANK)
+        return "> %s" % MOVE_COMMAND_NAMES.get(move_code,
+                                               "Move %s" % move_code)
+    return "> Move Command"
+
+
+# The codes `summarize` renders specially, and how. Keyed by code, which is
+# what the ninety-eight-line `if` chain this replaced dispatched on by hand
+# -- and seven of those tests named a bare integer beside twenty that used a
+# constant, in the module that defines them. As table keys they are named
+# once, and `TestACodeWithAConstantIsSpelledWithIt` reads the keys.
+#
+# Every renderer takes the same three arguments and ignores what it does not
+# need, so the table can be walked without asking which shape each has --
+# the arrangement `_COMPILERS` uses for the compiler, with the same rule for
+# lambda versus named function: a lambda when the whole rendering is one
+# expression, a named function as soon as it needs a statement.
+#
+# The two set-membership arms and the spec fallback are deliberately not
+# here: a renderer is chosen by equality, while "any audio command" and "any
+# code with a declared parameter spec" are different questions, asked in
+# `summarize` in the order they were asked before.
+_SUMMARY_RENDERERS: "dict[int, Callable[..., str]]" = {
+    CODE_BLANK: lambda p, codec, name: "",
+    CODE_TEXT_LINE: lambda p, codec, name: '"%s"' % _text(p(0, ""), codec),
+    CODE_COMMENT_LINE: lambda p, codec, name: '"%s"' % _text(p(0, ""), codec),
+    CODE_SCRIPT_MORE: lambda p, codec, name: '"%s"' % _text(p(0, ""), codec),
+    CODE_SHOW_TEXT: _show_text_line,
+    CODE_COMMENT: lambda p, codec, name: (
+        "Comment: %s" % _text(p(0, ""), codec)),
+    CODE_SHOW_CHOICES: _choices_line,
+    CODE_CHOICE_BRANCH: lambda p, codec, name: (
+        'When "%s"' % _text(p(1, ""), codec)),
+    CODE_CONDITIONAL_BRANCH: lambda p, codec, name: (
+        "%s: %s" % (name, describe_condition(p.params, codec))),
+    CODE_CONTROL_SWITCHES: lambda p, codec, name: (
+        "%s: %s = %s" % (name,
+                         _id_range(p(0, 0), p(1, 0), "switch", "switches"),
+                         SWITCH_OPERATIONS.get(p(2), p(2)))),
+    CODE_CONTROL_VARIABLES: _variables_line,
+    CODE_CONTROL_SELF_SWITCH: lambda p, codec, name: (
+        "%s: %s = %s" % (name, _text(p(0, ""), codec),
+                         SWITCH_OPERATIONS.get(p(1), p(1)))),
+    CODE_CALL_COMMON_EVENT: lambda p, codec, name: "%s: %s" % (name, p(0)),
+    CODE_TRANSFER_PLAYER: lambda p, codec, name: (
+        "%s: map %s at (%s, %s)"
+        % (name, p(TRANSFER_MAP), p(TRANSFER_X), p(TRANSFER_Y))),
+    CODE_SET_MOVE_ROUTE: lambda p, codec, name: (
+        "%s: %s" % (name, _character(p(0)))),
+    CODE_WAIT: lambda p, codec, name: "%s: %s frames" % (name, p(0)),
+    CODE_BATTLE_PROCESSING: lambda p, codec, name: (
+        "%s: troop %s" % (name, p(1))),
+    CODE_SCRIPT: lambda p, codec, name: (
+        "%s: %s" % (name, _text(p(0, ""), codec))),
+    CODE_MOVE_ROUTE_STEP: _move_step_line,
+    CODE_LABEL: lambda p, codec, name: (
+        "%s: %s" % (name, _text(p(0, ""), codec))),
+    CODE_JUMP_TO_LABEL: lambda p, codec, name: (
+        "%s: %s" % (name, _text(p(0, ""), codec))),
+}
+
+
 def summarize(command: RubyObject, codec: TextCodec) -> str:
     """One readable line describing a single command.
 
@@ -420,81 +549,21 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
     because naming a code the open engine happens not to dispatch is harmless
     while failing to name one it does is not.
     """
-    code = command.get("code", 0) or 0
+    code = command.get("code", CODE_BLANK) or CODE_BLANK
     # `as_list`, not `or []`: a non-empty RubyHash here is truthy and
     # reaches `params[index]` as a TypeError.
     params = as_list(command.get("parameters"))
     name = command_name(code)
+    p = _Params(params)
 
-    def p(index: int, default: Any = None) -> Any:
-        return _param(params, index, default)
-
-    if code == CODE_BLANK:
-        return ""
-    if code in (CODE_TEXT_LINE, CODE_COMMENT_LINE, CODE_SCRIPT_MORE):
-        return '"%s"' % _text(p(0, ""), codec)
-    if code == CODE_SHOW_TEXT:
-        face = _text(p(0, ""), codec)
-        detail = "face %s[%s]" % (face, p(1, 0)) if face else "no face"
-        return "%s (%s)" % (name, detail)
-    if code == CODE_COMMENT:
-        return "Comment: %s" % _text(p(0, ""), codec)
-    if code == 102:
-        # `MAX_CHOICES` is the *authoring* ceiling; this list's length comes
-        # out of the file, so it is not bounded by it. Rendering is capped
-        # rather than the result, because a crafted Array of a million links
-        # to one string is three megabytes on disk.
-        return "%s: %s" % (name, rendered(as_list(p(0)),
-                                          lambda c: _text(c, codec),
-                                          separator=" / "))
-    if code == 402:
-        return 'When "%s"' % _text(p(1, ""), codec)
-    if code == 111:
-        return "%s: %s" % (name, describe_condition(params, codec))
-    if code == CODE_CONTROL_SWITCHES:
-        target = _id_range(p(0, 0), p(1, 0), "switch", "switches")
-        return "%s: %s = %s" % (name, target, SWITCH_OPERATIONS.get(p(2), p(2)))
-    if code == 122:
-        target = _id_range(p(0, 0), p(1, 0), "variable", "variables")
-        kind = p(3)
-        if kind == 2:  # random range
-            value = "random %s..%s" % (p(4), p(5))
-        elif kind == 1:
-            value = "variable %s" % p(4)
-        elif kind in SHARED_VARIABLE_OPERANDS:
-            value = _value(p(4), codec)
-        else:
-            # A kind this server does not claim to know: show it rather than
-            # label the parameter as though the layout were confirmed.
-            value = "operand kind %s: %s" % (kind, _value(p(4), codec))
-        return "%s: %s %s %s" % (name, target, VARIABLE_OPERATIONS.get(p(2), "?"), value)
-    if code == CODE_CONTROL_SELF_SWITCH:
-        return "%s: %s = %s" % (name, _text(p(0, ""), codec),
-                                SWITCH_OPERATIONS.get(p(1), p(1)))
-    if code == CODE_CALL_COMMON_EVENT:
-        return "%s: %s" % (name, p(0))
-    if code == CODE_TRANSFER_PLAYER:
-        return "%s: map %s at (%s, %s)" % (name, p(1), p(2), p(3))
-    if code == 205:
-        return "%s: %s" % (name, _character(p(0)))
-    if code == CODE_WAIT:
-        return "%s: %s frames" % (name, p(0))
+    render = _SUMMARY_RENDERERS.get(code)
+    if render is not None:
+        return render(p, codec, name)
     if code in AUDIO_COMMAND_KINDS:
         audio = p(0)
-        audio_name = _text(audio.get("name"), codec) if isinstance(audio, RubyObject) else "?"
+        audio_name = (_text(audio.get("name"), codec)
+                      if isinstance(audio, RubyObject) else "?")
         return "%s: %s" % (name, audio_name)
-    if code == 301:
-        return "%s: troop %s" % (name, p(1))
-    if code == CODE_SCRIPT:
-        return "%s: %s" % (name, _text(p(0, ""), codec))
-    if code == 505:
-        move = p(0)
-        if isinstance(move, RubyObject):
-            move_code = move.get("code", 0)
-            return "> %s" % MOVE_COMMAND_NAMES.get(move_code, "Move %s" % move_code)
-        return "> Move Command"
-    if code in (CODE_LABEL, CODE_JUMP_TO_LABEL):
-        return "%s: %s" % (name, _text(p(0, ""), codec))
 
     spec = ALL_PARAM_SPECS.get(code)
     if spec and spec[-1] != VARIADIC:
@@ -651,8 +720,10 @@ def _compile_raw(entry: dict[str, Any], enc: TextCodec, indent: int,
                  depth: int) -> list[RubyObject]:
     """Any command at all, by code and parameters.
 
-    The escape hatch, and first in the table: an entry carrying `raw`
-    alongside anything else means the caller wanted the code they named.
+    The escape hatch for a command this DSL has no form for. An entry may
+    not carry `raw` *and* another recognised key -- `compile_commands`
+    refuses that rather than choosing -- so this being first in the table
+    means nothing.
     """
     raw = _needs_object(entry["raw"], "raw")
     if "code" not in raw:
@@ -711,58 +782,6 @@ def _compile_transfer(entry: dict[str, Any], enc: TextCodec, indent: int,
         _needs_int(t.get("direction", 0), "transfer.direction"),
         _needs_int(t.get("fade", 0), "transfer.fade"),
     ])]
-
-
-# Every entry key the DSL accepts, and what compiles it. One table rather
-# than a chain of seventeen `if "key" in entry` tests with the same
-# seventeen literals written again as a set below it: nothing held the two
-# equal, so a branch added without the set under-reported what works, and a
-# set entry added without the branch advertised a key that raises
-# "unrecognised". Neither was caught.
-#
-# The order is the dispatch order, which the chain expressed by position and
-# this expresses by being read top to bottom. It matters for an entry
-# carrying two keys: `raw` is first because a caller who names a code wanted
-# that code.
-#
-# Every value takes the same four arguments and ignores what it does not
-# need, so the table can be walked without asking which shape each has.
-_COMPILERS: "dict[str, Callable[..., list[RubyObject]]]" = {
-    "raw": _compile_raw,
-    "text": lambda entry, enc, indent, depth: _compile_text(
-        entry, enc, indent),
-    "comment": lambda entry, enc, indent, depth: _multiline(
-        CODE_COMMENT, CODE_COMMENT_LINE, str(entry["comment"]), enc, indent),
-    "script": lambda entry, enc, indent, depth: _multiline(
-        CODE_SCRIPT, CODE_SCRIPT_MORE, str(entry["script"]), enc, indent),
-    "switch": _compile_switch,
-    "self_switch": _compile_self_switch,
-    "variable": lambda entry, enc, indent, depth: _compile_variable(
-        entry, indent),
-    "wait": lambda entry, enc, indent, depth: [
-        _cmd(CODE_WAIT, indent, [_needs_int(entry["wait"], "wait")])],
-    "common_event": lambda entry, enc, indent, depth: [
-        _cmd(CODE_CALL_COMMON_EVENT, indent,
-             [_needs_int(entry["common_event"], "common_event")])],
-    "label": lambda entry, enc, indent, depth: [
-        _cmd(CODE_LABEL, indent, [enc.make_string(str(entry["label"]))])],
-    "jump": lambda entry, enc, indent, depth: [
-        _cmd(CODE_JUMP_TO_LABEL, indent,
-             [enc.make_string(str(entry["jump"]))])],
-    "transfer": _compile_transfer,
-    "exit": lambda entry, enc, indent, depth: [
-        _cmd(CODE_EXIT_EVENT, indent, [])],
-    "if": lambda entry, enc, indent, depth: _compile_if(
-        entry, enc, indent, depth),
-    "loop": _compile_loop,
-    "break_loop": lambda entry, enc, indent, depth: [
-        _cmd(CODE_BREAK_LOOP, indent, [])],
-    "choices": lambda entry, enc, indent, depth: _compile_choices(
-        entry, enc, indent, depth),
-}
-
-# Derived, so it cannot disagree with what is dispatched.
-SUPPORTED_KEYS = frozenset(_COMPILERS)
 
 
 def _multiline(first_code: int, continuation_code: int, text: str,
@@ -827,7 +846,7 @@ def _compile_variable(entry: dict[str, Any], indent: int) -> list[RubyObject]:
             % (operation, ", ".join(sorted(VARIABLE_OP_CODES)))
         )
     if "from_variable" in entry:
-        operand_type = 1
+        operand_type = OPERAND_VARIABLE
         operand = _needs_int(entry["from_variable"], "from_variable")
         operand2 = 0
     elif "random" in entry:
@@ -841,20 +860,22 @@ def _compile_variable(entry: dict[str, Any], indent: int) -> list[RubyObject]:
             raise CommandError(
                 "random takes two whole numbers, [low, high]; got %r"
                 % (bounds,))
-        operand_type = 2
+        operand_type = OPERAND_RANDOM
         operand = _needs_int(bounds[0], "random low")
         operand2 = _needs_int(bounds[1], "random high")
     else:
-        operand_type = 0
+        operand_type = OPERAND_CONSTANT
         operand = _needs_int(entry.get("value", 0), "value")
         operand2 = 0
-    return [_cmd(122, indent, [variable_id, end, op_code, operand_type, operand, operand2])]
+    return [_cmd(CODE_CONTROL_VARIABLES, indent,
+                 [variable_id, end, op_code, operand_type, operand,
+                  operand2])]
 
 
 def _compile_if(entry: dict[str, Any], enc: TextCodec, indent: int,
                 depth: int = 0) -> list[RubyObject]:
     params = _compile_condition(_needs_object(entry["if"], "if"), enc)
-    out = [_cmd(111, indent, params)]
+    out = [_cmd(CODE_CONDITIONAL_BRANCH, indent, params)]
     out += compile_commands(entry.get("then", []), enc, indent + 1, depth + 1)
     if entry.get("else"):
         out.append(_cmd(411, indent, []))
@@ -904,10 +925,16 @@ def _compile_choices(entry: dict[str, Any], enc: TextCodec, indent: int,
     if not 1 <= len(choices) <= MAX_CHOICES:
         raise CommandError("the engine allows 1 to %d choices, got %d"
                            % (MAX_CHOICES, len(choices)))
-    branches = as_list(entry.get("branches"))
-    if not isinstance(branches, (list, tuple)):
+    # Tested before `as_list`, which answers `[]` for anything that is not
+    # a list -- so this refusal was unreachable and
+    # `{"choices": ["a"], "branches": "nope"}` compiled as though no
+    # branches had been asked for, reporting the same success as a page
+    # that got the branches it named.
+    given = entry.get("branches")
+    if given is not None and not isinstance(given, list):
         raise CommandError("branches must be an array of command lists, "
-                           "got %r" % (branches,))
+                           "got %r" % (given,))
+    branches = as_list(given)
     if len(branches) > len(choices):
         # Refused, not truncated. `body = branches[index] if index <
         # len(branches) else []` compiled the first len(choices) and dropped
@@ -926,9 +953,11 @@ def _compile_choices(entry: dict[str, Any], enc: TextCodec, indent: int,
     # that choice, 5 routes to a When Cancel branch. Passed through verbatim so
     # an explicit value always wins.
     cancel = entry.get("cancel", 5 if cancel_branch is not None else 0)
-    out = [_cmd(102, indent, [[enc.make_string(str(c)) for c in choices], int(cancel)])]
+    out = [_cmd(CODE_SHOW_CHOICES, indent,
+                [[enc.make_string(str(c)) for c in choices], int(cancel)])]
     for index, choice in enumerate(choices):
-        out.append(_cmd(402, indent, [index, enc.make_string(str(choice))]))
+        out.append(_cmd(CODE_CHOICE_BRANCH, indent,
+                        [index, enc.make_string(str(choice))]))
         body = branches[index] if index < len(branches) else []
         out += compile_commands(body, enc, indent + 1, depth + 1)
     if cancel_branch is not None:
@@ -936,6 +965,63 @@ def _compile_choices(entry: dict[str, Any], enc: TextCodec, indent: int,
         out += compile_commands(cancel_branch, enc, indent + 1, depth + 1)
     out.append(_cmd(404, indent, []))
     return out
+
+
+# Every entry key the DSL accepts, and what compiles it. One table rather
+# than a chain of seventeen `if "key" in entry` tests with the same
+# seventeen literals written again as a set below it: nothing held the two
+# equal, so a branch added without the set under-reported what works, and a
+# set entry added without the branch advertised a key that raises
+# "unrecognised". Neither was caught.
+#
+# The order is immaterial, and saying otherwise here was wrong: an entry
+# carrying two recognised keys is refused by `compile_commands` before this
+# table is consulted, so no entry can ever match twice. The order is source
+# order because a table reads better grouped than sorted.
+#
+# Every value takes the same four arguments and ignores what it does not
+# need, so the table can be walked without asking which shape each has. A
+# named compiler appears bare when it takes those four as they come; a
+# lambda is what adapts one taking fewer, or spells out a body short enough
+# that a named function would only give it a second name. Six were lambdas
+# for neither reason: the table used to sit above half the compilers, so a
+# lambda was standing in for the file's layout, and the rule it looked like
+# it followed was not one anybody had chosen. It lives below all of them
+# now.
+_COMPILERS: "dict[str, Callable[..., list[RubyObject]]]" = {
+    "raw": _compile_raw,
+    "text": lambda entry, enc, indent, depth: _compile_text(
+        entry, enc, indent),
+    "comment": lambda entry, enc, indent, depth: _multiline(
+        CODE_COMMENT, CODE_COMMENT_LINE, str(entry["comment"]), enc, indent),
+    "script": lambda entry, enc, indent, depth: _multiline(
+        CODE_SCRIPT, CODE_SCRIPT_MORE, str(entry["script"]), enc, indent),
+    "switch": _compile_switch,
+    "self_switch": _compile_self_switch,
+    "variable": lambda entry, enc, indent, depth: _compile_variable(
+        entry, indent),
+    "wait": lambda entry, enc, indent, depth: [
+        _cmd(CODE_WAIT, indent, [_needs_int(entry["wait"], "wait")])],
+    "common_event": lambda entry, enc, indent, depth: [
+        _cmd(CODE_CALL_COMMON_EVENT, indent,
+             [_needs_int(entry["common_event"], "common_event")])],
+    "label": lambda entry, enc, indent, depth: [
+        _cmd(CODE_LABEL, indent, [enc.make_string(str(entry["label"]))])],
+    "jump": lambda entry, enc, indent, depth: [
+        _cmd(CODE_JUMP_TO_LABEL, indent,
+             [enc.make_string(str(entry["jump"]))])],
+    "transfer": _compile_transfer,
+    "exit": lambda entry, enc, indent, depth: [
+        _cmd(CODE_EXIT_EVENT, indent, [])],
+    "if": _compile_if,
+    "loop": _compile_loop,
+    "break_loop": lambda entry, enc, indent, depth: [
+        _cmd(CODE_BREAK_LOOP, indent, [])],
+    "choices": _compile_choices,
+}
+
+# Derived, so it cannot disagree with what is dispatched.
+SUPPORTED_KEYS = frozenset(_COMPILERS)
 
 
 def _switch_state(mapping: dict[str, Any], default: str = "on") -> int:
@@ -1032,7 +1118,7 @@ def move_route_steps(route: RubyObject, indent: int) -> list[RubyObject]:
     steps = []
     for move in as_list(route.get("list")):
         if isinstance(move, RubyObject) and (move.get("code", 0) or 0) != 0:
-            steps.append(_cmd(505, indent, [move]))
+            steps.append(_cmd(CODE_MOVE_ROUTE_STEP, indent, [move]))
     return steps
 
 

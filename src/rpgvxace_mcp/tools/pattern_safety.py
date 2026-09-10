@@ -273,10 +273,21 @@ class _Atom:
 # usable test rather than a coin toss on a loaded machine.
 PREFLIGHT_SECONDS = 2.0
 
-# The subject length the child matches against. The same cap `search` applies
-# to each candidate string, so the measurement is of the worst case the tool
-# can actually reach.
+# The subject length the child matches against, and the same cap `search`
+# applies to each candidate string -- so the measurement is of the worst
+# case the tool can actually reach. `search_tools.MAX_SUBJECT_CHARS` is
+# this name, not a second 2000: the claim that the two are equal was
+# written in a comment beside two independent literals, either of which
+# could have moved.
 PREFLIGHT_SUBJECT_CHARS = 2000
+
+# The same window in bytes, for slicing a subject before it is decoded: a
+# UTF-8 character is at most four bytes, so this can never cut text the
+# matcher would have read. Here rather than in `search_tools`, which does
+# the slicing, because the timeout verdict below quotes the figure and
+# `search_tools` imports this module -- so the alternative was the factor
+# written twice, which is what naming the product exists to prevent.
+MAX_SUBJECT_BYTES = PREFLIGHT_SUBJECT_CHARS * 4
 
 # How many characters of a pattern's alphabet get a homogeneous subject of
 # their own. Beyond this they share one subject that gives each a run, so a
@@ -303,6 +314,19 @@ MAX_SINGLE_CHARACTER_SUBJECTS = 8
 COMPILE_FAILED_EXIT = 17
 
 
+# The exit code for stdin that does not hold a pattern line and at least one
+# subject line. `split()` on whitespace dropped an empty first token, so an
+# empty pattern shifted every line up: the child compiled the first
+# *subject*, matched the rest, printed "ok" and exited 0, and `_remember`
+# cached a pass for a pattern nobody had measured -- the one outcome
+# `_PASSED`'s comment says must never happen. Unreachable today, since
+# `_matcher` returns None for a falsy query, so this is a boundary check
+# and not a fix for a live bug. Split on newlines now, which cannot drop a
+# field, and the count is checked rather than assumed -- a refusal exit,
+# because every way this check fails to produce an answer is a refusal.
+PROTOCOL_BROKEN_EXIT = 18
+
+
 # What the child prints once it has matched every subject. A clean exit
 # says the interpreter finished; this says the measurement did, which is
 # a different fact and the one being relied on.
@@ -317,7 +341,9 @@ MEASURED_FLAGS = re.IGNORECASE
 
 _CHILD = (
     "import base64, re, sys\n"
-    "lines = sys.stdin.read().split()\n"
+    "lines = sys.stdin.read().split(chr(10))\n"
+    "if len(lines) < 2 or not lines[0]:\n"
+    "    sys.exit(%d)\n"
     "pattern = base64.b64decode(lines[0]).decode('utf-8')\n"
     "try:\n"
     "    compiled = re.compile(pattern, %d)\n"
@@ -325,8 +351,8 @@ _CHILD = (
     "    sys.exit(%d)\n"
     "for encoded in lines[1:]:\n"
     "    compiled.search(base64.b64decode(encoded).decode('utf-8'))\n"
-    "print('%s')\n") % (int(MEASURED_FLAGS), COMPILE_FAILED_EXIT,
-                        CHILD_DONE)
+    "print('%s')\n") % (PROTOCOL_BROKEN_EXIT, int(MEASURED_FLAGS),
+                        COMPILE_FAILED_EXIT, CHILD_DONE)
 
 # Patterns already measured and passed, in this process. A model searching for
 # the same thing across several scopes would otherwise pay for a child each
@@ -612,8 +638,8 @@ def measure_cost(pattern: str) -> None:
             "required between them do this: \"a*a*\", \"[a-z]+[a-z]+\", "
             "\"\\w+\\d+\". Put the literal text you are looking for "
             "between them, or leave regex off and search for a plain "
-            "substring, which reads every string in full."
-            % PREFLIGHT_SECONDS)
+            "substring, which reads the first %s bytes of each string."
+            % (PREFLIGHT_SECONDS, "{:,}".format(MAX_SUBJECT_BYTES)))
     except OSError as exc:
         verdict = (
             "this server could not run its safety check on that pattern (%s), "

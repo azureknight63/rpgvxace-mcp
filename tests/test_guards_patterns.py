@@ -519,6 +519,37 @@ class TestTheMeasurementReachesItsChild(unittest.TestCase):
                              "nothing was written to the child's stdin")
 
 
+class TestTheChildRefusesAStdinItCannotParse(unittest.TestCase):
+    """A pass for a pattern nobody measured is the outcome that must not happen.
+
+    The child read its stdin with `split()`, which splits on whitespace and
+    drops empty fields, so an empty pattern line shifted every line up: the
+    child compiled the first *subject*, matched the rest of them, printed
+    "ok" and exited 0. `_remember` then cached a pass for a pattern that had
+    never been measured -- and `_PASSED`'s own comment says a stored refusal
+    "would be served as a pass, which is why only `_remember` writes to
+    this".
+
+    Unreachable through `search` today: `_matcher` returns None for a falsy
+    query, and `_subjects` cannot be empty because of its `or ["a"]`. Tested
+    at the boundary anyway, because both of those are two calls away and
+    neither says it is holding this up.
+    """
+
+    def setUp(self):
+        from rpgvxace_mcp.tools import pattern_safety
+        self.safety = pattern_safety
+        self.addCleanup(pattern_safety._PASSED.pop, "", None)
+
+    def test_an_empty_pattern_is_refused_and_not_remembered(self):
+        with self.assertRaises(self.safety.PatternTooCostly) as caught:
+            self.safety.measure_cost("")
+        self.assertIn("%d" % self.safety.PROTOCOL_BROKEN_EXIT,
+                      str(caught.exception))
+        self.assertNotIn("", self.safety._PASSED,
+                         "an unmeasured pattern was cached as a pass")
+
+
 class TestWhatTheMeasurementRemembers(unittest.TestCase):
     """A cached verdict is a cached *timing* observation.
 

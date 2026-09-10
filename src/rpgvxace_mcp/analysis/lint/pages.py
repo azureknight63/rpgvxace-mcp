@@ -63,6 +63,17 @@ def check_event_pages(project: Project, map_ids: list[int],
     set to get.
     """
     findings = _Findings.given(collected)
+    # No `checker.full` test anywhere in this walk, unlike every other
+    # holder of an `_AssetChecker`: the checker here is a passenger, while
+    # `shadowed_pages` and `unstoppable_autorun` collect into `findings`,
+    # so returning on a full checker would delete two rules' findings on
+    # any project with more missing graphics than the ceiling holds.
+    # `_check_map_assets` can test it because there the checker is the only
+    # thing it collects into. Nothing is saved by testing it either: the
+    # walk is bounded below by `findings.full` and the shared budget, and
+    # `_AssetChecker.check` returns on its first line. Held by
+    # `TestAFullAssetCheckerDoesNotStopThePageRules`, because this has been
+    # proposed as a fix twice and a comment is not a thing that fails.
     for map_id, game_map in iter_maps(project, map_ids):
         if checker is not None:
             map_assets(checker, map_id, game_map)

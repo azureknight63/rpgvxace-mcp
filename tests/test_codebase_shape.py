@@ -14,6 +14,7 @@ heading of another, and the seam was contiguous. No guard in
 which is why this was the split to do first.
 """
 
+import ast
 import re
 import sys
 import unittest
@@ -25,6 +26,31 @@ from rpgvxace_mcp.rubytypes import RubyHash  # noqa: E402
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+
+# The four directories every class here reads, derived once.
+# `Path(__file__).resolve().parent` was written out eleven more times
+# below, six of them with the same three-segment tail, in a file whose
+# subject is this codebase not repeating itself.
+ROOT = HERE.parent
+SRC = ROOT / "src"
+PACKAGE = SRC / "rpgvxace_mcp"
+TOOLS = PACKAGE / "tools"
+
+
+def python_files(*folders):
+    """Every `.py` file under these folders, sorted within each.
+
+    One enumerator: there were two, and they disagreed -- one used
+    `rglob` for all three folders, the other `rglob` for `src` and
+    `glob` for `tests` and `scripts`, so `tests/fixtures` was read by
+    one rule and not by the other with nothing saying which was meant.
+    Deep for all of them, which is the stricter of the two and the one
+    whose comment gives a reason.
+    """
+    out = []
+    for folder in folders:
+        out += sorted(folder.rglob("*.py"))
+    return out
 
 
 class TestToolModulesAreLeaves(unittest.TestCase):
@@ -42,7 +68,7 @@ class TestToolModulesAreLeaves(unittest.TestCase):
     """
 
     def folder(self):
-        root = Path(__file__).resolve().parent.parent / "src"
+        root = SRC
         return root / "rpgvxace_mcp" / "tools"
 
     def registers_a_tool(self, path):
@@ -76,7 +102,6 @@ class TestToolModulesAreLeaves(unittest.TestCase):
         self.assertGreater(len(names), 5)
 
     def test_no_tool_module_imports_from_a_sibling(self):
-        import ast
 
         crossings = []
         shared = self.shared_modules()
@@ -132,12 +157,9 @@ class TestOneBlankLineConvention(unittest.TestCase):
         # generator that wrote them joined the blocks with one newline --
         # so the rule was blind to the directory whose files this round
         # rewrote most.
-        root = Path(__file__).resolve().parent.parent
-        # `rglob` for all three: `tests/fixtures/build_project.py` sits
+        # Deep in all three: `tests/fixtures/build_project.py` sits
         # one directory down and was unread while this said "everywhere".
-        return (sorted((root / "src" / "rpgvxace_mcp").rglob("*.py"))
-                + sorted((root / "tests").rglob("*.py"))
-                + sorted((root / "scripts").rglob("*.py")))
+        return python_files(PACKAGE, HERE, ROOT / "scripts")
 
     def blanks_above(self, path):
         """How many blank lines sit above each top-level definition.
@@ -154,7 +176,6 @@ class TestOneBlankLineConvention(unittest.TestCase):
         A comment block immediately above a definition belongs to it, so
         the count is taken above the comment.
         """
-        import ast
         lines = path.read_text(encoding="utf-8").split("\n")
         tree = ast.parse("\n".join(lines))
         out = []
@@ -304,8 +325,7 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
 
     def tables(self):
         """Each layering table with the directory it describes."""
-        package = (Path(__file__).resolve().parent.parent / "src"
-                   / "rpgvxace_mcp")
+        package = PACKAGE
         return (("rpgvxace_mcp", self.ROOT_MODULES, package),
                 ("analysis", self.ANALYSIS, package / "analysis"),
                 ("lint", self.LINT, package / "analysis" / "lint"))
@@ -327,7 +347,6 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         dot, so the level that counts as "sibling" depends on where the file
         is. `lint/report.py` reaching `..walk` is `lint` reaching `walk`.
         """
-        import ast
         out = set()
         for path in paths:
             level = 1 if path.parent == where else 2
@@ -403,12 +422,9 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         tool modules learn which of three files a name lives in -- so the
         re-export is part of the claim and is checked the same way.
         """
-        import ast
         from rpgvxace_mcp import analysis
-        tools = (Path(__file__).resolve().parent.parent / "src"
-                 / "rpgvxace_mcp" / "tools")
         wanted = set()
-        for path in sorted(tools.glob("*.py")):
+        for path in python_files(TOOLS):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if (isinstance(node, ast.ImportFrom)
@@ -434,17 +450,14 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         linter load-bearing, and the argument for the boundary would be
         false while still being written down.
         """
-        import ast
         from rpgvxace_mcp import analysis
         of_the_linter = set(vars(analysis.lint))
         # A sanity check on the definition above, not on the code: if the
         # linter's own namespace came back empty this test would pass by
         # finding no importers of anything.
         self.assertIn("validate", of_the_linter)
-        tools = (Path(__file__).resolve().parent.parent / "src"
-                 / "rpgvxace_mcp" / "tools")
         importers = {}
-        for path in sorted(tools.glob("*.py")):
+        for path in python_files(TOOLS):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.ImportFrom):
@@ -470,11 +483,8 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         constant or an alias, so an introspecting version of this called
         `MAX_FINDINGS` and `_seq` dangling re-exports.
         """
-        import ast
-        root = (Path(__file__).resolve().parent.parent / "src"
-                / "rpgvxace_mcp" / "analysis")
         found = set()
-        paths = sorted(root.rglob("*.py"))
+        paths = python_files(PACKAGE / "analysis")
         self.assertGreater(len(paths), 5, "read almost nothing")
         for path in paths:
             if path.name == "__init__.py":
@@ -603,11 +613,9 @@ class TestEveryMixinContractHolds(unittest.TestCase):
     )
 
     def source(self, where):
-        return (Path(__file__).resolve().parent.parent
-                / where).read_text(encoding="utf-8")
+        return (ROOT / where).read_text(encoding="utf-8")
 
     def declared(self, where, name, tuple_name):
-        import ast
         for node in ast.parse(self.source(where)).body:
             if isinstance(node, ast.ClassDef) and node.name == name:
                 for inner in node.body:
@@ -619,7 +627,6 @@ class TestEveryMixinContractHolds(unittest.TestCase):
 
     def reached(self, where, name):
         """Every `self.<name>` the mixin reads that it does not define."""
-        import ast
         cls = next(node for node in ast.parse(self.source(where)).body
                    if isinstance(node, ast.ClassDef) and node.name == name)
         out = {node.attr for node in ast.walk(cls)
@@ -716,16 +723,12 @@ class TestImportBlocksAreInOrder(unittest.TestCase):
     """
 
     def modules(self):
-        root = Path(__file__).resolve().parent.parent
-        found = (sorted((root / "src").rglob("*.py"))
-                 + sorted((root / "tests").glob("*.py"))
-                 + sorted((root / "scripts").glob("*.py")))
+        found = python_files(SRC, HERE, ROOT / "scripts")
         self.assertGreater(len(found), 30, "scanned almost nothing")
         return found
 
     def blocks(self, path):
         """Every `from X import (a, b, c)` written one name per line."""
-        import ast
         import re
         text = path.read_text(encoding="utf-8")
         lines = text.split("\n")
@@ -765,7 +768,6 @@ class TestImportBlocksAreInOrder(unittest.TestCase):
         had `reference_preview` on its own four lines above the block that
         already imported two other names from `..analysis`.
         """
-        import ast
         out = []
         for path in self.modules():
             seen = {}
@@ -797,13 +799,11 @@ class TestTheMainBlockIsLast(unittest.TestCase):
     """
 
     def suites(self):
-        root = Path(__file__).resolve().parent
-        found = sorted(path for path in root.glob("test_*.py"))
+        found = sorted(HERE.glob("test_*.py"))
         self.assertGreater(len(found), 5, "found almost no suites")
         return found
 
     def test_the_main_block_is_the_last_statement(self):
-        import ast
         wrong = []
         for path in self.suites():
             body = ast.parse(path.read_text(encoding="utf-8")).body
@@ -853,8 +853,7 @@ class TestNoSuiteRewritesAFieldList(unittest.TestCase):
     MOST_FIELDS_BY_HAND = 4
 
     def suites(self):
-        root = Path(__file__).resolve().parent
-        found = sorted(root.rglob("*.py"))
+        found = python_files(HERE)
         self.assertGreater(len(found), 5, "found almost no suites")
         return found
 
@@ -870,9 +869,7 @@ class TestNoSuiteRewritesAFieldList(unittest.TestCase):
         renormalises string quotes, so a regex looking for a double-quoted
         class name matched nothing -- which the count below caught.
         """
-        import ast
-        source = (Path(__file__).resolve().parent.parent / "src"
-                  / "rpgvxace_mcp" / "schema.py").read_text(encoding="utf-8")
+        source = (PACKAGE / "schema.py").read_text(encoding="utf-8")
         found = set()
         for node in ast.parse(source).body:
             if not (isinstance(node, ast.FunctionDef)
@@ -888,37 +885,172 @@ class TestNoSuiteRewritesAFieldList(unittest.TestCase):
         self.assertGreater(len(found), 5, "read almost no constructors")
         return found
 
+    def target_name(self, node):
+        """The dotted name a construction is assigned to, or None.
+
+        `self.page = RubyObject(...)` is as much a hand-built page as
+        `page = RubyObject(...)`, and the regex this replaced matched a
+        bare word only, so it read straight past the attribute form.
+        """
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            inner = self.target_name(node.value)
+            return None if inner is None else "%s.%s" % (inner, node.attr)
+        return None
+
+    def built_class(self, node):
+        """The Ruby class a `RubyObject("RPG::...")` call names, or None."""
+        if not (isinstance(node, ast.Call)
+                and getattr(node.func, "id", "") == "RubyObject"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and node.args[0].value.startswith("RPG::")):
+            return None
+        return node.args[0].value
+
+    def declared_fields(self, node):
+        """Fields the construction itself names, from an ivars dict.
+
+        `RubyObject("RPG::X", {"a": 1, "b": 2})` writes two fields of the
+        list without a single `.set`, and the regex this replaced required
+        a one-argument call, so every such site read as zero fields.
+        """
+        dicts = [argument for argument in node.args[1:]
+                 if isinstance(argument, ast.Dict)]
+        dicts += [word.value for word in node.keywords
+                  if isinstance(word.value, ast.Dict)]
+        return {key.value for mapping in dicts for key in mapping.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)}
+
+    HOLDS_A_SCOPE = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                     ast.ClassDef)
+
+    def in_scope(self, statements):
+        """Every node under these statements, not entering a nested scope.
+
+        `ast.walk` cannot be pruned, so the first version of this
+        descended into methods from the module as well and reported each
+        site three times -- once per enclosing scope -- which put two
+        methods' `page` locals back in one bucket, the defect this class
+        was rewritten to remove.
+        """
+        out = []
+        stack = [node for node in statements
+                 if not isinstance(node, self.HOLDS_A_SCOPE)]
+        while stack:
+            node = stack.pop(0)
+            out.append(node)
+            stack.extend(child for child in ast.iter_child_nodes(node)
+                         if not isinstance(child, self.HOLDS_A_SCOPE))
+        return out
+
+    def scopes(self, tree):
+        """Every scope, and the statements in it that are not in another.
+
+        A method boundary is a boundary: the line scan this replaced ran
+        forward until an unrelated assignment, and an indented `def` was
+        not one -- so a second method reusing the name `page` had its
+        fields unioned into the first method's count, and a site that set
+        a field after any other assignment had them dropped. Wrong in
+        both directions at once, which is why this asks the tree.
+        """
+        for node in ast.walk(tree):
+            if isinstance(node, self.HOLDS_A_SCOPE):
+                yield self.in_scope(node.body)
+
     def hand_built(self, path):
         """Each `x = RubyObject("RPG::...")` and how many fields it is set.
 
         A field belongs to the nearest preceding construction of the same
-        local name, which is how these are written throughout: build, then
-        set, then use.
+        name *in the same scope*, which is how these are written
+        throughout: build, then set, then use. Read from the tree, because
+        the four regexes this replaced held a weaker property than the
+        paragraph above claimed -- see `scopes`, `target_name` and
+        `declared_fields` for what each of them missed.
         """
-        import ast
-        import re
-        text = path.read_text(encoding="utf-8")
-        del ast
+        return self.hand_built_in(path.read_text(encoding="utf-8"))
+
+    def hand_built_in(self, source):
+        """The same, on source text, so the scan itself can be tested."""
+        tree = ast.parse(source)
         out = []
-        built = re.compile(
-            r"^\s*(\w+) = RubyObject\(\"(RPG::[\w:]+)\"\)")
-        for index, line in enumerate(text.split("\n")):
-            found = built.match(line)
-            if found is None:
-                continue
-            name, cls = found.group(1), found.group(2)
-            fields = set()
-            for after in text.split("\n")[index + 1:]:
-                setter = re.match(
-                    r"^\s*%s\.set\(\"(\w+)\"" % re.escape(name), after)
-                if setter is not None:
-                    fields.add(setter.group(1))
-                    continue
-                if after.strip() and ("%s." % name) not in after:
-                    if re.match(r"^\s*\w+ = ", after) or not after.startswith(" "):
-                        break
-            out.append((index + 1, cls, fields))
-        return out
+        for statements in self.scopes(tree):
+            sites = {}
+            for node in sorted(statements, key=lambda n: (
+                    getattr(n, "lineno", 0), getattr(n, "col_offset", 0))):
+                if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                    cls = self.built_class(node.value)
+                    name = self.target_name(node.targets[0])
+                    if cls is not None and name is not None:
+                        site = [node.lineno, cls,
+                                self.declared_fields(node.value)]
+                        # A second construction of the same name starts a
+                        # new site; the fields set after it are its own.
+                        sites[name] = site
+                        out.append(site)
+                        continue
+                    if name is not None:
+                        sites.pop(name, None)
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "set"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)):
+                    owner = self.target_name(node.func.value)
+                    if owner in sites:
+                        sites[owner][2].add(node.args[0].value)
+        return [(line, cls, fields) for line, cls, fields in out]
+
+    # The instrument's own tests, on source written here rather than on the
+    # suites: the property this class asserts is only as good as the scan,
+    # and the scan it replaced was wrong in both directions with every
+    # assertion above still green.
+    def test_the_scan_counts_the_fields_a_construction_declares(self):
+        source = (
+            'page = RubyObject("RPG::Event::Page", {"a": 1, "b": 2})\n'
+            'page.set("c", 3)\n')
+        self.assertEqual([(cls, sorted(fields))
+                          for _, cls, fields in self.hand_built_in(source)],
+                         [("RPG::Event::Page", ["a", "b", "c"])])
+
+    def test_the_scan_reads_an_attribute_target(self):
+        source = ('self.page = RubyObject("RPG::Event::Page")\n'
+                  'self.page.set("a", 1)\n')
+        self.assertEqual([sorted(fields)
+                          for _, _, fields in self.hand_built_in(source)],
+                         [["a"]])
+
+    def test_the_scan_does_not_cross_a_method_boundary(self):
+        """Two methods, one local name: two sites of one field, not one of two."""
+        source = ('class T:\n'
+                  '    def one(self):\n'
+                  '        page = RubyObject("RPG::Event::Page")\n'
+                  '        page.set("a", 1)\n'
+                  '    def two(self):\n'
+                  '        page = RubyObject("RPG::Event::Page")\n'
+                  '        page.set("b", 2)\n')
+        self.assertEqual(sorted(sorted(fields) for _, _, fields
+                                in self.hand_built_in(source)),
+                         [["a"], ["b"]])
+
+    def test_the_scan_keeps_counting_after_an_unrelated_assignment(self):
+        source = ('page = RubyObject("RPG::Event::Page")\n'
+                  'page.set("a", 1)\n'
+                  'other = 3\n'
+                  'page.set("b", 2)\n')
+        self.assertEqual([sorted(fields)
+                          for _, _, fields in self.hand_built_in(source)],
+                         [["a", "b"]])
+
+    def test_the_scan_flags_a_site_that_writes_the_list(self):
+        """Five fields is the whole point, and nothing in the tree has one."""
+        source = 'page = RubyObject("RPG::Event::Page")\n' + "".join(
+            'page.set("f%d", 1)\n' % index for index in range(5))
+        line, cls, fields = self.hand_built_in(source)[0]
+        self.assertEqual(cls, "RPG::Event::Page")
+        self.assertGreater(len(fields), self.MOST_FIELDS_BY_HAND)
 
     def test_no_site_sets_five_or_more_fields_of_one_class(self):
         covered = self.constructed()

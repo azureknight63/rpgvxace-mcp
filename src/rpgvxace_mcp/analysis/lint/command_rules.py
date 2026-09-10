@@ -166,9 +166,11 @@ def _check_references(code: Any, params: list[Any], tables: _Tables,
                       location: Location, index: int) -> list[Finding]:
     """One rule: every id a command names is an id that exists.
 
-    A table absent from ``existing`` could not be read, so its rules are
-    skipped rather than answered wrongly -- which is a different outcome from
-    "the id is missing" and is why the caller builds that mapping.
+    `_Tables.ids` answers None for a table that could not be read, so that
+    table's rules are skipped rather than answered wrongly -- a different
+    outcome from "the id is missing". Asked per reference, which is why
+    there is no mapping built here; the comment below says what that
+    replaced.
     """
     findings = []
     for table, value in _referenced_ids(code, params):

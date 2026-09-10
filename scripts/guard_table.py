@@ -187,6 +187,8 @@ FAILCLOSED = _at("test_guards_patterns", "TestTheMeasurementFailsClosed")
 FAILCLOSED2 = _at(
     "test_guards_patterns", "TestTheMeasurementFailsClosedOnEveryAbnormalExit")
 CHILD = _at("test_guards_patterns", "TestTheMeasurementReachesItsChild")
+PROTOCOL = _at("test_guards_patterns",
+               "TestTheChildRefusesAStdinItCannotParse")
 CLOSED = _at("test_guards_patterns", "TestTheShapeGateFailsClosed")
 SHAPECLOSED = _at(
     "test_guards_patterns", "TestTheShapeGateFailsClosedThroughout")
@@ -250,12 +252,16 @@ GROW = _at("test_guards_walk_budget", "TestGrowingAMapIsBoundedToo")
 BATCH = _at("test_guards_walk_budget", "TestOneBatchGetsOneWalkAllowance")
 BUDGETONE = _at("test_guards_walk_budget", "TestOneBudgetForAWholeResponse")
 LISTCAP = _at("test_guards_walk_budget", "TestOneCommandListHasACeiling")
+MAPPASS = _at("test_guards_walk_budget",
+              "TestOneMapPassPerScopeThatNeedsOne")
 BUDGET = _at(
     "test_guards_walk_budget", "TestReadingManyEntriesSharesOneBudget")
 SEARCHWORK = _at("test_guards_walk_budget", "TestSearchBoundsItsTotalWork")
 AMPLIFY = _at(
     "test_guards_walk_budget", "TestSharedChildrenCannotAmplifyAWalk")
 ONETRUTH = _at("test_guards_walk_budget", "TestTheMapListingHasOneTruth")
+MERGEDPAGES = _at("test_guards_walk_budget",
+                  "TestTheMergedPageWalkStillFindsTheMapAssets")
 
 
 # test_guards_writes
@@ -1658,6 +1664,43 @@ GUARDS = [
         'one event object shared across forty thousand slots keeps the walk charging for a finding per slot, long after the ceiling has stopped keeping them',
     ),
     Guard(
+        'the page walk does the map and page asset checks', LINT_PAGES,
+        ["""        if checker is not None:
+            map_assets(checker, map_id, game_map)""",
+         """            if checker is not None:
+                for index, page in enumerate(pages):
+                    page_graphic(checker, map_id, event_id, name,
+                                 index, page)"""],
+        # `if False:`, not `if checker is None:`: the latter passes None
+        # into `map_assets` and raises AttributeError on the events-only
+        # run, so the verdict would read PROVEN for a crash rather than
+        # for the finding going missing, which the prover cannot tell
+        # apart.
+        ["""        if False:
+            map_assets(checker, map_id, game_map)""",
+         """            if False:
+                for index, page in enumerate(pages):
+                    page_graphic(checker, map_id, event_id, name,
+                                 index, page)"""],
+        [MERGEDPAGES + "test_a_default_run_reports_both"],
+        'the default run gets its map parallaxes, battlebacks, autoplay audio and page character graphics from this walk and nowhere else, and both sites could be turned off with the whole suite green',
+    ),
+    Guard(
+        'the asset checks ride along instead of walking again', LINT_REPORT,
+        """        findings.extend(check_assets(
+            project, ids, walk_budget, shared_checker,
+            commands_done=shared_checker is not None,
+            pages_done=shared_checker is not None))""",
+        """        findings.extend(check_assets(
+            project, ids, walk_budget, shared_checker,
+            commands_done=False,
+            pages_done=False))""",
+        [MAPPASS + "test_adding_the_assets_scope_costs_no_map_pass",
+         MAPPASS
+         + "test_a_default_run_is_the_maps_pass_the_events_passes_and_no_more"],
+        'the default run would open every map twice more, for checks the walks it already makes have done -- five passes over the map set where three are needed, charged to the same allowance',
+    ),
+    Guard(
         'every ivars dict has its names checked', CONVERT,
         '    return {check_ivar_name(name): from_json(item, codec)',
         '    return {name: from_json(item, codec)',
@@ -1709,6 +1752,17 @@ GUARDS = [
         [CHILD + "test_the_subjects_travel_on_stdin",
          CHILD + "test_a_wide_kana_class_is_measured_not_refused"],
         'base64 of ten 2000-character subjects is 27000 characters for ASCII and 83000 for Japanese, against a 32767 Windows limit, so every Japanese pattern with a moderate character class was refused as unsafe on a question the check never got to ask',
+    ),
+    Guard(
+        'the child refuses a stdin it cannot parse', SAFETY,
+        r'''    "lines = sys.stdin.read().split(chr(10))\n"
+    "if len(lines) < 2 or not lines[0]:\n"
+    "    sys.exit(%d)\n"''',
+        r'''    "lines = sys.stdin.read().split()\n"
+    "if False:\n"
+    "    sys.exit(%d)\n"''',
+        [PROTOCOL + "test_an_empty_pattern_is_refused_and_not_remembered"],
+        '`split()` drops an empty field, so an empty pattern line shifted the subjects up: the child compiled the first subject, printed ok, exited 0, and an unmeasured pattern was cached as a measured pass for the life of the process',
     ),
     Guard(
         'a timing refusal is not remembered', SAFETY,
@@ -2104,11 +2158,11 @@ GUARDS = [
     ),
     Guard(
         'a command line renders a bounded number of parts', COMMANDS,
-        """        return "%s: %s" % (name, rendered(as_list(p(0)),
-                                          lambda c: _text(c, codec),
-                                          separator=" / "))""",
-        """        return "%s: %s" % (name, " / ".join(
-            _text(c, codec) for c in as_list(p(0))))""",
+        """    return "%s: %s" % (name, rendered(as_list(p(0)),
+                                      lambda c: _text(c, codec),
+                                      separator=" / "))""",
+        """    return "%s: %s" % (name, " / ".join(
+        _text(c, codec) for c in as_list(p(0))))""",
         [BYTES + "test_a_long_choice_list_is_capped"],
         'Show Choices renders every choice and the list length comes out of the file, not from MAX_CHOICES which bounds authoring: an Array of a million links to one string is three megabytes on disk',
     ),
