@@ -275,6 +275,7 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
     ANALYSIS = {
         "walk": set(),
         "references": {"walk"},
+        "reachability": {"walk"},
         "lint": {"walk", "references"},
     }
     LINT = {
@@ -532,7 +533,7 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         from rpgvxace_mcp import analysis
         # The submodule names themselves are re-exported on purpose, and
         # `annotations` is the future import.
-        modules = {"walk", "references", "lint"}
+        modules = {"walk", "references", "reachability", "lint"}
         exported = {name for name in vars(analysis)
                     if not name.startswith("__")}
         dangling = sorted(exported - self.defined_below() - modules

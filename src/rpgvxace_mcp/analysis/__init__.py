@@ -1,4 +1,4 @@
-"""`analysis`: the walks, the reference rules, and the linter.
+"""`analysis`: the walks, the reference rules, the reachability graph, and the linter.
 
 One module until it reached two thousand lines over three separable
 subjects, at which point the dependency boundary and the criticality
@@ -10,15 +10,22 @@ every tool module's imports and requires that only `misc_tools` takes a
 name from `lint` -- because it is the reason the boundary is where it is,
 and a second importer would make it false while leaving it written down.
 
+`reachability` is a fourth subject at the same bottom layer as `references`:
+it walks (from `walk`) and nothing else in this package walks it, because it
+answers a design-quality question -- which map can nobody reach -- rather
+than `references`'s correctness question of what still points at a thing
+about to be deleted. `map_critique_tools` is its one caller, the way
+`misc_tools` is `lint`'s.
+
 `lint` is itself a package of seven modules now, for the same reason at the
 next scale down; its own `__init__` gives that order.
 
 Re-exported from here so `from ..analysis import X` keeps working: the split
 is about how this code is read and changed, not about making every caller
-learn which of three files a name lives in. `tests/test_schema.py` holds
-both layerings -- a tool module is a leaf, these three are ordered
-`walk <- references <- lint`, and every module in either package is named in
-the table that constrains it.
+learn which of four files a name lives in. `tests/test_codebase_shape.py`
+holds both layerings -- a tool module is a leaf, `walk` sits under
+`references`, `reachability` and `lint`, and every module in either package
+is named in the table that constrains it.
 """
 
 from .walk import (  # noqa: F401
@@ -36,7 +43,8 @@ from .walk import (  # noqa: F401
     iter_command_lists,
     iter_maps,
 )
-from . import lint, references, walk  # noqa: F401
+from . import lint, reachability, references, walk  # noqa: F401
+from .reachability import map_reachability  # noqa: F401
 from .references import (  # noqa: F401
     DEFAULT_REFERENCE_LIMIT,
     MAP_TARGET,

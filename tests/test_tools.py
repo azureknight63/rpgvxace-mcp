@@ -681,6 +681,50 @@ class TestValidate(ToolTest):
         self.assertIn("missing_class", self.rules(scopes=["database"]))
 
 
+class TestMapCritique(ToolTest):
+    def test_an_ordinary_project_is_fully_reachable(self):
+        out = self.call("map_critique")
+        self.assertEqual(out["checks_run"], ["reachability"])
+        reach = out["reachability"]
+        self.assertEqual(reach["start_map"], 1)
+        self.assertEqual(reach["reachable"], [1, 2])
+        self.assertEqual(reach["unreachable"], [])
+        self.assertEqual(reach["unresolved_transfers"], 0)
+
+    def test_a_map_nothing_transfers_to_is_reported_unreachable(self):
+        self.call("map_edit", op="create", name="Isolated")
+        reach = self.call("map_critique",
+                          scopes=["reachability"])["reachability"]
+        self.assertEqual(reach["reachable"], [1, 2])
+        self.assertEqual(reach["unreachable"], [3])
+
+    def test_a_variable_indirect_transfer_is_counted_not_guessed_at(self):
+        # The destination is read from variable 1 at runtime, so it names no
+        # map this server can follow -- it must not invent an edge from it,
+        # and it must not be silently dropped either.
+        self.call("event_edit", map_id=1, ops=[{
+            "op": "create", "x": 1, "y": 1,
+            "commands": [{"transfer": {"designation": 1, "map_id": 1,
+                                       "x": 0, "y": 0}}]}])
+        reach = self.call("map_critique")["reachability"]
+        self.assertEqual(reach["reachable"], [1, 2])
+        self.assertEqual(reach["unreachable"], [])
+        self.assertGreaterEqual(reach["unresolved_transfers"], 1)
+
+    def test_a_common_event_transfer_reaches_from_anywhere(self):
+        self.call("map_edit", op="create", name="Isolated")
+        self.call("event_edit", common_event_id=1, ops=[{
+            "op": "append_commands",
+            "commands": [{"transfer": {"map_id": 3, "x": 0, "y": 0}}]}])
+        reach = self.call("map_critique")["reachability"]
+        self.assertIn(3, reach["reachable"])
+        self.assertNotIn(3, reach["unreachable"])
+
+    def test_unknown_scope_is_refused(self):
+        with self.assertRaises(ToolError):
+            self.call("map_critique", scopes=["dead_space"])
+
+
 class TestScripts(ToolTest):
     def test_list_and_get(self):
         listing = self.call("scripts", op="list")

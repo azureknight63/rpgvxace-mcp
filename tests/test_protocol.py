@@ -148,7 +148,7 @@ class TestToolsOverProtocol(ProtocolTest):
     def test_list_advertises_every_tool_with_a_schema(self):
         tools = self.server.request("tools/list")["result"]["tools"]
         names = {t["name"] for t in tools}
-        self.assertEqual(len(tools), 16)
+        self.assertEqual(len(tools), 17)
         self.assertIn("project_info", names)
         self.assertIn("event_edit", names)
         for tool in tools:

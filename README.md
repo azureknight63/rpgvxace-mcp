@@ -101,7 +101,7 @@ the folder.
 
 ## Tools
 
-Sixteen tools, grouped by what they touch. The ones that write are marked ✏️;
+Seventeen tools, grouped by what they touch. The ones that write are marked ✏️;
 each of those takes `dry_run` and backs the file up before changing it.
 
 | Tool | What it does |
@@ -119,6 +119,7 @@ each of those takes `dry_run` and backs the file up before changing it.
 | `command_reference` | The event command codes this engine dispatches, and their confirmed parameter layouts. |
 | `search` | Find text or a command code anywhere: dialogue, comments, entry names, map names, scripts. |
 | `validate` | Lint the project for broken references and event-logic traps. |
+| `map_critique` | Design-quality analysis validate does not run — today, which maps nobody can reach from the party's start position. |
 | `scripts` ✏️ | Read and replace script editor slots. |
 | `backups` ✏️ | Snapshot, list, restore, prune. |
 | `raw_data` ✏️ | Escape hatch: get or set any field by path. |
@@ -189,6 +190,24 @@ Getting there meant fixing two false-positive sources this codebase would
 otherwise have shipped: 185 "missing audio" warnings that were really RTP
 assets, and 6 "unstoppable autorun" warnings that were really the correct
 cutscene pattern.
+
+### What `map_critique` reports
+
+`validate` is about correctness — is a reference sound. `map_critique` is
+about design quality, and today runs one check: **reachability**, walked from
+the party's start position (`System#start_map_id`) across every direct
+Transfer Player command in the project. A map on disk that nothing leads to
+comes back in `unreachable`.
+
+Two things it deliberately does not guess at: a transfer whose destination is
+read from a game variable at runtime is counted under
+`unresolved_transfers` rather than turned into an edge, since no static
+reader can know what the variable will hold; and a transfer written inside a
+common event is treated as reachable from anywhere, since a common event can
+be called from any map or run on its own as a parallel process.
+
+More checks from the same family — dead space, tile variety, stat outliers
+across the database — are proposed but not yet implemented.
 
 ## The RTP
 

@@ -23,6 +23,7 @@ from .tools import (  # noqa: F401
     db_tools,
     event_tools,
     map_common,
+    map_critique_tools,
     map_edit_tools,
     map_read_tools,
     map_tile_tools,

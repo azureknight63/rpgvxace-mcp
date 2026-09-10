@@ -280,6 +280,15 @@ class TestSharedChildrenCannotAmplifyAWalk(SharedObjectMap, ToolTest):
                       "validate reports a clean bill from a walk that never "
                       "finished: %s" % sorted(out))
 
+    def test_map_critique_stops_and_says_so(self):
+        """The reachability walk shares the same `WalkBudget` the others do."""
+        self.craft_shared_map()
+        out = self.assert_bounded("map_critique", scopes=["reachability"])
+        reach = out["reachability"]
+        self.assertIn("reachability_stopped", reach,
+                      "map_critique reports a clean reachability graph from "
+                      "a walk that never finished: %s" % sorted(reach))
+
 
 class TestSearchBoundsItsTotalWork(ToolTest):
     """A pattern measured against 2 KB then runs over the whole project.
