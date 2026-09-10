@@ -6,6 +6,8 @@ from typing import Any
 
 from ..commands import (
     CODE_BLANK,
+    CODE_MOVE_ROUTE_STEP,
+    CODE_SET_MOVE_ROUTE,
     CommandError,
     DSL_HELP,
     compile_commands,
@@ -1041,7 +1043,7 @@ def _build_list(ctx: Context, entries: list[Any]) -> list[RubyObject]:
         raise ToolError(str(exc)) from exc
     commands = _insert_move_route_steps(commands)
     # Every list ends with a blank command at indent 0.
-    commands.append(new_event_command(0, 0, []))
+    commands.append(new_event_command(CODE_BLANK, 0, []))
     _check_list_length(commands)
     return commands
 
@@ -1073,10 +1075,11 @@ def _insert_move_route_steps(commands: list[RubyObject]) -> list[RubyObject]:
     out: list[RubyObject] = []
     for index, command in enumerate(commands):
         out.append(command)
-        if command.get("code") != 205:
+        if command.get("code") != CODE_SET_MOVE_ROUTE:
             continue
         following = commands[index + 1] if index + 1 < len(commands) else None
-        if isinstance(following, RubyObject) and following.get("code") == 505:
+        if (isinstance(following, RubyObject)
+                and following.get("code") == CODE_MOVE_ROUTE_STEP):
             continue
         params = as_list(command.get("parameters"))
         route = params[1] if len(params) > 1 else None

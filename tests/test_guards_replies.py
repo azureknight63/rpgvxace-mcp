@@ -1133,6 +1133,29 @@ class TestACodeWithAConstantIsSpelledWithIt(unittest.TestCase):
         return (Path(__file__).resolve().parent.parent / "src"
                 / "rpgvxace_mcp" / "commands.py")
 
+    def readers(self):
+        """`commands.py` and every module that imports from it.
+
+        The scan said "no function compares a code to a number that has a
+        name" and read one file, so three sites in `event_tools` -- a
+        module that already imports `CODE_BLANK` from here -- spelled
+        codes this table names. `schema.py` is not in the list and cannot
+        be: `commands` imports *from* `schema`, so a code constant is not
+        available to it, and its one blank command is built with a
+        literal for that reason.
+        """
+        package = self.module().parent
+        out = [self.module()]
+        for path in sorted(package.rglob("*.py")):
+            if path == self.module():
+                continue
+            text = path.read_text(encoding="utf-8")
+            if "commands import" in text or "from ..commands" in text:
+                out.append(path)
+        self.assertGreater(len(out), 2, "found no importers, so this scan "
+                                        "would read one file")
+        return out
+
     def constants(self):
         """Every CODE_* constant, by the number it names."""
         import ast
@@ -1154,15 +1177,33 @@ class TestACodeWithAConstantIsSpelledWithIt(unittest.TestCase):
         return out
 
     def test_no_function_compares_a_code_to_a_number_that_has_a_name(self):
-        import ast
         known = self.constants()
         self.assertGreater(len(known), 8, "the constants were not found")
-        tree = ast.parse(self.module().read_text(encoding="utf-8"))
+        spelled = []
+        for path in self.readers():
+            spelled += self.compared_in(path, known)
+        self.assertEqual(spelled, [],
+                         "these compare a code to a number this module has "
+                         "already named: " + "; ".join(spelled))
+
+    def compared_in(self, path, known):
+        """Each `code == N` in one file where N is a named code."""
+        import ast
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         spelled = []
         for node in ast.walk(tree):
+            left = node.left if isinstance(node, ast.Compare) else None
+            named = (left.id if isinstance(left, ast.Name)
+                     else left.attr if isinstance(left, ast.Attribute)
+                     else "")
+            call = (isinstance(left, ast.Call)
+                    and isinstance(left.func, ast.Attribute)
+                    and left.func.attr == "get"
+                    and left.args
+                    and isinstance(left.args[0], ast.Constant)
+                    and left.args[0].value == "code")
             if not (isinstance(node, ast.Compare)
-                    and isinstance(node.left, ast.Name)
-                    and node.left.id == "code"):
+                    and (named in ("code", "code_int") or call)):
                 continue
             for comparator in node.comparators:
                 items = (comparator.elts if isinstance(comparator, ast.Tuple)
@@ -1170,11 +1211,10 @@ class TestACodeWithAConstantIsSpelledWithIt(unittest.TestCase):
                 for item in items:
                     if (isinstance(item, ast.Constant)
                             and item.value in known):
-                        spelled.append("%s should be %s"
-                                       % (item.value, known[item.value]))
-        self.assertEqual(spelled, [],
-                         "these compare a code to a number this module has "
-                         "already named: " + "; ".join(spelled))
+                        spelled.append("%s:%d: %s should be %s"
+                                       % (path.name, item.lineno, item.value,
+                                          known[item.value]))
+        return spelled
 
     def emitted(self, tree):
         """Every code an emit site names, as (line, node) pairs.
@@ -1210,19 +1250,142 @@ class TestACodeWithAConstantIsSpelledWithIt(unittest.TestCase):
                 out.extend((key.lineno, key) for key in node.value.keys)
         return out
 
-    def test_no_command_is_built_from_a_number_that_has_a_name(self):
+    def test_no_command_is_built_from_a_number_at_all(self):
+        """Any literal, not only one that already has a name.
+
+        The first version reported a literal that was already in the
+        constants table, which is a rule satisfied by *not* naming the
+        code: four codes `compile_commands` emits to close a structure it
+        opened -- 403, 404, 411, 412 -- sat two lines from
+        `_cmd(CODE_CHOICE_BRANCH, ...)` and passed, in the module whose own
+        comment says a module that names some of its codes and not others
+        is one where the next one gets a name only if the author happens to
+        look. So the rule is now the sentence that comment makes.
+        """
         import ast
-        known = self.constants()
-        tree = ast.parse(self.module().read_text(encoding="utf-8"))
-        sites = self.emitted(tree)
-        self.assertGreater(len(sites), 25, "the emit sites were not found")
-        spelled = ["line %d: %s should be %s"
-                   % (line, node.value, known[node.value])
-                   for line, node in sites
-                   if isinstance(node, ast.Constant) and node.value in known]
-        self.assertEqual(spelled, [],
-                         "these build or dispatch a command by a number this "
-                         "module has already named: " + "; ".join(spelled))
+        for path in self.readers():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            sites = self.emitted(tree)
+            if path == self.module():
+                self.assertGreater(len(sites), 25,
+                                   "the emit sites were not found")
+            spelled = ["%s:%d builds a command from %r"
+                       % (path.name, line, node.value)
+                       for line, node in sites
+                       if isinstance(node, ast.Constant)]
+            self.assertEqual(spelled, [],
+                             "a command code belongs in the constants block "
+                             "of `commands`, where a reader can look it up: "
+                             + "; ".join(spelled))
+
+
+class TestEveryCommandCodeConstantIsRead(unittest.TestCase):
+    """The other direction of the rule next door.
+
+    `TestACodeWithAConstantIsSpelledWithIt` holds that a code with a name
+    is spelled with it. This holds that a name is read by something --
+    otherwise the block grows a constant per round and nothing says which
+    of them are load-bearing, which is how `CODE_ERASE_EVENT` came to sit
+    under a comment describing the two constants either side of it.
+
+    `CONDITION_KINDS`' own comment records the same defect one table over:
+    "eight of the thirteen constants were dead while the function that
+    should have used them spelled their numbers out".
+    """
+
+    def package(self):
+        return (Path(__file__).resolve().parent.parent / "src"
+                / "rpgvxace_mcp")
+
+    def defined(self):
+        """Every CODE_* name assigned at the top level of `commands`."""
+        import ast
+        source = (self.package() / "commands.py").read_text(encoding="utf-8")
+        names = []
+        for node in ast.parse(source).body:
+            if not isinstance(node, ast.Assign):
+                continue
+            targets = node.targets[0]
+            for name in (targets.elts if isinstance(targets, ast.Tuple)
+                         else [targets]):
+                if (isinstance(name, ast.Name)
+                        and name.id.startswith("CODE_")):
+                    names.append(name.id)
+        self.assertGreater(len(names), 20, "the constants were not found")
+        return names
+
+    def reads(self):
+        """Every CODE_* name loaded anywhere in the package.
+
+        A `Name` in load context, so the assignment itself does not count
+        as a read and neither does the import that carries it: an
+        `ImportFrom` alias is not a `Name` node.
+        """
+        import ast
+        found = set()
+        for path in sorted(self.package().rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Name)
+                        and isinstance(node.ctx, ast.Load)
+                        and node.id.startswith("CODE_")):
+                    found.add(node.id)
+        return found
+
+    def test_every_named_code_is_read_somewhere(self):
+        idle = sorted(set(self.defined()) - self.reads())
+        self.assertEqual(
+            idle, [],
+            "these code constants are defined and never read, so nothing "
+            "would notice if the number were wrong: " + ", ".join(idle))
+
+
+class TestOneOwnerForTheClipCount(unittest.TestCase):
+    """Nothing outside `_Matcher` may write `clipped`.
+
+    It was incremented in two places under opposite conditions: inside
+    `__call__` when the pattern is a regex, and from `subject_text`, which
+    reached into the object and tested `matcher.whole` itself. That
+    arrangement double-counted once already -- the comment in
+    `subject_text` recorded it -- and an agent editing either site could
+    not see the other.
+
+    A scan rather than a fixed pair of names, because the defect is a
+    third writer, which is exactly what the second one was.
+    """
+
+    def modules(self):
+        root = (Path(__file__).resolve().parent.parent / "src"
+                / "rpgvxace_mcp")
+        found = sorted(root.rglob("*.py"))
+        self.assertGreater(len(found), 5, "found almost no modules")
+        return found
+
+    def test_only_the_matcher_writes_the_clip_count(self):
+        import ast
+        writers = []
+        for path in self.modules():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.Assign, ast.AugAssign)):
+                    continue
+                targets = (node.targets if isinstance(node, ast.Assign)
+                           else [node.target])
+                for target in targets:
+                    if not (isinstance(target, ast.Attribute)
+                            and target.attr == "clipped"):
+                        continue
+                    owner = target.value
+                    # `self.clipped` inside `_Matcher` is the owner; any
+                    # other object's `.clipped` is a second writer.
+                    if not (isinstance(owner, ast.Name)
+                            and owner.id == "self"):
+                        writers.append("%s:%d" % (path.name, node.lineno))
+        self.assertEqual(
+            writers, [],
+            "these write another object's clip count, so the rule about "
+            "which window is being counted lives in two places: "
+            + ", ".join(writers))
 
 
 class TestOneVocabularyForAPartialAnswer(ToolTest):

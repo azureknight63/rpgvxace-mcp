@@ -289,11 +289,64 @@ PREFLIGHT_SUBJECT_CHARS = 2000
 # written twice, which is what naming the product exists to prevent.
 MAX_SUBJECT_BYTES = PREFLIGHT_SUBJECT_CHARS * 4
 
+# What every refusal in this module tells the caller to do instead, in one
+# sentence with the figure interpolated. It was hand-written at eight sites
+# in four wordings, and two of them said a plain search "reads every string
+# in full" -- which stopped being true when `subject_text` began slicing.
+# Round 11b corrected one wording and left the other two standing, which is
+# what a sentence written eight times does. The worst of the three was the
+# timeout verdict, because it recommends the plain path *as the remedy*: a
+# caller told there is no cut leaves regex off, gets no hits, and reads a
+# truncated absence as a real one.
+PLAIN_SEARCH_ADVICE = (
+    "leave regex off and search for a plain substring, which reads the "
+    "first %s bytes of each string" % "{:,}".format(MAX_SUBJECT_BYTES))
+
 # How many characters of a pattern's alphabet get a homogeneous subject of
-# their own. Beyond this they share one subject that gives each a run, so a
-# wide alphabet cannot push a dangerous character out of the measurement --
-# which selecting the first eight by code point allowed.
+# their own wherever they appear. Insurance: the characters that actually
+# need a run are the quantified ones, capped just below.
 MAX_SINGLE_CHARACTER_SUBJECTS = 8
+
+
+# The most *quantified* characters this module will measure. Every character
+# inside a repeat gets a homogeneous subject of its own, a full
+# PREFLIGHT_SUBJECT_CHARS long, and more of them than this is a refusal.
+#
+# It was eight, with the rest sharing one subject that gave each of them a
+# *share* of the length: `run = PREFLIGHT_SUBJECT_CHARS // len(ordered)`.
+# That fixed presence and measured the wrong unit, because the cost is in
+# the run. Four hundred and eighty distinct non-letter literals in front of
+# `[a-z]+[a-z]+!` -- one class, two quantifiers, 495 characters, and it
+# passes the shape score -- pushed every letter's run down to four
+# characters: the gate passed the pattern in 0.063s while the real thing
+# costs about fifteen seconds per 2,000-letter string, uninterruptibly, for
+# every string in the project. 0.0020s at 100 letters, 0.0156s at 200,
+# 0.1228s at 400, 0.9782s at 800, all measured, so a run of four says
+# nothing whatever about a run of two thousand.
+#
+# Quantified, not named: a phrase search names one character per letter,
+# and a line of Japanese names a hundred and seventy of them -- all plain
+# literals, which cannot compete with anything -- so a cap on the alphabet
+# would refuse an ordinary search, which one of this module's own tests
+# holds. A character needs a run only if some repeat can match it.
+#
+# Sixty-four rather than the ~512 an alphabet can hold, because the
+# measurement's budget is PREFLIGHT_SECONDS for the whole set: this is eight
+# times the subjects the old cap allowed, and so eight times the work. A
+# quantified class wider than this is not a thing a person writes --
+# `_alphabet` takes a range's two endpoints, not its span, so a kana range
+# costs two -- while enumerating four hundred and eighty of them inside a
+# `?` is exactly the shape of the attack above.
+#
+# Measured at this cap: the 40-character kana class one of the tests below
+# names takes 0.063s to measure across 43 subjects, a 170-character line of
+# kanji 0.034s across 11, and `[a-z]+!` -- one quantifier, but `search`
+# retries at every offset, so quadratic -- 0.655s across 30. That last is
+# the shape that decides the number: sixty-four subjects of it would be
+# about 1.3s against a PREFLIGHT_SECONDS of 2.0, and a wide *quantified*
+# class that does time out is refused rather than run, which is the
+# direction every other failure in this module goes.
+MAX_MEASURED_SUBJECTS = 64
 
 # What the child runs. Kept as one string rather than a module, so there is no
 # import path to get wrong and nothing of this project in the child.
@@ -453,9 +506,8 @@ def _alphabet(parsed: Any, depth: int = 0) -> "set[str]":
             "that pattern nests groups more than %d deep, which is deeper "
             "than this server reads when working out which characters to "
             "test it against -- so it cannot judge the pattern safe. "
-            "Flatten the groups, or leave regex off and search for plain "
-            "text, which reads every string in full."
-            % MAX_ALPHABET_DEPTH)
+            "Flatten the groups, or %s."
+            % (MAX_ALPHABET_DEPTH, PLAIN_SEARCH_ADVICE))
     for op, av in parsed:
         name = str(op)
         if name == "LITERAL" and 0 < av < 0x110000:
@@ -483,22 +535,60 @@ def _alphabet(parsed: Any, depth: int = 0) -> "set[str]":
     return found
 
 
+def _quantified(parsed: Any, depth: int = 0) -> "set[str]":
+    """The characters that appear inside a repeated atom.
+
+    Those are the ones a *run* has to be built for: backtracking needs two
+    atoms competing over the same characters, and an atom that is not
+    repeated cannot compete with anything. A literal outside every repeat
+    still has to appear in some subject, which the mixtures in `_subjects`
+    do, but it cannot be made expensive by a run of itself.
+
+    Kept separate from `_alphabet` rather than folded into it as a flag,
+    because the two answer different questions -- "which characters does
+    this pattern mention" and "which of them can a repeat match" -- and the
+    defect this fixes was one answer standing in for the other.
+    """
+    found: set[str] = set()
+    # The same refusal `_alphabet` makes, for the same reason: a pattern this
+    # module cannot finish reading is one it cannot judge. Written out rather
+    # than shared, so that the two are separate anchors -- one guard reverting
+    # both is what asks "is this held at all", and a guard on either alone
+    # read VACUOUS the moment the second one existed.
+    if depth > MAX_ALPHABET_DEPTH:  # in `_quantified`
+        raise PatternTooCostly(
+            "that pattern nests groups more than %d deep, which is deeper "
+            "than this server reads when working out which characters to "
+            "test it against -- so it cannot judge the pattern safe. "
+            "Flatten the groups, or %s."
+            % (MAX_ALPHABET_DEPTH, PLAIN_SEARCH_ADVICE))
+    for op, av in parsed:
+        name = str(op)
+        for child in _children(name, av):
+            # Under a repeat, everything below it is quantified too.
+            found |= (_alphabet(child, depth + 1) if name in _REPEATS
+                      else _quantified(child, depth + 1))
+    return found
+
+
 def _subjects(pattern: str) -> "list[str]":
     """The texts to measure this pattern against, worst-case first.
 
-    A run of each of the first %d characters the pattern mentions, in sort
-    order, plus three more: a pair mixture, a run built from every character
-    it names, and one alphanumeric mixture. A run of one character is what
-    makes competing atoms backtrack, and the mixtures catch the shapes that
-    need two kinds of character to alternate.
+    A full-length run of every character a repeat can match, plus the first
+    few of the rest, plus three mixtures: a pair, a run built from every
+    character the pattern names, and one alphanumeric. A run of one
+    character is what makes competing atoms backtrack, and the mixtures
+    catch the shapes that need two kinds of character to alternate.
 
-    The cap is interpolated rather than written out, because this sentence
-    said "each character" against a capped eight. The count is not a fixed
-    number: a run of each of the first few characters, then a pair mixture
-    *if the alphabet has two*, then a run of every character it names, then
-    the digits-and-spaces subject. So three subjects for a one-character
-    alphabet and five for two.
-    """ % MAX_SINGLE_CHARACTER_SUBJECTS
+    More than %d quantified characters is refused rather than sampled, for
+    the reason that constant's comment gives: a sampled alphabet is one
+    where the measurement did not build the worst case the tool can reach,
+    and "could not tell" is a refusal everywhere else in this module.
+
+    The count is not a fixed number: a run of each character that needs
+    one, then a pair mixture *if the alphabet has two*, then the
+    every-character run, then the digits-and-spaces subject.
+    """ % MAX_MEASURED_SUBJECTS
     # `re.error` only, where this caught `Exception`. A pattern the parser
     # rejects is left to `re.compile` to report in its own words, which
     # three tests hold. Anything else -- including `PatternTooCostly` from
@@ -507,9 +597,11 @@ def _subjects(pattern: str) -> "list[str]":
     # reason to guess at its alphabet: the fallback below is a run of "a",
     # which almost any pattern survives.
     try:
-        alphabet = _alphabet(_sre_parse.parse(pattern))
+        parsed = _sre_parse.parse(pattern)
+        alphabet = _alphabet(parsed)
+        quantified = _quantified(parsed)
     except re.error:
-        alphabet = set()
+        alphabet = quantified = set()
     # Bounded, so a pattern naming a hundred literals does not spawn a child
     # with a hundred 2000-character subjects.
     #
@@ -518,19 +610,31 @@ def _subjects(pattern: str) -> "list[str]":
     # different thing from an alphabet this module could not read, which is
     # now a refusal rather than an empty set.
     ordered = sorted(alphabet) or ["a"]
-    # A run of each of the first few, individually -- one homogeneous run is
-    # what makes competing atoms backtrack.
-    chosen = ordered[:MAX_SINGLE_CHARACTER_SUBJECTS]
+    if len(quantified) > MAX_MEASURED_SUBJECTS:
+        raise PatternTooCostly(
+            "that pattern puts %d different characters inside a repeated "
+            "part, listed one by one, and this server tests a pattern "
+            "against a full-length run of each of the first %d of them -- "
+            "so it cannot build the case that would show whether this one "
+            "is slow, and will not judge it safe. Write a range like [a-z] "
+            "instead of listing its characters, which costs two, or %s."
+            % (len(quantified), MAX_MEASURED_SUBJECTS,
+               PLAIN_SEARCH_ADVICE))
+    # A full run of each character a repeat can match, individually, plus
+    # the first few of the rest as insurance -- one homogeneous run is what
+    # makes competing atoms backtrack, and its *length* is what the cost
+    # grows with. It was the first eight by code point, which measured the
+    # wrong unit: padding the alphabet divided the run between them.
+    chosen = sorted(quantified
+                    | set(ordered[:MAX_SINGLE_CHARACTER_SUBJECTS])) or ["a"]
     subjects = [char * PREFLIGHT_SUBJECT_CHARS for char in chosen]
-    if len(chosen) > 1:
-        pair = (chosen[0] + chosen[1]) * PREFLIGHT_SUBJECT_CHARS
+    if len(ordered) > 1:
+        pair = (ordered[0] + ordered[1]) * PREFLIGHT_SUBJECT_CHARS
         subjects.append(pair[:PREFLIGHT_SUBJECT_CHARS])
-    # And one subject holding a run of *every* character the pattern names,
-    # because selecting the first few by code point let a pattern hide its
-    # dangerous character behind eight cheaper ones: eight control characters
-    # in a class pushed "=" out of every subject above, so the measurement
-    # returned in milliseconds and cached a pass for a pattern that takes
-    # thirty seconds on a line of "=".
+    # And one subject interleaving short runs of every character it names.
+    # Redundant for *presence* now that each character has a full run of its
+    # own, and kept for the shapes that need two kinds of character adjacent
+    # -- which is what the pair mixture above does for two.
     run = max(1, PREFLIGHT_SUBJECT_CHARS // max(len(ordered), 1))
     every = "".join(char * run for char in ordered)
     subjects.append(every[:PREFLIGHT_SUBJECT_CHARS])
@@ -606,8 +710,7 @@ def measure_cost(pattern: str) -> None:
                 "cleanly without reporting that it had finished, so it "
                 "will not run the pattern either -- a match that cannot "
                 "be interrupted is not something to risk on a check whose "
-                "result did not arrive. Search for a plain substring by "
-                "leaving regex off.")
+                "result did not arrive: %s." % PLAIN_SEARCH_ADVICE)
         elif done.returncode != 0:
             # A child that died for any other reason: killed by a signal, out
             # of memory, or a `sys.executable` that is not an interpreter.
@@ -625,8 +728,8 @@ def measure_cost(pattern: str) -> None:
                 "this server's safety check on that pattern exited abnormally "
                 "(code %d), so it will not run the pattern either -- a match "
                 "that cannot be interrupted is not something to risk on a "
-                "check that did not complete. Search for a plain substring by "
-                "leaving regex off." % done.returncode)
+                "check that did not complete: %s."
+                % (done.returncode, PLAIN_SEARCH_ADVICE))
     except subprocess.TimeoutExpired:
         verdict = (
             "that pattern did not finish matching in %.1f seconds against "
@@ -637,15 +740,14 @@ def measure_cost(pattern: str) -> None:
             "repeated parts that can match the same characters with nothing "
             "required between them do this: \"a*a*\", \"[a-z]+[a-z]+\", "
             "\"\\w+\\d+\". Put the literal text you are looking for "
-            "between them, or leave regex off and search for a plain "
-            "substring, which reads the first %s bytes of each string."
-            % (PREFLIGHT_SECONDS, "{:,}".format(MAX_SUBJECT_BYTES)))
+            "between them, or %s."
+            % (PREFLIGHT_SECONDS, PLAIN_SEARCH_ADVICE))
     except OSError as exc:
         verdict = (
             "this server could not run its safety check on that pattern (%s), "
             "so it will not run the pattern either -- an uninterruptible match "
-            "is not something to risk on an unchecked guess. Search for a "
-            "plain substring by leaving regex off." % exc)
+            "is not something to risk on an unchecked guess: %s."
+            % (exc, PLAIN_SEARCH_ADVICE))
 
     _remember(pattern, verdict)
     if verdict is not None:
@@ -716,8 +818,8 @@ def check_shape(pattern: str) -> None:
         "that pattern is refused, because %s. A regular expression match in "
         "Python cannot be interrupted -- no timeout or signal reaches it -- "
         "so one that backtracks like this wedges this server until it is "
-        "killed, rather than merely running slowly. You can also search for a "
-        "plain substring by leaving regex off." % found)
+        "killed, rather than merely running slowly. You can also %s."
+        % (found, PLAIN_SEARCH_ADVICE))
 
 
 def _unanalysable(exc: Exception) -> str:
@@ -729,8 +831,8 @@ def _unanalysable(exc: Exception) -> str:
     and the caller would never know it had.
     """
     return ("this server could not analyse that pattern (%s: %s), so it will "
-            "not run it either. Search for a plain substring by leaving regex "
-            "off." % (type(exc).__name__, exc))
+            "not run it either: %s."
+            % (type(exc).__name__, exc, PLAIN_SEARCH_ADVICE))
 
 
 def _approx(paths: int) -> str:
@@ -798,8 +900,7 @@ def _flatten(parsed: Any) -> "list[_Atom]":
                 "group, which this server refuses outright: each one runs a "
                 "match of its own at every position, and there is no way to "
                 "bound that here. Drop the (?=...), (?!...), (?<=...) or "
-                "(?(1)...) part -- or leave regex off and search for a plain "
-                "substring, which reads every string in full.")
+                "(?(1)...) part -- or %s." % PLAIN_SEARCH_ADVICE)
         # AT (anchors), GROUPREF and the rest match no characters of their own
         # and add no freedom, so they are left out of the chain entirely.
     return atoms
@@ -864,9 +965,29 @@ def _repeat_atom(av: Any) -> _Atom:
 
     if unbounded:
         freedom = UNBOUNDED_WEIGHT
+    elif inner_freedom > 1:
+        # A bounded repeat of a body that can itself match more than one way
+        # *compounds*: `(?:a?){24}` is twenty-four independent two-way
+        # choices, which is 2**24 -- exactly what `"a?" * 24` is, and that
+        # spelling is refused. This charged the count range once and
+        # multiplied the body in once, scoring the first 2 and the second
+        # 16,777,216: eight million times apart, for one pattern. Both were
+        # caught by the measurement, which is the gate `_subjects` shows can
+        # be defeated, and this is the one that is supposed to stand behind
+        # it.
+        #
+        # Multiplied one step at a time and stopped at the budget, because
+        # the honest arithmetic on a wide body -- 64 ** 64 -- is a number
+        # nobody needs to finish computing.
+        freedom = 1
+        for _ in range(min(int(maximum), MAX_BOUNDED_WEIGHT)):
+            freedom *= inner_freedom
+            if freedom > MAX_BACKTRACK_PATHS:
+                freedom = MAX_BACKTRACK_PATHS + 1
+                break
     else:
-        freedom = min(max(int(maximum) - int(minimum) + 1, 1), MAX_BOUNDED_WEIGHT)
-        freedom *= inner_freedom
+        freedom = min(max(int(maximum) - int(minimum) + 1, 1),
+                      MAX_BOUNDED_WEIGHT)
     charset = inner[0].charset if inner else _ANYTHING
     # `{0,n}` can match nothing, so it does not separate its neighbours. See
     # `_Atom`: this is reported rather than faked by widening the charset.

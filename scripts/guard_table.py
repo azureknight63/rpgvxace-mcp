@@ -192,6 +192,9 @@ PROTOCOL = _at("test_guards_patterns",
 CLOSED = _at("test_guards_patterns", "TestTheShapeGateFailsClosed")
 SHAPECLOSED = _at(
     "test_guards_patterns", "TestTheShapeGateFailsClosedThroughout")
+SPELLED = _at(
+    "test_guards_patterns",
+    "TestTheShapeScoreDoesNotDependOnHowARepeatIsSpelled")
 REMEMBERS = _at("test_guards_patterns", "TestWhatTheMeasurementRemembers")
 
 
@@ -1262,7 +1265,7 @@ GUARDS = [
     ),
     Guard(
         'a clipped regex search says so', SEARCH_TOOLS,
-        '        if not self.whole and len(text) > MAX_SUBJECT_CHARS:\n            self.clipped += 1',
+        '        if not self.whole and length > MAX_SUBJECT_CHARS:\n            self.clipped += 1',
         '        if False:\n            self.clipped += 1',
         [CLIP + "test_a_clipped_regex_search_says_so"],
         'a regex search reports "no hits" for text it never looked at, in the same shape as a search that read everything',
@@ -1577,16 +1580,8 @@ GUARDS = [
         'a nullable atom does not break a run', SAFETY,
         '        if not atom.nullable and span and not seen.intersects(atom.charset):',
         '        if span and not seen.intersects(atom.charset):',
-        [FAST + "test_every_costly_pattern_is_refused"],
+        [FAST + "test_the_shape_gate_refuses_a_nullable_chain_alone"],
         '"=?~?" repeated twenty-four times scores 2 -- every adjacent pair is literal-disjoint -- and runs over thirty seconds against a line of "=", which is what a stock VX Ace script separator is',
-    ),
-    Guard(
-        'every named character reaches the measurement', SAFETY,
-        '    every = "".join(char * run for char in ordered)',
-        '    every = "".join(char * run for char in ordered[:0])',
-        [SUBJECTS + "test_a_hidden_character_still_reaches_a_subject",
-         SUBJECTS + "test_every_character_of_a_wide_alphabet_reaches_one"],
-        'a pattern naming nine or more characters pushes its dangerous one out of every synthetic subject, so the child returns in milliseconds and the pass is cached',
     ),
     Guard(
         'one search cannot outrun its deadline', SEARCH_TOOLS,
@@ -1598,10 +1593,9 @@ GUARDS = [
     ),
     Guard(
         'a search that gave up says so', SEARCH_TOOLS,
-        '''        spent = matcher.note() if matcher is not None else None
-        if spent:''',
-        '''        spent = None
-        if spent:''',
+        '''        out.update(partial("text_scan",
+                           stopped=matcher.note() if matcher else None))''',
+        '''        out.update(partial("text_scan", stopped=None))''',
         [SEARCHWORK + "test_a_search_that_stopped_early_says_so"],
         'a search that stopped on its deadline returns the same shape as one that read the whole project, so "no hits" reads as "there are none"',
     ),
@@ -1752,6 +1746,38 @@ GUARDS = [
         [CHILD + "test_the_subjects_travel_on_stdin",
          CHILD + "test_a_wide_kana_class_is_measured_not_refused"],
         'base64 of ten 2000-character subjects is 27000 characters for ASCII and 83000 for Japanese, against a 32767 Windows limit, so every Japanese pattern with a moderate character class was refused as unsafe on a question the check never got to ask',
+    ),
+    Guard(
+        'a bounded repeat compounds its body', SAFETY,
+        """    elif inner_freedom > 1:""",
+        """    elif False:""",
+        [SPELLED
+         + "test_the_dangerous_spellings_are_refused_by_the_shape_gate_alone",
+         SPELLED + "test_two_spellings_of_one_shape_get_one_verdict"],
+        '`(?:a?){24}b` scored 2 and `"a?" * 24 + "b"` scored 16,777,216, which is one pattern written two ways: the bounded branch charged the count range once and multiplied the body in once instead of compounding it, so the cheap gate let through what it refused in the other spelling and only the measurement stood behind it',
+    ),
+    Guard(
+        'a run is built for every character a repeat can match', SAFETY,
+        ["""    if len(quantified) > MAX_MEASURED_SUBJECTS:""",
+         """    chosen = sorted(quantified
+                    | set(ordered[:MAX_SINGLE_CHARACTER_SUBJECTS])) or ["a"]""",
+         '    every = "".join(char * run for char in ordered)'],
+        # All three, together: the property is held three times over. With
+        # only the refusal reverted, the four hundred and eighty
+        # full-length subjects time the child out and the pattern is
+        # refused anyway; with only the selection reverted, the refusal
+        # catches it on the count; and the every-character subject reaches
+        # each character too, which is why a guard on that line alone read
+        # VACUOUS once the per-character runs existed. Any one of the three
+        # says nothing about whether a dangerous character is measured
+        # against a run of itself at all.
+        ["""    if False:""",
+         """    chosen = ordered[:MAX_SINGLE_CHARACTER_SUBJECTS] or ["a"]""",
+         '    every = "".join(char * run for char in ordered[:0])'],
+        [FAST + "test_every_costly_pattern_is_refused",
+         SUBJECTS + "test_a_hidden_character_still_reaches_a_subject",
+         SUBJECTS + "test_every_character_of_a_wide_alphabet_reaches_one"],
+        'the run each character got was PREFLIGHT_SUBJECT_CHARS divided by the alphabet, so four hundred and eighty non-letter literals in front of [a-z]+[a-z]+! left the longest measured letter run at four characters: the gate passed it in 0.063s and the pattern then costs about fifteen seconds per 2,000-letter string, uninterruptibly, for every string in the project',
     ),
     Guard(
         'the child refuses a stdin it cannot parse', SAFETY,
@@ -2167,6 +2193,76 @@ GUARDS = [
         'Show Choices renders every choice and the list length comes out of the file, not from MAX_CHOICES which bounds authoring: an Array of a million links to one string is three megabytes on disk',
     ),
     Guard(
+        'the cancel kind is an id like every other', COMMANDS,
+        ["""    cancel = _needs_int(entry.get("cancel", 5 if cancel_branch is not None
+                                  else 0), "cancel")""",
+         """    if not 0 <= cancel <= MAX_CANCEL_KIND:"""],
+        # Two anchors: the coercion refusal and the range refusal are
+        # different properties over one argument, and each of the two tests
+        # named below fails for only one of them.
+        ["""    cancel = int(entry.get("cancel", 5 if cancel_branch is not None
+                                  else 0))""",
+         """    if False:"""],
+        [DSLCHOICE + "test_a_coercible_cancel_is_refused",
+         DSLCHOICE + "test_a_cancel_outside_the_engines_range_is_refused"],
+        'the one caller-supplied number in the compilers still coerced: int(2.9) is 2 and int(True) is 1, so a wrong-typed cancel selected a different choice than the caller named and the reply reported the page rewritten -- and 99 wrote a value the interpreter has no branch for, against a comment that had stated the range all along',
+    ),
+    Guard(
+        'a rendered destination reads its designation', COMMANDS,
+        ["""    if p(0) == DESIGNATION_VARIABLE:
+        return ("%s: map from variable %s at (variable %s, variable %s)"
+                % (name, p(TRANSFER_MAP), p(TRANSFER_X), p(TRANSFER_Y)))""",
+         """    if p(0) == DESIGNATION_VARIABLE:
+        return "%s: troop from variable %s" % (name, p(1))"""],
+        # Two anchors, one per renderer: each test below fails for only its
+        # own command, and the property is that neither reads a number
+        # without reading what the number is.
+        ["""    if False:
+        return ("%s: map from variable %s at (variable %s, variable %s)"
+                % (name, p(TRANSFER_MAP), p(TRANSFER_X), p(TRANSFER_Y)))""",
+         """    if False:
+        return "%s: troop from variable %s" % (name, p(1))"""],
+        [BYTES + "test_a_variable_designated_transfer_says_so",
+         BYTES + "test_a_variable_designated_battle_says_so"],
+        'designation 1 means the numbers that follow are variable ids, which `references.REFERENCE_RULES` already pins with requires {0: 0} so the lint does not check one against the map list -- while the renderer read them as a destination either way and answered "map 3 at (5, 6)" for a transfer that goes wherever three variables say',
+    ),
+    Guard(
+        'an unmodelled condition renders a bounded line', COMMANDS,
+        """    return "condition type %s %s" % (brief(kind), brief(params[1:]))""",
+        """    return "condition type %s %s" % (kind, params[1:])""",
+        [BYTES + "test_an_unknown_condition_kind_is_capped"],
+        'the kind selects this branch and comes out of the file, and `%s` on a list reprs every element with nothing capping either: an Array of a million links to one string is three megabytes on disk and one walk step',
+    ),
+    Guard(
+        'a slot that is not a command renders a bounded line', COMMANDS,
+        """            lines.append("%3d| <not an RPG::EventCommand: %s>"
+                         % (index, brief(command)))""",
+        """            lines.append("%3d| <not an RPG::EventCommand: %r>"
+                         % (index, command))""",
+        [BYTES + "test_a_command_that_is_not_a_command_is_capped"],
+        'this branch exists because `@list` is an Array out of the file whose elements need not be commands, and it printed the element whole -- `%r` on an Array of a million links, once per slot, up to MAX_WALK_STEPS slots',
+    ),
+    Guard(
+        'a command name is built from a coerced code', COMMANDS,
+        """    number = as_int(code)
+    if number is None:""",
+        """    number = code
+    if False:""",
+        [BYTES + "test_a_command_code_that_is_not_a_number_is_rendered_anyway"],
+        'a `@code` holding a Ruby String raised "%d format: a real number is required" and an Array raised "unhashable type" at the lookup, so one crafted command made a whole map unreadable through event_get while validate reported nothing wrong with it',
+    ),
+    Guard(
+        'a command is dispatched on a coerced code', COMMANDS,
+        """    raw = command.get("code", CODE_BLANK)
+    code = CODE_BLANK if raw is None else as_int(raw)
+    if code is None:
+        return command_name(raw)""",
+        """    raw = command.get("code", CODE_BLANK)
+    code = raw or CODE_BLANK""",
+        [BYTES + "test_a_command_code_that_is_not_a_number_is_rendered_anyway"],
+        'dispatch is equality on an int and `dict.get` raises for an unhashable key rather than missing it, so an Array in the code slot raised TypeError before any renderer was reached',
+    ),
+    Guard(
         'a capped list is sliced before it is built', RUBYTYPES,
         '    shown = [render(value) for value in items[:limit]]',
         '    shown = [render(value) for value in items]',
@@ -2346,8 +2442,16 @@ GUARDS = [
     ),
     Guard(
         'an unreadable alphabet is a refusal', SAFETY,
-        '    if depth > MAX_ALPHABET_DEPTH:',
-        '    if False:',
+        ['''    if depth > MAX_ALPHABET_DEPTH:
+        # Refused, not returned empty.''',
+         '    if depth > MAX_ALPHABET_DEPTH:  # in `_quantified`'],
+        # Both, because the refusal is written twice now: `_alphabet` and
+        # `_quantified` each stop at the same depth and `_subjects` calls
+        # both, so reverting either alone leaves the other refusing and says
+        # nothing about whether the property is held at all.
+        ['''    if False:
+        # Refused, not returned empty.''',
+         '    if False:  # in `_quantified`'],
         [ALPHABET + "test_a_pattern_too_deep_to_read_is_refused"],
         'past the cap this returned an empty alphabet, and an empty alphabet is not "no characters" but "could not tell" -- so every subject became a run of a, and a nested pattern measured at 0.0001s against a subject it cannot fail on while taking 3.9s per 2,000-digit string in the server, uninterruptibly',
     ),

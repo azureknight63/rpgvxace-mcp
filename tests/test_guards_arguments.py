@@ -1180,6 +1180,43 @@ class TestAChoiceBranchIsNeverDropped(ToolTest):
                     self.compile_choices(["Yes", "No"], given)
                 self.assertIn("branches", str(caught.exception))
 
+    def test_a_coercible_cancel_is_refused(self):
+        """The one bare `int()` left in the compilers.
+
+        `int(2.9)` is 2 and `int(True)` is 1, so a wrong-typed cancel
+        selected a different choice than the caller named and the reply
+        said the page had been rewritten -- the defect `_compile_variable`
+        and `_compile_transfer` both carry a paragraph about. `{"cancel":
+        "x"}` escaped as a bare ValueError rather than a CommandError, so
+        the caller was told an argument "was not the shape the tool
+        expected" without being told which.
+        """
+        for given in (2.9, True, "1", None):
+            with self.subTest(cancel=given):
+                with self.assertRaises((ToolError, CommandError)) as caught:
+                    self.compile_choices(["Yes", "No"], [[], []],
+                                         cancel=given)
+                self.assertIn("cancel", str(caught.exception))
+
+    def test_a_cancel_outside_the_engines_range_is_refused(self):
+        """0 disallows cancelling, 1..4 picks a choice, 5 is a branch.
+
+        The comment above the parameter has said so all along; nothing
+        checked it, so `{"cancel": 99}` wrote a value the interpreter has
+        no branch for and reported success.
+        """
+        for given in (-1, 6, 99):
+            with self.subTest(cancel=given):
+                with self.assertRaises((ToolError, CommandError)):
+                    self.compile_choices(["Yes", "No"], [[], []],
+                                         cancel=given)
+
+    def test_every_cancel_the_engine_takes_still_compiles(self):
+        for given in (0, 1, 2, 3, 4, 5):
+            with self.subTest(cancel=given):
+                self.assertTrue(self.compile_choices(
+                    ["Yes", "No"], [[], []], cancel=given))
+
     def test_no_branches_at_all_is_still_allowed(self):
         """Absent is not malformed: Show Choices with no bodies is legal."""
         out = self.call("event_edit", map_id=1, dry_run=True, ops=[{

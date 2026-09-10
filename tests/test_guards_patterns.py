@@ -24,6 +24,7 @@ from rpgvxace_mcp.tools.search_tools import (  # noqa: E402
 from rpgvxace_mcp.tools import pattern_safety  # noqa: E402
 from rpgvxace_mcp.tools.pattern_safety import (  # noqa: E402
     MAX_ALPHABET_DEPTH,
+    MAX_SUBJECT_BYTES,
     PatternTooCostly,
     _REPEATS,
     _alphabet,
@@ -92,6 +93,24 @@ class TestSearchPatternsStayFast(ToolTest):
 
     SUBJECTS = (LETTERS, DIGITS, SPACES, MIXED, ALTERNATING)
 
+    # Four hundred and eighty distinct literals, none of them a letter, in
+    # front of two quantifiers over one class. Every one of them lands in
+    # the alphabet, so dividing one subject between them gave each a run of
+    # four characters -- and a run is the unit the cost is in. Measured on
+    # the pattern below: the gate passed it in 0.063 seconds with the
+    # longest run of "a" in any measured subject being four characters,
+    # while `[a-z]+[a-z]+!` against a real 2,000-letter string costs about
+    # fifteen seconds, uninterruptibly, per string in the project.
+    #
+    # 0.0020s at 100 letters, 0.0156s at 200, 0.1228s at 400, 0.9782s at
+    # 800: eight times the work for twice the run, which is why measuring a
+    # run of four says nothing at all about a run of two thousand.
+    WIDE_FILLER = "".join(
+        chr(code) for code in
+        list(range(0x21, 0x21 + 60)) + list(range(0x100, 0x100 + 420))
+        if chr(code) not in "]^-" + chr(92))
+
+
     # (pattern, the subject it is fatal against, how it evades a cost model).
     # Every time here was measured in a killable child process; ">15s" means
     # the child was still running when it was killed.
@@ -136,6 +155,13 @@ class TestSearchPatternsStayFast(ToolTest):
         # `Gold\s+\d+`, which is instant, so no score can separate them.
         ("a*a*c", LETTERS, "two stars, one character"),
         ("[a-z]+[a-z]+!", LETTERS, "two quantifiers, one class"),
+        ("(?:a?){24}b", LETTERS,
+         "a bounded repeat over a two-way body, which the shape score "
+         "charged once instead of compounding"),
+        ("(?:a{0,5}){10}z", LETTERS, "the same, over a six-way body"),
+        ("[" + WIDE_FILLER + "]?[a-z]+[a-z]+!", LETTERS,
+         "the same two quantifiers, with the alphabet padded until no "
+         "measured subject held a run"),
         (r"\w+\d+!", DIGITS, "two quantifiers, overlapping classes"),
 
         # A nullable atom does not separate its neighbours: it can match
@@ -177,6 +203,72 @@ class TestSearchPatternsStayFast(ToolTest):
             with self.subTest(shape=why, pattern=pattern[:28]):
                 with self.assertRaises((PatternTooCostly, ToolError)):
                     check_pattern(pattern)
+
+    # The attacks whose shape arithmetic alone can see: a nullable atom
+    # does not separate its neighbours, because it can match empty and the
+    # atoms either side of it stay adjacent in the subject. The cheap gate
+    # is supposed to catch these without spawning anything.
+    NULLABLE_CHAINS = (r"\w?\W?" * 24 + "\x00",
+                       "a?b?" * 24 + "c",
+                       r"\d?\s?" * 24 + "\x00",
+                       "=?~?" * 24 + "!")
+
+    def test_the_shape_gate_refuses_a_nullable_chain_alone(self):
+        """`check_shape`, not `check_pattern`.
+
+        The whole corpus test cannot hold this any more: every quantified
+        character now gets a full-length run of its own, so the
+        *measurement* refuses these whether or not the score sees the
+        shape -- which read as the score's guard being vacuous when it is
+        the thing standing behind a measurement that can be defeated.
+        """
+        for pattern in self.NULLABLE_CHAINS:
+            with self.subTest(pattern=pattern[:20]):
+                with self.assertRaises(PatternTooCostly):
+                    check_shape(pattern)
+
+    def test_every_refusal_says_what_to_do_instead(self):
+        """And says it with the figure that is actually true.
+
+        The advice was hand-written at eight sites in four wordings, two of
+        which promised that a plain substring search "reads every string in
+        full" -- untrue since `subject_text` began slicing at
+        MAX_SUBJECT_BYTES, and worst on the timeout verdict, which offers
+        the plain path *as the remedy*: a caller told there is no cut
+        leaves regex off, gets no hits, and reads a truncated absence as a
+        real one. Round 11b fixed one of the wordings, which is what
+        happens to a sentence written eight times.
+
+        Every refusal, not one test per message: this is the corpus of
+        things that get refused, so it is the list that catches a ninth
+        refusal added without the sentence.
+        """
+        figure = "{:,}".format(MAX_SUBJECT_BYTES)
+        for pattern, _subject, why in self.ATTACKS:
+            with self.subTest(shape=why):
+                with self.assertRaises((PatternTooCostly, ToolError)) as bad:
+                    check_pattern(pattern)
+                self.assertIn(figure, str(bad.exception),
+                              "this refusal does not say how much a plain "
+                              "search reads: " + str(bad.exception))
+
+    def test_nothing_claims_a_search_reads_a_whole_string(self):
+        """The phrase itself, gone from the source rather than corrected.
+
+        Four sites said it, one round fixed one of them, and a fifth said
+        it in a *docstring* about how many sites said it. A scan is the
+        only version of this that stays fixed.
+        """
+        root = Path(__file__).resolve().parent.parent / "src"
+        said = []
+        for path in sorted(root.rglob("*.py")):
+            for number, line in enumerate(
+                    path.read_text(encoding="utf-8").split("\n"), 1):
+                if "string in full" in line or "strings in full" in line:
+                    said.append("%s:%d" % (path.name, number))
+        self.assertEqual(said, [],
+                         "a plain search reads MAX_SUBJECT_BYTES of each "
+                         "string, not all of it: " + ", ".join(said))
 
     def test_the_tool_refuses_them_too(self):
         """Through `search`, so the refusal reaches the caller as a ToolError."""
@@ -262,6 +354,69 @@ class TestLookaroundIsRefusedByName(ToolTest):
                 message = str(caught.exception)
                 self.assertIn("lookahead", message)
                 self.assertNotIn("repeats a group", message)
+
+
+class TestTheShapeScoreDoesNotDependOnHowARepeatIsSpelled(unittest.TestCase):
+    """`(?:a?){24}b` and `a?a?a?...b` are the same pattern.
+
+    The cheap gate scored the second 2**24 and refused it, and scored the
+    first 2 and let it through: `_repeat_atom` charged a bounded repeat its
+    *count range* and multiplied the body's freedom in once, where the real
+    freedom compounds -- twenty-four independent two-way choices, whichever
+    way they are written. Eight million times apart, for one pattern.
+
+    Both were caught by the measurement, which is the expensive gate and
+    the one `_subjects` shows can be defeated by a pattern that dilutes its
+    own alphabet. The cheap gate exists so that the measurement is not the
+    only thing standing there, and a gate that reads two spellings of one
+    pattern differently is not doing that job.
+
+    Measured: `(?:a?){24}b` does not finish against a hundred letters --
+    the cost is in the repeat count, not in the subject, so a short string
+    is no protection either.
+    """
+
+    # (grouped, spelled out, what the choice is). The third pair is not
+    # dangerous either way -- each atom consumes exactly one character, so
+    # there is nothing to backtrack over -- and it is here because the
+    # property is that the two spellings agree, not that either is refused.
+    SPELLINGS = (
+        ("(?:a?){24}b", "a?" * 24 + "b", "twenty-four two-way choices"),
+        ("(?:a{0,5}){10}z", "a{0,5}" * 10 + "z", "ten six-way choices"),
+        ("(?:(?:a|b)){20}c", "(?:a|b)" * 20 + "c", "twenty fixed-width "
+         "branch choices, which cost nothing"),
+    )
+
+    DANGEROUS = SPELLINGS[:2]
+
+    def refused(self, pattern):
+        try:
+            check_shape(pattern)
+        except PatternTooCostly:
+            return True
+        return False
+
+    def test_two_spellings_of_one_shape_get_one_verdict(self):
+        for grouped, spelled, why in self.SPELLINGS:
+            with self.subTest(shape=why):
+                self.assertEqual(
+                    self.refused(grouped), self.refused(spelled),
+                    "the shape gate reads these two spellings of one "
+                    "pattern differently: %r and %r" % (grouped, spelled))
+
+    def test_the_dangerous_spellings_are_refused_by_the_shape_gate_alone(self):
+        for grouped, spelled, why in self.DANGEROUS:
+            with self.subTest(shape=why):
+                self.assertTrue(self.refused(spelled), spelled)
+                self.assertTrue(self.refused(grouped), grouped)
+
+    def test_an_honest_bounded_repeat_still_passes(self):
+        """The fix must not refuse a pattern a caller would really write."""
+        for pattern in (r"\d{1,3} damage", r"(?:\d{1,3}\.){3}\d{1,3}",
+                        "(?:Elixir|Potion)s?", r"[0-9]{2,4}",
+                        r"(?:ab|cd){2}", r"Show Text.{0,40}Gold"):
+            with self.subTest(pattern=pattern):
+                check_shape(pattern)
 
 
 class TestTheShapeGateFailsClosed(unittest.TestCase):

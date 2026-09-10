@@ -329,60 +329,27 @@ class _Hits:
             "may_have_more": self.full,
             "scopes_searched": self.searched,
         }
-        # Whether or not anything was found: the description says
-        # `may_have_more` is true "when the page filled *or* when any part
-        # of the project was not read or not reached", and this asked for
-        # both. Three hits and a corrupt Scripts file answered
-        # `files_not_read` beside `may_have_more: false`, so a caller
-        # branching on the flag read a partial search as complete.
-        if (self.empty or self.unsearchable or self.unreadable):
-            # Nothing found, and something was not read: a scope that opened
-            # nothing, a file that would not load, or a script slot that would
-            # not inflate. Any of the three makes an empty result
-            # indistinguishable from a completed search of a project that does
-            # not contain the text -- and the tool's own description points a
-            # caller at this field as the one that says whether the scan ran
-            # out of project.
-            out["may_have_more"] = True
         matcher = self.matcher
-        if matcher is not None and matcher.clipped:
-            out["strings_clipped_to_first_chars"] = {
-                "characters": MAX_SUBJECT_CHARS, "count": matcher.clipped}
-            # Two windows, so two sentences: a regex is matched against
-            # the first MAX_SUBJECT_CHARS *characters* of a decoded
-            # subject, and a plain search reads the first
-            # MAX_SUBJECT_BYTES *bytes* before decoding. This note was
-            # written for the first and served for both, so it reported a
-            # character figure for a byte cut and offered "leave regex off
-            # to read every string in full" to a caller who had.
-            if matcher.whole:
-                out["strings_clipped_note"] = (
-                    "%d string%s longer than %s bytes, so only the first "
-                    "%s bytes of each was searched. A hit past that point "
-                    "was not found. Narrow the scope, or read the file "
-                    "directly with db_get or scripts."
-                    % (matcher.clipped,
-                       "s were" if matcher.clipped > 1 else " was",
-                       "{:,}".format(MAX_SUBJECT_BYTES),
-                       "{:,}".format(MAX_SUBJECT_BYTES)))
-            else:
-                out["strings_clipped_note"] = (
-                    "%d string%s longer than %s characters, and a regular "
-                    "expression is matched against that much of each. A "
-                    "hit past that point was not found. Search for a plain "
-                    "substring (leave regex off) to read %s bytes of each "
-                    "instead."
-                    % (matcher.clipped,
-                       "s were" if matcher.clipped > 1 else " was",
-                       "{:,}".format(MAX_SUBJECT_CHARS),
-                       "{:,}".format(MAX_SUBJECT_BYTES)))
-        # All three through `partial`, which owns the suffixes. One mapping
-        # per subject, not one key per scope: `"%s_note" % scope` built a key
-        # name out of data, so a caller could not look it up in any schema
-        # and had to guess at four possible spellings.
+        clipped = matcher is not None and matcher.clipped
+        if clipped:
+            # The cut this path actually made, in the unit it made it in: a
+            # regex is matched against the first MAX_SUBJECT_CHARS
+            # *characters* of a decoded subject, and a plain search reads
+            # the first MAX_SUBJECT_BYTES *bytes* before decoding. This key
+            # reported the character figure on both paths, so a caller
+            # parsing it got a number four times too small in the wrong
+            # unit for the search that is the default.
+            out["strings_clipped_to_first"] = (
+                {"characters": MAX_SUBJECT_CHARS, "count": matcher.clipped}
+                if not matcher.whole else
+                {"bytes": MAX_SUBJECT_BYTES, "count": matcher.clipped})
+        # All of these through `partial`, which owns the suffixes. One
+        # mapping per subject, not one key per scope: `"%s_note" % scope`
+        # built a key name out of data, so a caller could not look it up in
+        # any schema and had to guess at four possible spellings.
         #
-        # Three subjects because there are three key spaces, not because
-        # there are three kinds of fact: `empty` is keyed by scope,
+        # Three `not_read` subjects because there are three key spaces, not
+        # because there are three kinds of fact: `empty` is keyed by scope,
         # `unsearchable` by data file, `unreadable` by script slot. They
         # were `scopes_not_read`, `could_not_read` and
         # `scripts_not_searched` -- one inside the vocabulary, one whose
@@ -392,26 +359,59 @@ class _Hits:
         out.update(partial("scopes", not_read=self.empty))
         out.update(partial("files", not_read=self.unsearchable))
         # Slot index to reason, because `_not_read` is a mapping: this was a
-        # bare list of indices, which says which and never says why.
-        # Each slot's own reason, which `load_scripts` already recorded:
-        # five causes reach here and two of them -- an unexpected row shape
-        # and a body that is not a String -- are not inflate failures.
+        # bare list of indices, which says which and never says why. Each
+        # slot's own reason, which `load_scripts` already recorded: five
+        # causes reach here and two of them -- an unexpected row shape and a
+        # body that is not a String -- are not inflate failures.
         out.update(partial("scripts", not_read=dict(self.unreadable)))
-        stopped = self.walk.note("search")
-        if stopped:
-            out.update(partial("command_walk", stopped=stopped))
-            # So an empty result cannot read as "there are none".
-            out["may_have_more"] = True
-        if matcher is not None and matcher.clipped:
-            # A clipped subject is "part of the project not read", which
-            # the tool description says this flag covers. It was set for
-            # every other such fact and not this one.
-            out["may_have_more"] = True
-        spent = matcher.note() if matcher is not None else None
-        if spent:
-            out["text_scan_stopped"] = spent
+        # Subject "strings_clipped", so the key is the `strings_clipped_note`
+        # it has always been rather than a rename: `partial` owns the
+        # suffix, not the subject.
+        out.update(partial("strings_clipped",
+                           notes=(_clipped_note(matcher),)))
+        out.update(partial("command_walk", stopped=self.walk.note("search")))
+        out.update(partial("text_scan",
+                           stopped=matcher.note() if matcher else None))
+        # One place, and a list of reasons rather than five assignments.
+        # `may_have_more` is the field whose meaning has already drifted
+        # once -- see the class docstring -- and it was written at five
+        # points down this method, so a sixth reason could be added without
+        # joining the four that were already there.
+        if (self.empty or self.unsearchable or self.unreadable or clipped
+                or "command_walk_stopped" in out
+                or "text_scan_stopped" in out):
             out["may_have_more"] = True
         return out
+
+
+def _clipped_note(matcher: "_Matcher | None") -> str:
+    """What was cut, in the unit the path that cut it measures in.
+
+    Two windows, so two sentences. The note was written for the regex path
+    and served on both, so it reported a character figure for a byte cut
+    and told a caller who had already left regex off to leave regex off.
+
+    Out of `_Hits.reply`, which was a hundred and five lines: this is the
+    thirty of them that are about one field.
+    """
+    if matcher is None or not matcher.clipped:
+        return ""
+    were = "s were" if matcher.clipped > 1 else " was"
+    if matcher.whole:
+        return ("%d string%s longer than %s bytes, so only the first %s "
+                "bytes of each was searched. A hit past that point was not "
+                "found. Narrow the scope, or read the file directly with "
+                "db_get or scripts."
+                % (matcher.clipped, were,
+                   "{:,}".format(MAX_SUBJECT_BYTES),
+                   "{:,}".format(MAX_SUBJECT_BYTES)))
+    return ("%d string%s longer than %s characters, and a regular expression "
+            "is matched against that much of each. A hit past that point was "
+            "not found. Search for a plain substring (leave regex off) to "
+            "read %s bytes of each instead."
+            % (matcher.clipped, were,
+               "{:,}".format(MAX_SUBJECT_CHARS),
+               "{:,}".format(MAX_SUBJECT_BYTES)))
 
 
 def _about(code: int) -> dict[str, Any]:
@@ -663,9 +663,27 @@ class _Matcher:
         if self._clock() >= self._deadline:
             self.exhausted = True
             return False
-        if not self.whole and len(text) > MAX_SUBJECT_CHARS:
-            self.clipped += 1
+        self.saw_characters(len(text))
         return self._test(text)
+
+    def saw_characters(self, length: int) -> None:
+        """Count a clip on the regex path, which measures in characters."""
+        if not self.whole and length > MAX_SUBJECT_CHARS:
+            self.clipped += 1
+
+    def saw_bytes(self, length: int) -> None:
+        """Count a clip on the plain path, which measures in bytes.
+
+        A method rather than `matcher.clipped += 1` in `subject_text`: the
+        counter was incremented from two places under opposite conditions,
+        one of them reaching into the object and testing `matcher.whole`
+        itself, and the comment in `subject_text` records that this
+        arrangement double-counted once already. An agent editing either
+        site could not see the other. `TestOneOwnerForTheClipCount` is the
+        rule that keeps the test in here.
+        """
+        if self.whole and length > MAX_SUBJECT_BYTES:
+            self.clipped += 1
 
     def note(self) -> "str | None":
         """What the reply says when the deadline stopped the search."""
@@ -701,12 +719,11 @@ def subject_text(ctx: Context, value: RubyString,
     """
     raw = value.data
     text = ctx.codec.decode(raw[:MAX_SUBJECT_BYTES])
-    # Only for a plain search. `_Matcher.__call__` counts the regex
-    # path's clip itself, on the decoded length, so counting here as well
-    # reported two clipped strings where one was clipped.
-    if (matcher is not None and matcher.whole
-            and len(raw) > MAX_SUBJECT_BYTES):
-        matcher.clipped += 1
+    if matcher is not None:
+        # The matcher decides whether this counts: it knows which window it
+        # is measuring in, and counting here as well as in `__call__`
+        # reported two clipped strings where one was clipped.
+        matcher.saw_bytes(len(raw))
     return text
 
 

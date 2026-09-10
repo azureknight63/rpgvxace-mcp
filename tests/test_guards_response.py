@@ -185,9 +185,11 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
         "MAX_BOUNDED_WEIGHT": "one atom's weight in the shape score",
         "MAX_BACKTRACK_PATHS": "the shape score's own budget",
         "UNBOUNDED_WEIGHT": "one atom's weight in the shape score",
+        "MAX_MEASURED_SUBJECTS": "how many characters a pattern may quantify "
+                                 "before this server declines to judge it",
         "MAX_SINGLE_CHARACTER_SUBJECTS": "how many of a pattern's characters "
-                                         "get a homogeneous subject of "
-                                         "their own",
+                                         "get a homogeneous subject of their "
+                                         "own wherever they appear",
         "MAX_MEASURED_CACHED": "how many passed patterns are remembered",
         # Server plumbing, not a tool contract.
         "MAX_BATCH_MESSAGES": "JSON-RPC batch size",
@@ -537,6 +539,74 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
         huge = self.project.codec.make_string("A" * self.LONG)
         self.assert_short(self.line_for(101, [huge, 0, 0, 2]),
                           "a Show Text face field")
+
+    def test_an_unknown_condition_kind_is_capped(self):
+        """The last line of `describe_condition` renders the rest of the list.
+
+        `"condition type %s %s" % (kind, params[1:])` copies the list and
+        calls `repr` on every element, and `RubyString.__repr__` has no cap
+        -- so one code-111 command whose kind this server does not model
+        turned an Array of links into a string no bound reaches. The kind
+        comes out of the file, so it is a value a crafted map picks.
+        """
+        word = self.project.codec.make_string("x")
+        self.assert_short(self.line_for(111, [99] + [word] * self.FANOUT),
+                          "an unmodelled condition")
+
+    def test_a_command_that_is_not_a_command_is_capped(self):
+        """`render_script`'s other branch: `%r` on whatever the slot holds.
+
+        `@list` is an Array out of the file and nothing says its elements
+        are RPG::EventCommand objects, which is why this branch exists --
+        it just printed the object whole, and one element can be an Array
+        of a million links.
+        """
+        lines = command_module.render_script([list(range(self.FANOUT))],
+                                             self.project.codec)
+        self.assert_short(lines[0], "a command that is not one")
+
+    def test_a_variable_designated_transfer_says_so(self):
+        """`parameters[0]` is the designation, and both renderers ignored it.
+
+        Designation 1 means the three numbers that follow are *variable
+        ids*, not a map and a position -- which this project already knows,
+        because `REFERENCE_RULES` pins the map-id rule to `requires: {0: 0}`
+        so the lint does not check a variable id against the map list. The
+        renderer read them as the destination regardless, so a Transfer
+        Player through variables rendered as "map 3 at (5, 6)": a confident
+        line, wrong, and the kind a model acts on with a write.
+        """
+        line = self.line_for(201, [1, 3, 5, 6, 0, 0])
+        self.assertIn("variable", line)
+        direct = self.line_for(201, [0, 3, 5, 6, 0, 0])
+        self.assertNotIn("variable", direct)
+        self.assertIn("map 3", direct)
+
+    def test_a_variable_designated_battle_says_so(self):
+        """301's designation: 0 a troop id, 1 a variable, 2 random."""
+        self.assertIn("variable", self.line_for(301, [1, 5, False, False]))
+        self.assertIn("troop 5", self.line_for(301, [0, 5, False, False]))
+        self.assertIn("random", self.line_for(301, [2, 0, False, False]))
+
+    def test_a_command_code_that_is_not_a_number_is_rendered_anyway(self):
+        """`@code` is read from the file, and every other reader coerces it.
+
+        `command_name` built its default eagerly -- `"Unknown (%d)" % code`
+        -- so a Ruby String in that slot raised TypeError, and an Array
+        raised `unhashable type` one line earlier at the dict lookup. Both
+        made a whole map unreadable through `event_get` while `validate`
+        reported nothing wrong with it: the lint walk coerces the code and
+        this path did not.
+        """
+        for code in (self.project.codec.make_string("101"), [1, 2], None,
+                     2.5, True):
+            with self.subTest(code=code):
+                command = new_event_command(0, 0, [])
+                command.set("code", code)
+                line = command_module.summarize(command, self.project.codec)
+                self.assertIsInstance(line, str)
+                self.assert_short(line, "a command with a %s code"
+                                  % type(code).__name__)
 
     def test_a_crafted_command_is_bounded_through_event_get(self):
         """The reachable path, so the cap is not only a unit-test property."""

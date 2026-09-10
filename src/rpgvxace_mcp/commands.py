@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from .convert import TextCodec, decoded_text
-from .rubytypes import RubyObject, RubyString, as_list, rendered
+from .convert import TextCodec, brief, decoded_text
+from .rubytypes import RubyObject, RubyString, as_int, as_list, rendered
 from .schema import new_event_command, new_move_command
 
 # Every code the VX interpreter handles, plus the continuation codes that live
@@ -173,6 +173,13 @@ VARIADIC = "..."
 # VX Ace and VX both cap Show Choices at four.
 MAX_CHOICES = 4
 
+# The largest value RPG::EventCommand 102's parameters[1] takes: one
+# past the four choices the editor allows, which is the When Cancel
+# branch. Named because `_compile_choices` states the range in a comment
+# and now also enforces it, and two spellings of one range is how the
+# comment came to be the only thing holding it.
+MAX_CANCEL_KIND = MAX_CHOICES + 1
+
 # Indentation is read from the file, so it is clamped before being used to build
 # a string: a corrupt command can carry an indent of 2**30.
 MAX_RENDER_INDENT = 64
@@ -289,14 +296,20 @@ CODE_TRANSFER_PLAYER = 201
 CODE_CALL_COMMON_EVENT = 117
 CODE_SCRIPT, CODE_SCRIPT_MORE = 355, 655
 CODE_COMMENT = 108
-# The codes `compile_commands` emits and `summarize` dispatches on --
-# including the three other ways an event hands control back
-# (CODE_EXIT_EVENT for itself, CODE_GAME_OVER and CODE_RETURN_TO_TITLE
-# for the game), which the autorun rule reads as a set beside
-# CODE_TRANSFER_PLAYER. Named because those two tables spelled most of
+# The codes `compile_commands` emits, `summarize` dispatches on, or
+# another module reads by name. Named because those tables spelled most of
 # them as bare integers beside a few that had names, and a module that
-# names some of its codes and not others is one where the next one gets
-# a name only if the author happens to look.
+# names some of its codes and not others is one where the next one gets a
+# name only if the author happens to look --
+# `TestEveryCommandCodeConstantIsRead` is what holds the other direction,
+# that a name here is a name something uses.
+#
+# CODE_ERASE_EVENT, CODE_GAME_OVER and CODE_RETURN_TO_TITLE are here for
+# the third reason: `pages.CONTROL_RELEASING_CODES` reads them as a set
+# beside CODE_TRANSFER_PLAYER. This comment used to name CODE_EXIT_EVENT
+# as the third member of that set and omit CODE_ERASE_EVENT, which is a
+# prose copy of a set that lives in another module, wrong in both
+# directions -- so it does not describe the membership any more.
 CODE_EXIT_EVENT = 115
 CODE_LOOP = 112
 CODE_BREAK_LOOP = 113
@@ -307,14 +320,25 @@ CODE_WAIT = 230
 CODE_ERASE_EVENT = 214
 CODE_GAME_OVER = 353
 CODE_RETURN_TO_TITLE = 354
-# The continuation codes `summarize` renders as bare text. Named
-# because it dispatches on them, which is the same reason the eight
-# above have names -- and it spelled all eight numbers out anyway.
+# The two continuation codes `summarize` renders as bare text -- the
+# quoted line and nothing else, because the command they continue carries
+# the name.
 CODE_TEXT_LINE = 401
 CODE_COMMENT_LINE = 408
+
+# The rest of the codes `_SUMMARY_RENDERERS` dispatches on, and the four
+# `compile_commands` emits to close a structure it opened. This block held
+# a header written for the two above it, which said "the continuation codes
+# rendered as bare text" over nine constants of which seven are neither,
+# and two counts that matched nothing -- so it says what each group is
+# instead of how many there are.
 CODE_SHOW_CHOICES = 102
 CODE_CHOICE_BRANCH = 402
+CODE_WHEN_CANCEL = 403
+CODE_END_CHOICES = 404
 CODE_CONDITIONAL_BRANCH = 111
+CODE_ELSE = 411
+CODE_END_BRANCH = 412
 CODE_CONTROL_VARIABLES = 122
 CODE_SET_MOVE_ROUTE = 205
 CODE_BATTLE_PROCESSING = 301
@@ -322,6 +346,20 @@ CODE_MOVE_ROUTE_STEP = 505
 
 # Transfer Player (201): designation, map_id, x, y, direction, fade.
 TRANSFER_MAP, TRANSFER_X, TRANSFER_Y = 1, 2, 3
+
+# What `parameters[0]` says the three numbers after it are. 0 is the
+# destination itself; 1 means they are *variable ids* to read it from.
+# `references.REFERENCE_RULES` already pins the map-id rule to
+# `requires: {0: 0}` for this reason -- checking a variable id against the
+# map list would report a missing map that is not missing -- while the
+# renderer read them as a destination either way, so a Transfer Player
+# through variables rendered as "map 3 at (5, 6)".
+DESIGNATION_DIRECT, DESIGNATION_VARIABLE = 0, 1
+
+# Battle Processing (301) uses the same parameter for the same job, with one
+# more kind: a random encounter from the map's troop list, which names no
+# troop at all.
+BATTLE_DESIGNATION_RANDOM = 2
 
 # Conditional Branch (111) parameter 0: what kind of thing is being tested.
 COND_SWITCH = 0
@@ -388,8 +426,26 @@ class CommandError(ValueError):
     """Raised when a command entry cannot be compiled."""
 
 
-def command_name(code: int) -> str:
-    return COMMAND_NAMES.get(code, "Unknown (%d)" % code)
+def command_name(code: Any) -> str:
+    """The editor's name for a command code, whatever the file holds there.
+
+    `Any`, not `int`: `@code` is read from the file and every other reader
+    of it coerces (`command_rules`, `references` and `assets` all go
+    through `as_int`). This did not, and built its default eagerly, so a
+    Ruby String in that slot raised `TypeError: %d format` and an Array
+    raised `unhashable type` at the lookup -- making a whole map unreadable
+    through `event_get` while `validate` reported nothing wrong with it.
+
+    The default is built only when it is needed, which is the other half:
+    every named code paid for a discarded `%d` format.
+    """
+    number = as_int(code)
+    if number is None:
+        # `brief`, because this value is out of the file: a repr of a
+        # million-link Array is not a thing to put in a line of output.
+        return "Unknown (%s)" % brief(code)
+    known = COMMAND_NAMES.get(number)
+    return known if known is not None else "Unknown (%d)" % number
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +533,23 @@ def _variables_line(p: "_Params", codec: TextCodec, name: str) -> str:
                              VARIABLE_OPERATIONS.get(p(2), "?"), value)
 
 
+def _transfer_line(p: "_Params", codec: TextCodec, name: str) -> str:
+    if p(0) == DESIGNATION_VARIABLE:
+        return ("%s: map from variable %s at (variable %s, variable %s)"
+                % (name, p(TRANSFER_MAP), p(TRANSFER_X), p(TRANSFER_Y)))
+    return ("%s: map %s at (%s, %s)"
+            % (name, p(TRANSFER_MAP), p(TRANSFER_X), p(TRANSFER_Y)))
+
+
+def _battle_line(p: "_Params", codec: TextCodec, name: str) -> str:
+    if p(0) == BATTLE_DESIGNATION_RANDOM:
+        # No troop id at all: the engine picks from the map's encounter list.
+        return "%s: random encounter" % name
+    if p(0) == DESIGNATION_VARIABLE:
+        return "%s: troop from variable %s" % (name, p(1))
+    return "%s: troop %s" % (name, p(1))
+
+
 def _move_step_line(p: "_Params", codec: TextCodec, name: str) -> str:
     move = p(0)
     if isinstance(move, RubyObject):
@@ -488,9 +561,9 @@ def _move_step_line(p: "_Params", codec: TextCodec, name: str) -> str:
 
 # The codes `summarize` renders specially, and how. Keyed by code, which is
 # what the ninety-eight-line `if` chain this replaced dispatched on by hand
-# -- and seven of those tests named a bare integer beside twenty that used a
-# constant, in the module that defines them. As table keys they are named
-# once, and `TestACodeWithAConstantIsSpelledWithIt` reads the keys.
+# -- and seven of those tests named a bare integer in the module that
+# defines the constants. As table keys they are named once, and
+# `TestACodeWithAConstantIsSpelledWithIt` reads the keys.
 #
 # Every renderer takes the same three arguments and ignores what it does not
 # need, so the table can be walked without asking which shape each has --
@@ -524,14 +597,11 @@ _SUMMARY_RENDERERS: "dict[int, Callable[..., str]]" = {
         "%s: %s = %s" % (name, _text(p(0, ""), codec),
                          SWITCH_OPERATIONS.get(p(1), p(1)))),
     CODE_CALL_COMMON_EVENT: lambda p, codec, name: "%s: %s" % (name, p(0)),
-    CODE_TRANSFER_PLAYER: lambda p, codec, name: (
-        "%s: map %s at (%s, %s)"
-        % (name, p(TRANSFER_MAP), p(TRANSFER_X), p(TRANSFER_Y))),
+    CODE_TRANSFER_PLAYER: _transfer_line,
     CODE_SET_MOVE_ROUTE: lambda p, codec, name: (
         "%s: %s" % (name, _character(p(0)))),
     CODE_WAIT: lambda p, codec, name: "%s: %s frames" % (name, p(0)),
-    CODE_BATTLE_PROCESSING: lambda p, codec, name: (
-        "%s: troop %s" % (name, p(1))),
+    CODE_BATTLE_PROCESSING: _battle_line,
     CODE_SCRIPT: lambda p, codec, name: (
         "%s: %s" % (name, _text(p(0, ""), codec))),
     CODE_MOVE_ROUTE_STEP: _move_step_line,
@@ -549,7 +619,14 @@ def summarize(command: RubyObject, codec: TextCodec) -> str:
     because naming a code the open engine happens not to dispatch is harmless
     while failing to name one it does is not.
     """
-    code = command.get("code", CODE_BLANK) or CODE_BLANK
+    # Coerced before it is used as a key: dispatch is equality on an int,
+    # and `dict.get` raises for an unhashable value rather than missing.
+    # A code that is not a whole number gets named and nothing else --
+    # `command_name` is the one function here that takes anything.
+    raw = command.get("code", CODE_BLANK)
+    code = CODE_BLANK if raw is None else as_int(raw)
+    if code is None:
+        return command_name(raw)
     # `as_list`, not `or []`: a non-empty RubyHash here is truthy and
     # reaches `params[index]` as a TypeError.
     params = as_list(command.get("parameters"))
@@ -629,7 +706,11 @@ def describe_condition(params: list[Any], codec: TextCodec) -> str:
         return "button %s pressed" % _text(p(1, ""), codec)
     if kind == COND_SCRIPT:
         return "script: %s" % _text(p(1, ""), codec)
-    return "condition type %s %s" % (kind, params[1:])
+    # `brief`, not `%s`: this renders the rest of a list whose length and
+    # whose elements both come out of the file, and `%s` on a list calls
+    # `repr` on every element with nothing capping either. The kind is what
+    # selects this branch, so a crafted map picks it.
+    return "condition type %s %s" % (brief(kind), brief(params[1:]))
 
 
 def _character(value: Any) -> str:
@@ -643,7 +724,11 @@ def render_script(commands: list[Any], codec: TextCodec) -> list[str]:
     lines = []
     for index, command in enumerate(commands):
         if not isinstance(command, RubyObject):
-            lines.append("%3d| <not an RPG::EventCommand: %r>" % (index, command))
+            # `brief`, for the reason the branch exists: `@list` is an
+            # Array out of the file and nothing says its elements are
+            # commands, so one element can be an Array of a million links.
+            lines.append("%3d| <not an RPG::EventCommand: %s>"
+                         % (index, brief(command)))
             continue
         indent = command.get("indent", 0) or 0
         if not isinstance(indent, int) or isinstance(indent, bool):
@@ -878,9 +963,9 @@ def _compile_if(entry: dict[str, Any], enc: TextCodec, indent: int,
     out = [_cmd(CODE_CONDITIONAL_BRANCH, indent, params)]
     out += compile_commands(entry.get("then", []), enc, indent + 1, depth + 1)
     if entry.get("else"):
-        out.append(_cmd(411, indent, []))
+        out.append(_cmd(CODE_ELSE, indent, []))
         out += compile_commands(entry["else"], enc, indent + 1, depth + 1)
-    out.append(_cmd(412, indent, []))
+    out.append(_cmd(CODE_END_BRANCH, indent, []))
     return out
 
 
@@ -949,21 +1034,38 @@ def _compile_choices(entry: dict[str, Any], enc: TextCodec, indent: int,
             "nothing), or use cancel_branch for the cancel path."
             % (len(branches), len(choices), len(branches) - len(choices)))
     cancel_branch = entry.get("cancel_branch")
-    # parameters[1] selects cancel behaviour: 0 disallows cancelling, 1..4 picks
-    # that choice, 5 routes to a When Cancel branch. Passed through verbatim so
-    # an explicit value always wins.
-    cancel = entry.get("cancel", 5 if cancel_branch is not None else 0)
+    # parameters[1] selects cancel behaviour: 0 disallows cancelling, 1..4
+    # picks that choice, 5 routes to a When Cancel branch. An explicit value
+    # wins over the default this picks from `cancel_branch`.
+    #
+    # `_needs_int`, not `int()`: this was the one caller-supplied number in
+    # this file still coerced, and `int(2.9)` is 2 while `int(True)` is 1 --
+    # so a wrong-typed cancel selected a different choice than the caller
+    # named and the reply said the page had been rewritten. `int("x")` was
+    # worse: a bare ValueError, which the server reports as "an argument was
+    # not the shape the tool expected" without naming the argument.
+    #
+    # And range-checked, because the sentence above has always said what the
+    # range is while nothing held it: 99 wrote a value the interpreter has no
+    # branch for, and reported success.
+    cancel = _needs_int(entry.get("cancel", 5 if cancel_branch is not None
+                                  else 0), "cancel")
+    if not 0 <= cancel <= MAX_CANCEL_KIND:
+        raise CommandError(
+            "cancel must be 0 to %d: 0 disallows cancelling, 1 to %d picks "
+            "that choice, and %d routes to the cancel_branch. Got %r."
+            % (MAX_CANCEL_KIND, MAX_CHOICES, MAX_CANCEL_KIND, cancel))
     out = [_cmd(CODE_SHOW_CHOICES, indent,
-                [[enc.make_string(str(c)) for c in choices], int(cancel)])]
+                [[enc.make_string(str(c)) for c in choices], cancel])]
     for index, choice in enumerate(choices):
         out.append(_cmd(CODE_CHOICE_BRANCH, indent,
                         [index, enc.make_string(str(choice))]))
         body = branches[index] if index < len(branches) else []
         out += compile_commands(body, enc, indent + 1, depth + 1)
     if cancel_branch is not None:
-        out.append(_cmd(403, indent, []))
+        out.append(_cmd(CODE_WHEN_CANCEL, indent, []))
         out += compile_commands(cancel_branch, enc, indent + 1, depth + 1)
-    out.append(_cmd(404, indent, []))
+    out.append(_cmd(CODE_END_CHOICES, indent, []))
     return out
 
 
