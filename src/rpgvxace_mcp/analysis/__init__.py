@@ -102,5 +102,8 @@ from .lint import (  # noqa: F401
     check_map_tree,
     check_maps,
     check_tilesets,
+    command_assets,
+    map_assets,
+    page_graphic,
     validate,
 )

@@ -68,6 +68,13 @@ MAX_PATTERN_CHARS = 512
 # the subject; a hit past this point is not one a person was looking for.
 MAX_SUBJECT_CHARS = 2000
 
+# The same cap in bytes, for slicing before a decode: a UTF-8 character is
+# at most four bytes, so this can never cut a subject the matcher would
+# have read. Named because the product was written twice, once in the
+# slice and once in the test that reports the cut -- and a change to the
+# factor in one of the two makes the report wrong while the slice is right.
+MAX_SUBJECT_BYTES = MAX_SUBJECT_CHARS * 4
+
 # How long one search may spend applying its pattern.
 #
 # `pattern_safety.measure_cost` bounds one match -- about 0.2s against a
@@ -228,7 +235,8 @@ class _Hits:
         self.matcher = matcher
         self.searched: list[str] = []
         self.unsearchable: dict[str, str] = {}
-        self.unreadable: list[int] = []
+        # Slot index -> why it was not searched.
+        self.unreadable: dict[str, str] = {}
         # Scopes that opened nothing at all. Distinct from `unsearchable`,
         # which names a file and the error it raised: these are scopes where
         # the walk swallowed whatever went wrong, so the honest answer is
@@ -337,14 +345,34 @@ class _Hits:
         if matcher is not None and matcher.clipped:
             out["strings_clipped_to_first_chars"] = {
                 "characters": MAX_SUBJECT_CHARS, "count": matcher.clipped}
-            out["strings_clipped_note"] = (
-                "%d string%s longer than %d characters, and a regular "
-                "expression is matched against that much of each. A hit "
-                "further in was not found and is not reported as absent. "
-                "Search for a plain substring (leave regex off) to read every "
-                "string in full."
-                % (matcher.clipped, "s were" if matcher.clipped > 1 else " was",
-                   MAX_SUBJECT_CHARS))
+            # Two windows, so two sentences: a regex is matched against
+            # the first MAX_SUBJECT_CHARS *characters* of a decoded
+            # subject, and a plain search reads the first
+            # MAX_SUBJECT_BYTES *bytes* before decoding. This note was
+            # written for the first and served for both, so it reported a
+            # character figure for a byte cut and offered "leave regex off
+            # to read every string in full" to a caller who had.
+            if matcher.whole:
+                out["strings_clipped_note"] = (
+                    "%d string%s longer than %s bytes, so only the first "
+                    "%s bytes of each was searched. A hit past that point "
+                    "was not found. Narrow the scope, or read the file "
+                    "directly with db_get or scripts."
+                    % (matcher.clipped,
+                       "s were" if matcher.clipped > 1 else " was",
+                       "{:,}".format(MAX_SUBJECT_BYTES),
+                       "{:,}".format(MAX_SUBJECT_BYTES)))
+            else:
+                out["strings_clipped_note"] = (
+                    "%d string%s longer than %s characters, and a regular "
+                    "expression is matched against that much of each. A "
+                    "hit past that point was not found. Search for a plain "
+                    "substring (leave regex off) to read %s bytes of each "
+                    "instead."
+                    % (matcher.clipped,
+                       "s were" if matcher.clipped > 1 else " was",
+                       "{:,}".format(MAX_SUBJECT_CHARS),
+                       "{:,}".format(MAX_SUBJECT_BYTES)))
         # All three through `partial`, which owns the suffixes. One mapping
         # per subject, not one key per scope: `"%s_note" % scope` built a key
         # name out of data, so a caller could not look it up in any schema
@@ -362,13 +390,19 @@ class _Hits:
         out.update(partial("files", not_read=self.unsearchable))
         # Slot index to reason, because `_not_read` is a mapping: this was a
         # bare list of indices, which says which and never says why.
-        out.update(partial("scripts", not_read={
-            str(index): "the slot's body would not inflate"
-            for index in self.unreadable}))
+        # Each slot's own reason, which `load_scripts` already recorded:
+        # five causes reach here and two of them -- an unexpected row shape
+        # and a body that is not a String -- are not inflate failures.
+        out.update(partial("scripts", not_read=dict(self.unreadable)))
         stopped = self.walk.note("search")
         if stopped:
             out.update(partial("command_walk", stopped=stopped))
             # So an empty result cannot read as "there are none".
+            out["may_have_more"] = True
+        if matcher is not None and matcher.clipped:
+            # A clipped subject is "part of the project not read", which
+            # the tool description says this flag covers. It was set for
+            # every other such fact and not this one.
             out["may_have_more"] = True
         spent = matcher.note() if matcher is not None else None
         if spent:
@@ -450,6 +484,13 @@ def _search_database(ctx: Context, found: _Hits) -> None:
             if not isinstance(item, RubyObject):
                 continue
             for field, value in item.ivars.items():
+                # Before the decode, not inside the match. `_Matcher`
+                # returns False once its deadline is spent, so the loop ran
+                # on to the end of the row decoding 8 KB a field for
+                # nothing -- and one row can carry as many ivars as the
+                # file declares.
+                if found.done:
+                    return
                 if not isinstance(value, RubyString):
                     continue
                 text = subject_text(ctx, value, matcher)
@@ -498,7 +539,9 @@ def _search_scripts(ctx: Context, found: _Hits) -> None:
         if "code" not in script:
             # A slot whose body would not inflate was not searched, and saying
             # so beats reporting no hits in it.
-            found.unreadable.append(script["index"])
+            found.unreadable[str(script["index"])] = (
+                script.get("error")
+                or "the slot's body would not inflate")
             continue
         for line_number, line in enumerate(script["code"].splitlines(), start=1):
             if matcher and matcher(line):
@@ -643,13 +686,19 @@ def subject_text(ctx: Context, value: RubyString,
     was invisible; it counts `clipped` only when the pattern is a regex,
     and the command scope had already truncated the text before the matcher
     saw it. So for a plain search the difference moved out of the matcher
-    and became invisible again: a needle past 8,000 bytes of one script
-    line returned no hits and the reply said nothing about a subject it had
-    cut.
+    and became invisible again: a needle past `MAX_SUBJECT_BYTES` of one
+    database note field returned no hits and the reply said nothing about a
+    subject it had cut. A *script* line does not come through here --
+    `_search_scripts` matches it directly -- which is worth saying because
+    the first version of this docstring used one as the example.
     """
     raw = value.data
-    text = ctx.codec.decode(raw[:MAX_SUBJECT_CHARS * 4])
-    if matcher is not None and len(raw) > MAX_SUBJECT_CHARS * 4:
+    text = ctx.codec.decode(raw[:MAX_SUBJECT_BYTES])
+    # Only for a plain search. `_Matcher.__call__` counts the regex
+    # path's clip itself, on the decoded length, so counting here as well
+    # reported two clipped strings where one was clipped.
+    if (matcher is not None and matcher.whole
+            and len(raw) > MAX_SUBJECT_BYTES):
         matcher.clipped += 1
     return text
 

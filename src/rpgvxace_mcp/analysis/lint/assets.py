@@ -174,6 +174,68 @@ class _AssetChecker:
             "%d files in %s and any located RTP" % (len(pool), folder)))
 
 
+def map_assets(checker: _AssetChecker, map_id: int,
+               game_map: RubyObject) -> None:
+    """The graphic and audio names one map carries itself.
+
+    Public within the package, because two walks reach every map and
+    either may be the one that runs: `_check_map_assets` below when the
+    assets scope was asked for alone, and `check_event_pages` in `pages`
+    when the events scope is selected too and has the map open already.
+
+    One copy, here, in the module that owns `_AssetChecker`. Round 10f
+    merged those walks by *copying* this body into `pages` and then
+    describing the copy as a shared body in two docstrings -- so a reader
+    was told the second copy did not exist, and nothing held the two equal.
+    """
+    checker.check(game_map.get("parallax_name"), "parallaxes",
+                  _map_at(map_id, "parallax_name"))
+    if game_map.get("specify_battleback"):
+        for field, kind in (("battleback1_name", "battlebacks1"),
+                            ("battleback2_name", "battlebacks2")):
+            checker.check(game_map.get(field), kind, _map_at(map_id, field))
+    for field in ("bgm", "bgs"):
+        # Only when the map actually plays it. The editor keeps the name
+        # when autoplay is unchecked, so a stale one is not a problem the
+        # engine will ever hit.
+        if not game_map.get("autoplay_" + field):
+            continue
+        track = game_map.get(field)
+        if isinstance(track, RubyObject):
+            checker.check(track.get("name"), field, _map_at(map_id, field),
+                          "missing_audio")
+
+
+def page_graphic(checker: _AssetChecker, map_id: int, event_id: int,
+                 name: str, page_index: int, page: Any) -> None:
+    """The character graphic one event page names."""
+    if not isinstance(page, RubyObject):
+        return
+    graphic = page.get("graphic")
+    if isinstance(graphic, RubyObject):
+        checker.check(graphic.get("character_name"), "characters",
+                      lambda: _event_at(map_id, event_id, name, page_index))
+
+
+def command_assets(checker: _AssetChecker, code_int: "int | None",
+                   code: Any, params: list[Any], location: Location,
+                   index: int) -> None:
+    """The two asset references one event command can carry.
+
+    Reached from `_check_command_assets` below and from `check_commands`
+    in `command_rules`, for the same reason `map_assets` has two callers:
+    whichever walk is already reading the commands does these checks.
+    """
+    if code == CODE_SHOW_TEXT:
+        if params:
+            checker.check(params[0], "faces", lambda: location.at(index))
+    elif code_int in AUDIO_COMMAND_KINDS:
+        track = params[0] if params else None
+        if isinstance(track, RubyObject):
+            checker.check(track.get("name"), AUDIO_COMMAND_KINDS[code],
+                          lambda: location.at(index), "missing_audio")
+
+
 def check_assets(project: Project, map_ids: list[int],
                  budget: "WalkBudget | None" = None,
                  checker: "_AssetChecker | None" = None,
@@ -220,11 +282,10 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
                       budget: "WalkBudget | None" = None) -> None:
     """Map, event and page graphic and audio references.
 
-    The default run does not reach this: `check_event_pages` does these
-    checks inside the walk it already makes, and `_map_assets` and
-    `_page_graphics` in `pages` are the shared bodies. This is the path for
-    `validate scopes=["assets"]`, which has no such walk to join -- the
-    same arrangement `_check_command_assets` has.
+    The default run does not reach this: `check_event_pages` calls
+    `map_assets` and `page_graphic` inside the walk it already makes. This
+    is the path for `validate scopes=["assets"]`, which has no such walk to
+    join -- the same arrangement `_check_command_assets` has.
 
     Takes the budget `_check_command_assets` has always taken. Without it the
     only bound here was the collector's finding ceiling, and a page whose
@@ -238,22 +299,7 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
         # those two numbers come out of the file.
         if checker.full:
             return
-        checker.check(game_map.get("parallax_name"), "parallaxes",
-                      _map_at(map_id, "parallax_name"))
-        if game_map.get("specify_battleback"):
-            for field, kind in (("battleback1_name", "battlebacks1"),
-                                ("battleback2_name", "battlebacks2")):
-                checker.check(game_map.get(field), kind, _map_at(map_id, field))
-        for field in ("bgm", "bgs"):
-            # Only when the map actually plays it. The editor keeps the name
-            # when autoplay is unchecked, so a stale one is not a problem the
-            # engine will ever hit.
-            if not game_map.get("autoplay_" + field):
-                continue
-            track = game_map.get(field)
-            if isinstance(track, RubyObject):
-                checker.check(track.get("name"), field, _map_at(map_id, field),
-                              "missing_audio")
+        map_assets(checker, map_id, game_map)
         events = game_map.get("events")
         if not isinstance(events, RubyHash):
             continue
@@ -272,12 +318,8 @@ def _check_map_assets(project: Project, checker: _AssetChecker,
                     return
                 if not isinstance(page, RubyObject):
                     continue
-                graphic = page.get("graphic")
-                if isinstance(graphic, RubyObject):
-                    checker.check(
-                        graphic.get("character_name"), "characters",
-                        lambda: _event_at(map_id, event_id, name,
-                                          page_index))
+                page_graphic(checker, map_id, event_id, name,
+                             page_index, page)
 
 
 def _check_command_assets(project: Project, checker: _AssetChecker,
@@ -285,9 +327,8 @@ def _check_command_assets(project: Project, checker: _AssetChecker,
                           budget: "WalkBudget | None" = None) -> None:
     """The command asset references, when no other rule walked the lists.
 
-    The default run does not reach this: `check_commands` does these checks
-    inside the walk it already makes, and `_command_assets` in
-    `command_rules` is the shared body. This is the path for
+    The default run does not reach this: `check_commands` calls
+    `command_assets` inside the walk it already makes. This is the path for
     `validate scopes=["assets"]`, which has no such walk to join.
     """
     if not project.command_layouts_modelled:
@@ -304,19 +345,8 @@ def _check_command_assets(project: Project, checker: _AssetChecker,
             if not isinstance(command, RubyObject):
                 continue
             code = command.get("code", CODE_BLANK)
-            if code == CODE_SHOW_TEXT:
-                params = _seq(command.get("parameters"))
-                if params:
-                    checker.check(params[0], "faces",
-                                  lambda: location.at(index))
-            elif _int(code) in AUDIO_COMMAND_KINDS:
-                params = _seq(command.get("parameters"))
-                track = params[0] if params else None
-                if isinstance(track, RubyObject):
-                    checker.check(track.get("name"),
-                                  AUDIO_COMMAND_KINDS[code],
-                                  lambda: location.at(index),
-                                  "missing_audio")
+            command_assets(checker, _int(code), code,
+                           _seq(command.get("parameters")), location, index)
 
 
 def _check_database_assets(project: Project, checker: _AssetChecker,

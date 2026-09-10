@@ -800,8 +800,10 @@ def _compile_text(entry: dict[str, Any], enc: TextCodec,
         chunk = lines[start:start + MESSAGE_LINES_PER_BOX] or [""]
         # A fresh string per box: sharing one would make the writer emit an
         # object link and the engine load one shared, mutable String.
-        out.append(_cmd(101, indent, [enc.make_string(face_name), *face]))
-        out += [_cmd(401, indent, [enc.make_string(line)]) for line in chunk]
+        out.append(_cmd(CODE_SHOW_TEXT, indent,
+                        [enc.make_string(face_name), *face]))
+        out += [_cmd(CODE_TEXT_LINE, indent, [enc.make_string(line)])
+                for line in chunk]
     return out
 
 

@@ -11,11 +11,9 @@ from collections.abc import Set as AbstractSet
 from typing import Any
 
 from ...commands import (
-    AUDIO_COMMAND_KINDS,
     CODE_BLANK,
     CODE_JUMP_TO_LABEL,
     CODE_LABEL,
-    CODE_SHOW_TEXT,
     TRANSFER_X,
     TRANSFER_Y,
     command_name,
@@ -25,7 +23,6 @@ from ...rubytypes import RubyObject
 from ...schema import on_map
 from ..references import (
     MAP_TARGET,
-    REFERENCE_RULES,
     TABLE_NOUNS,
     _REFERENCE_CODES,
     _referenced_ids,
@@ -46,7 +43,10 @@ from .findings import (
     _Tables,
     _missing,
 )
-from .assets import _AssetChecker
+from .assets import (
+    _AssetChecker,
+    command_assets,
+)
 from .maps import _MapSizes
 
 
@@ -66,11 +66,6 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
     what the first was.
     """
     findings = _Findings.given(collected)
-    # A table absent from this mapping is one that could not be read, so
-    # the rules comparing ids against it are skipped rather than answered
-    # wrongly.
-    existing = {name: ids for name in REFERENCE_RULES if name != MAP_TARGET
-                for ids in [tables.ids(name)] if ids is not None}
 
     # Every map is *reachable*, because a transfer on map 1 can target any
     # map in the project -- but reachable is not the same as loaded. This was
@@ -127,11 +122,11 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
             code_int = _int(code)
             if code_int in _REFERENCE_CODES:
                 findings.extend(_check_references(
-                    code, params, existing, on_disk, map_sizes, location,
+                    code, params, tables, on_disk, map_sizes, location,
                     index))
             if checker is not None:
-                _command_assets(checker, code_int, code, params, location,
-                                index)
+                command_assets(checker, code_int, code, params,
+                               location, index)
             if code == CODE_JUMP_TO_LABEL and params:
                 if labels is None:
                     # Built on first use: most pages have no labels at all,
@@ -142,33 +137,6 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
 
         findings.extend(check_list_terminator(location, commands))
     return findings.items
-
-
-def _command_assets(checker: _AssetChecker, code_int: "int | None",
-                    code: Any, params: list[Any],
-                    location: Location, index: int) -> None:
-    """The two asset references a command can carry.
-
-    Here rather than in its own walk over the same lists. It was
-    `_check_command_assets` in `assets.py`, iterating every command of every
-    page a second time and charging the same shared allowance -- and the
-    charge comes from the file rather than from the rule, so the second walk
-    cost exactly what the first did. Command walking was twice its minimum
-    on the default run, whatever the project.
-
-    Everything it read -- the code, the parameters, the location -- the loop
-    above already has in a local, so this costs nothing per command beyond
-    the two tests. `checker.full` is `_AssetChecker`'s own business: it
-    returns before it counts anything.
-    """
-    if code == CODE_SHOW_TEXT:
-        if params:
-            checker.check(params[0], "faces", lambda: location.at(index))
-    elif code_int in AUDIO_COMMAND_KINDS:
-        track = params[0] if params else None
-        if isinstance(track, RubyObject):
-            checker.check(track.get("name"), AUDIO_COMMAND_KINDS[code],
-                          lambda: location.at(index), "missing_audio")
 
 
 def _check_indent(index: int, previous: int,
@@ -193,8 +161,7 @@ def _check_indent(index: int, previous: int,
         "editor." % (index, previous, indent), location.at(index))]
 
 
-def _check_references(code: Any, params: list[Any],
-                      existing: "dict[str, AbstractSet[int]]",
+def _check_references(code: Any, params: list[Any], tables: _Tables,
                       on_disk: AbstractSet[int], map_sizes: "_MapSizes",
                       location: Location, index: int) -> list[Finding]:
     """One rule: every id a command names is an id that exists.
@@ -208,9 +175,18 @@ def _check_references(code: Any, params: list[Any],
         if table == MAP_TARGET:
             findings += _check_transfer(value, params, on_disk, map_sizes,
                                         location, index)
-        elif table in existing:
-            ids = existing[table]
-            if value in ids:
+        else:
+            # Asked per reference, not gathered up front. The caller used
+            # to force `tables.ids()` for all seven referenced tables
+            # before reading a command, so a run scoped to one map still
+            # decoded Items, Weapons, Armors, Animations and Actors whether
+            # or not anything named them -- the database twin of the
+            # `_MapSizes` defect its own comment records at 74% of a
+            # whole-project run. `_Tables.ids` memoises both the rows and
+            # the id set, and None still means "could not be read", which
+            # is skipped rather than answered wrongly.
+            ids = tables.ids(table)
+            if ids is None or value in ids:
                 continue
             noun = TABLE_NOUNS[table]
             findings.append(_missing(

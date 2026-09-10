@@ -324,7 +324,8 @@ class TestSearchSaysWhatItDidNotRead(ToolTest):
                         scopes=["database"])
         self.assertEqual(out["hits"], [])
         self.assertIn("strings_clipped_note", out)
-        self.assertIn(str(MAX_SUBJECT_CHARS),
+        # Comma-formatted, like every other bound this server reports.
+        self.assertIn("{:,}".format(MAX_SUBJECT_CHARS),
                       out["strings_clipped_note"])
 
     def test_a_substring_search_reads_the_whole_string(self):

@@ -455,11 +455,19 @@ class TestTransportHardening(unittest.TestCase):
         self.assertIn("result", self.server.request("ping"))
 
     def test_a_rejected_method_is_not_echoed_in_full(self):
-        """A long string is sliced before it is quoted."""
+        """A long string is sliced before it is quoted.
+
+        Asserted at 160 rather than 400, which is what makes this hold
+        `MAX_ECHO_CHARS` rather than something else: `brief`'s bounded
+        `repr` caps a 5,000-character string at about 200 on its own, so a
+        limit of 400 passed with `MAX_ECHO_CHARS` set to 32 MB and the
+        guard on it came back VACUOUS. The cap here tightens 200 to 143,
+        and 160 is the figure that can tell the two apart.
+        """
         self.handshake()
         response = self.server.send_raw(json.dumps(
             {"jsonrpc": "2.0", "id": 3, "method": "x" * 5000}))
-        self.assertLess(len(response["error"]["message"]), 400)
+        self.assertLess(len(response["error"]["message"]), 160)
 
     def test_a_rejected_non_string_is_not_echoed_in_full(self):
         """And anything else is capped after it: a params object is not a
@@ -468,7 +476,8 @@ class TestTransportHardening(unittest.TestCase):
         response = self.server.send_raw(json.dumps(
             {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
              "params": list(range(5000))}))
-        self.assertLess(len(response["error"]["message"]), 400)
+        # 160, for the reason the sibling above records.
+        self.assertLess(len(response["error"]["message"]), 160)
 
 if __name__ == "__main__":
     unittest.main()

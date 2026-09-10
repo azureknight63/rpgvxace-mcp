@@ -27,12 +27,15 @@ from ..walk import (
     WalkBudget,
     _event_at,
     _int,
-    _map_at,
     _seq,
     _text,
     iter_maps,
 )
-from .assets import _AssetChecker
+from .assets import (
+    _AssetChecker,
+    map_assets,
+    page_graphic,
+)
 from .findings import (
     Finding,
     WARNING,
@@ -62,7 +65,7 @@ def check_event_pages(project: Project, map_ids: list[int],
     findings = _Findings.given(collected)
     for map_id, game_map in iter_maps(project, map_ids):
         if checker is not None:
-            _map_assets(checker, map_id, game_map)
+            map_assets(checker, map_id, game_map)
         events = game_map.get("events")
         if not isinstance(events, RubyHash):
             continue
@@ -90,48 +93,10 @@ def check_event_pages(project: Project, map_ids: list[int],
             findings.extend(_check_autorun(map_id, event_id, name, pages,
                                            budget))
             if checker is not None:
-                _page_graphics(checker, map_id, event_id, name, pages)
+                for index, page in enumerate(pages):
+                    page_graphic(checker, map_id, event_id, name,
+                                 index, page)
     return findings.items
-
-
-def _map_assets(checker: "_AssetChecker", map_id: int,
-                game_map: RubyObject) -> None:
-    """The graphic and audio names one map carries itself."""
-    checker.check(game_map.get("parallax_name"), "parallaxes",
-                  _map_at(map_id, "parallax_name"))
-    if game_map.get("specify_battleback"):
-        for field, kind in (("battleback1_name", "battlebacks1"),
-                            ("battleback2_name", "battlebacks2")):
-            checker.check(game_map.get(field), kind, _map_at(map_id, field))
-    for field in ("bgm", "bgs"):
-        # Only when the map actually plays it. The editor keeps the name
-        # when autoplay is unchecked, so a stale one is not a problem the
-        # engine will ever hit.
-        if not game_map.get("autoplay_" + field):
-            continue
-        track = game_map.get(field)
-        if isinstance(track, RubyObject):
-            checker.check(track.get("name"), field, _map_at(map_id, field),
-                          "missing_audio")
-
-
-def _page_graphics(checker: "_AssetChecker", map_id: int, event_id: int,
-                   name: str, pages: list[Any]) -> None:
-    """The character graphic each page of one event names.
-
-    No budget of its own and no `checker.full` test: the loop above charges
-    per page before it reaches this, and `_AssetChecker.check` returns
-    before it counts anything. This was its own walk with both, because it
-    was its own pass over the maps.
-    """
-    for page_index, page in enumerate(pages):
-        if not isinstance(page, RubyObject):
-            continue
-        graphic = page.get("graphic")
-        if isinstance(graphic, RubyObject):
-            checker.check(
-                graphic.get("character_name"), "characters",
-                lambda: _event_at(map_id, event_id, name, page_index))
 
 
 def _is_unconditional(page: Any) -> bool:

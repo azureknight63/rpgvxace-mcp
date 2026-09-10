@@ -91,6 +91,9 @@ from .assets import (  # noqa: F401
     _check_database_assets,
     _check_map_assets,
     check_assets,
+    command_assets,
+    map_assets,
+    page_graphic,
 )
 from .database import (  # noqa: F401
     NESTED_DB_REFERENCES,

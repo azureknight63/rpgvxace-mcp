@@ -477,7 +477,7 @@ class TestTheMapScopeStopsCollecting(ToolTest):
 
     def test_a_real_encounter_list_is_still_checked(self):
         """The ceiling must not stop a project's genuine findings."""
-        self.analysis.MAX_FINDINGS = 5000
+        self.lower_the_finding_ceiling(5000)
         missing = self.craft_bad_encounters()
         tables = self.analysis._Tables(self.project)
         found = self.analysis.check_maps(self.project, [1], tables)
@@ -488,7 +488,7 @@ class TestTheMapScopeStopsCollecting(ToolTest):
 
     def test_the_dimension_check_still_runs(self):
         """`check_maps` calls two sub-checks; stopping must not lose the other."""
-        self.analysis.MAX_FINDINGS = 5000
+        self.lower_the_finding_ceiling(5000)
         game_map = self.project.load_map(1)
         game_map.set("width", 999)          # disagrees with the tile table
         self.project.path_for(self.project.map_file(1)).write_bytes(
@@ -647,12 +647,9 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
                              "which is this server's own table",
         "_check_shadowing": "loops over one event's pages, which the "
                             "caller of `check_event_pages` has charged for",
-        "_map_assets": "loops over two field pairs of one map -- a fixed "
-                       "list in this file, not a length out of the project "
-                       "-- and its caller charges per map",
-        "_page_graphics": "loops over one event's pages, which the caller "
-                          "of `check_event_pages` has already charged for, "
-                          "per page, before reaching this",
+        "map_assets": "loops over two field pairs of one map -- a fixed "
+                      "list in this file, not a length out of the project "
+                      "-- and both its callers charge per map",
     }
 
     def modules(self):

@@ -720,11 +720,16 @@ GUARDS = [
     ),
     Guard(
         "restore validates every name before it copies", BACKUPS,
-        '            safe_component(name, "file name")',
-        '            pass  # check removed',
+        ['            safe_component(name, "file name")',
+         '            self.path_for(name)'],
+        ['            pass  # check removed',
+         '            pass  # destination check removed'],
         [RESTORE + "test_a_bad_name_in_the_snapshot_stops_before_anything_is_copied"],
         "a name is rejected inside the copy loop, after the safety snapshot "
-        "and after some files have already been written",
+        "and after some files have already been written. Two anchors, because "
+        "round 10d added the destination check beside the source one and the "
+        "property became doubly held -- reverting either alone left the other, "
+        "which is what the single-anchor version reported as VACUOUS",
     ),
     Guard(
         "an explicit --rtp does not claim completeness", PROJECT,
