@@ -7,6 +7,7 @@ Every rule here is about the difference between "we found nothing" and "we
 did not look".
 """
 
+import ast
 import shutil
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+sys.path.insert(0, str(HERE))  # tool_case: bare-name import must work from the repo root
 
 from build_project import build  # noqa: E402
 
@@ -53,9 +55,109 @@ from rpgvxace_mcp.tools import (  # noqa: E402
 )
 
 from tool_case import (  # noqa: E402
-    ToolTest,
-    ValidateTest,
+    ToolTest as _ToolTest,
+    ValidateTest as _ValidateTest,
 )
+
+
+class _BuildOnFirstUse:
+    """Defer the demo-project build until a test first touches the project.
+
+    `ToolTest.setUp` builds and opens a whole project for every method, and
+    a good many methods here only parse `src` or compare two tables and never
+    read it. `tmp`, `project` and `ctx` are what `setUp` creates, so each is a
+    property that runs the real `setUp` on first read or write -- a test that
+    uses the project gets exactly the fixture it always got, and one that does
+    not no longer pays for it. Writes build first too, so an early assignment
+    cannot be overwritten by a later build.
+
+    A class may also set `shared_fixture = True` when none of its tests
+    writes: it then gets one project for the class instead of one per
+    method. That is only safe while the claim is true, so it is enforced
+    rather than trusted -- every file's size and mtime is recorded when
+    the project is built and compared after each test, and a test that
+    changed anything fails by name.
+    """
+
+    _built = False
+    shared_fixture = False
+
+    @staticmethod
+    def _signature(root):
+        return sorted((str(path.relative_to(root)), path.stat().st_size,
+                       path.stat().st_mtime_ns)
+                      for path in root.rglob("*") if path.is_file())
+
+    @classmethod
+    def _shared(cls):
+        """The class's one project, built by the real `setUp` on first use."""
+        if "_shared_fixture" not in cls.__dict__:
+            holder = _ToolTest("setUp")
+            holder.engine, holder.read_only = cls.engine, cls.read_only
+            holder.setUp()
+            cls.addClassCleanup(holder.doCleanups)
+            cls._shared_fixture = (
+                holder, cls._signature(holder.tmp / "project"))
+        return cls._shared_fixture
+
+    def _assert_unchanged(self, holder, before):
+        self.assertEqual(
+            self._signature(holder.tmp / "project"), before,
+            "%s sets shared_fixture and a test wrote to the project it "
+            "shares" % type(self).__name__)
+
+    def setUp(self):
+        self._built = False
+
+    def _ensure_built(self):
+        if self._built:
+            return
+        self._built = True
+        if not self.shared_fixture:
+            super().setUp()
+            return
+        holder, before = self._shared()
+        self.addCleanup(self._assert_unchanged, holder, before)
+        self.__dict__.update(_tmp=holder.tmp, _project=holder.project,
+                             _ctx=holder.ctx)
+
+    @property
+    def tmp(self):
+        self._ensure_built()
+        return self.__dict__["_tmp"]
+
+    @tmp.setter
+    def tmp(self, value):
+        self._ensure_built()
+        self.__dict__["_tmp"] = value
+
+    @property
+    def project(self):
+        self._ensure_built()
+        return self.__dict__["_project"]
+
+    @project.setter
+    def project(self, value):
+        self._ensure_built()
+        self.__dict__["_project"] = value
+
+    @property
+    def ctx(self):
+        self._ensure_built()
+        return self.__dict__["_ctx"]
+
+    @ctx.setter
+    def ctx(self, value):
+        self._ensure_built()
+        self.__dict__["_ctx"] = value
+
+
+class ToolTest(_BuildOnFirstUse, _ToolTest):
+    pass
+
+
+class ValidateTest(_BuildOnFirstUse, _ValidateTest):
+    pass
 
 
 class TestRtpOverrideIsHonest(unittest.TestCase):
@@ -233,6 +335,8 @@ class TestValidateChecksTheStartPosition(ValidateTest):
 
 
 class TestSearchReportsWhatItSearched(ToolTest):
+
+    shared_fixture = True
     def test_a_command_code_search_does_not_claim_to_have_searched_text(self):
         """The other scopes hold no commands, so they are skipped -- and
         reporting them as searched told the model they had come back empty."""
@@ -372,6 +476,8 @@ class TestCommandReferenceSaysWhoseLayoutsTheseAre(ToolTest):
     confirmed is how a caller writes a raw command with the wrong parameter
     order, which the interpreter then misreads.
     """
+
+    shared_fixture = True
 
     def test_a_modelled_engine_says_yes(self):
         out = self.call("command_reference", search="text")
@@ -553,6 +659,8 @@ class TestAdviceNamesOnlyWhatWillWork(ToolTest):
     all in a table db_edit will not touch. The comment above the filter
     claimed it named "only the ids db_edit will actually accept".
     """
+
+    shared_fixture = True
 
     def test_an_id_past_the_create_ceiling_is_not_offered(self):
         out = self.call("db_get", table="items", ids=[1, 500000])
@@ -826,7 +934,6 @@ class TestOneDecodeForTheWholeToolsLayer(unittest.TestCase):
 
     def test_no_tool_module_defines_its_own(self):
         """A function named `_text` is one way to write a second copy."""
-        import ast
 
         root = Path(__file__).resolve().parent.parent / "src"
         folder = root / "rpgvxace_mcp" / "tools"
@@ -866,7 +973,6 @@ class TestOneDecodeForTheWholeToolsLayer(unittest.TestCase):
         `ctx.codec.decode(value.data)` written in place, not a helper. This
         looks for the call.
         """
-        import ast
 
         root = Path(__file__).resolve().parent.parent / "src"
         folder = root / "rpgvxace_mcp" / "tools"
@@ -894,7 +1000,6 @@ class TestOneDecodeForTheWholeToolsLayer(unittest.TestCase):
 
     def test_no_matcher_exemption_outlives_its_calls(self):
         """An allowance that is larger than the code needs hides a copy."""
-        import ast
 
         root = (Path(__file__).resolve().parent.parent / "src"
                 / "rpgvxace_mcp" / "tools")
@@ -932,6 +1037,8 @@ class TestAScriptSlotIdIsCalledAnId(ToolTest):
     `scripts op="get"` returns the project layer's row verbatim, so whatever
     the code calls the field is what the model reads.
     """
+
+    shared_fixture = True
 
     def test_the_reply_names_it_id(self):
         slot = self.call("scripts", op="list")["scripts"][0]["index"]
@@ -1098,7 +1205,6 @@ class TestEveryReferenceTargetHasANoun(unittest.TestCase):
         their noun directly rather than through a rule: the tileset sheet
         check and the actor class check.
         """
-        import ast
         from rpgvxace_mcp.analysis import (MAP_TARGET, NESTED_DB_REFERENCES,
                                            REFERENCE_RULES, TABLE_NOUNS)
         root = Path(__file__).resolve().parent.parent / "src"
@@ -1158,7 +1264,6 @@ class TestACodeWithAConstantIsSpelledWithIt(unittest.TestCase):
 
     def constants(self):
         """Every CODE_* constant, by the number it names."""
-        import ast
         tree = ast.parse(self.module().read_text(encoding="utf-8"))
         out = {}
         for node in tree.body:
@@ -1188,7 +1293,6 @@ class TestACodeWithAConstantIsSpelledWithIt(unittest.TestCase):
 
     def compared_in(self, path, known):
         """Each `code == N` in one file where N is a named code."""
-        import ast
         tree = ast.parse(path.read_text(encoding="utf-8"))
         spelled = []
         for node in ast.walk(tree):
@@ -1235,7 +1339,6 @@ class TestACodeWithAConstantIsSpelledWithIt(unittest.TestCase):
         two dozen codes with names, and half-spelling them would read
         worse than either extreme.
         """
-        import ast
         out = []
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -1262,7 +1365,6 @@ class TestACodeWithAConstantIsSpelledWithIt(unittest.TestCase):
         is one where the next one gets a name only if the author happens to
         look. So the rule is now the sentence that comment makes.
         """
-        import ast
         for path in self.readers():
             tree = ast.parse(path.read_text(encoding="utf-8"))
             sites = self.emitted(tree)
@@ -1299,7 +1401,6 @@ class TestEveryCommandCodeConstantIsRead(unittest.TestCase):
 
     def defined(self):
         """Every CODE_* name assigned at the top level of `commands`."""
-        import ast
         source = (self.package() / "commands.py").read_text(encoding="utf-8")
         names = []
         for node in ast.parse(source).body:
@@ -1321,7 +1422,6 @@ class TestEveryCommandCodeConstantIsRead(unittest.TestCase):
         as a read and neither does the import that carries it: an
         `ImportFrom` alias is not a `Name` node.
         """
-        import ast
         found = set()
         for path in sorted(self.package().rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -1362,7 +1462,6 @@ class TestOneOwnerForTheClipCount(unittest.TestCase):
         return found
 
     def test_only_the_matcher_writes_the_clip_count(self):
-        import ast
         writers = []
         for path in self.modules():
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -1386,6 +1485,75 @@ class TestOneOwnerForTheClipCount(unittest.TestCase):
             "these write another object's clip count, so the rule about "
             "which window is being counted lives in two places: "
             + ", ".join(writers))
+
+
+class TestEveryTableEntryTakesTheTablesArguments(unittest.TestCase):
+    """"Every value takes the same five arguments" was prose.
+
+    `_COMPILERS` and `_SUMMARY_RENDERERS` are both walked without asking
+    which shape their entries have -- that is what the uniform signature
+    buys -- and nothing held it: a two-argument renderer added to the
+    table raises TypeError at the moment a caller renders that one code,
+    which is a crafted file's choice and not the suite's.
+
+    Read off each entry rather than from the declared type, because the
+    declared type is the other half of the same claim: `Callable[...]` is
+    accepted by no checker this project runs.
+    """
+
+    # Five for the compilers since the layout forms: the engine is the
+    # fifth, because VX and VX Ace write different parameter lists.
+    TABLES = {"_COMPILERS": 5, "_SUMMARY_RENDERERS": 3}
+
+    def module(self):
+        return (Path(__file__).resolve().parent.parent / "src"
+                / "rpgvxace_mcp" / "commands.py")
+
+    def tree(self):
+        return ast.parse(self.module().read_text(encoding="utf-8"))
+
+    def functions(self, tree):
+        """Every top-level function, by name."""
+        return {node.name: node for node in tree.body
+                if isinstance(node, ast.FunctionDef)}
+
+    def takes(self, node, functions):
+        """How many positional arguments one table value takes, or None."""
+        if isinstance(node, ast.Lambda):
+            return len(node.args.args)
+        if isinstance(node, ast.Name) and node.id in functions:
+            return len(functions[node.id].args.args)
+        return None
+
+    def test_every_entry_takes_its_tables_arguments(self):
+        tree = self.tree()
+        functions = self.functions(tree)
+        found = {}
+        wrong = []
+        for node in ast.walk(tree):
+            target = (node.target if isinstance(node, ast.AnnAssign)
+                      else node.targets[0] if isinstance(node, ast.Assign)
+                      else None)
+            name = getattr(target, "id", "")
+            if name not in self.TABLES or not isinstance(node.value, ast.Dict):
+                continue
+            found[name] = len(node.value.values)
+            for key, value in zip(node.value.keys, node.value.values):
+                arity = self.takes(value, functions)
+                if arity is None:
+                    wrong.append("%s: an entry this scan cannot read at "
+                                 "line %d" % (name, value.lineno))
+                elif arity != self.TABLES[name]:
+                    wrong.append("%s: the entry at line %d takes %d "
+                                 "argument%s, not %d"
+                                 % (name, value.lineno, arity,
+                                    "" if arity == 1 else "s",
+                                    self.TABLES[name]))
+        self.assertEqual(sorted(found), sorted(self.TABLES),
+                         "a table was not found, so this checked nothing")
+        for name, count in found.items():
+            self.assertGreater(count, 10, "%s has %d entries" % (name, count))
+        self.assertEqual(wrong, [], "; ".join(wrong))
 
 
 class TestOneVocabularyForAPartialAnswer(ToolTest):
@@ -1428,6 +1596,10 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
             ("search", dict(query=".", regex=True)),
             ("search", dict(command_code=101)),
             ("validate", dict()),
+            # Every scope: five of its replies are built in `analysis`, the
+            # layer that may not call `partial` (see HAND_BUILT_IS_FINE), so
+            # this read is the only thing holding them to the vocabulary.
+            ("map_critique", dict()),
             ("command_reference", dict()),
             ("scripts", dict(op="get", index=slot)),
             ("backups", dict(op="list")),
@@ -1435,6 +1607,9 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
             ("db_edit", dict(table="items", dry_run=True,
                              ops=[{"op": "delete", "id": 1}])),
             ("map_edit", dict(op="delete", map_id=2, dry_run=True)),
+            ("map_paint", dict(op="dungeon", map_id=2, floor="A2:0",
+                               wall="A4:8", room_min=2, room_max=3,
+                               dry_run=True)),
         ]
 
     def keys_of(self, value, prefix=""):
@@ -1467,6 +1642,81 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
     # so a caller had to guess which one to read.
     OWNERS = ("partial", "as_reply")
 
+    # The modules that may still spell a suffix by hand, and why. All sit
+    # *below* the tools layer where `partial` lives, so calling it would
+    # invert the layering `TestTheAnalysisLayeringIsAcyclic` holds -- and a
+    # rule with no exceptions and a layering with one is worse than saying
+    # so. Eight other sites had no reason at all: `search_tools` built
+    # `strings_clipped_note` and `text_scan_stopped` ten lines from
+    # `partial("command_walk", ...)`, under a comment reading "all three
+    # through `partial`, which owns the suffixes".
+    HAND_BUILT_IS_FINE = {
+        "convert.py": "sits below `tools`, and builds `cells_truncated` and "
+                      "`cells_note` for a table it is converting",
+        "report.py": "the analysis layer, which sits below `tools`; it "
+                     "builds `command_walk_stopped`",
+        # The `map_critique` scopes, for the same reason as `report.py`.
+        # Each builds its own scope's keys and nothing else, and every one
+        # of them is read back through `replies()` above, which is what the
+        # registry's own comment says holds analysis-built keys to the
+        # vocabulary -- that read is what found `script_blocks_truncated`
+        # serving a count under the boolean suffix.
+        "dead_ends.py": "the analysis layer; builds `dead_ends_stopped` and "
+                        "`dead_ends_note`",
+        "map_shape.py": "the analysis layer; builds `dead_space_stopped`",
+        "reachability.py": "the analysis layer; builds `reachability_stopped` "
+                           "and `reachability_note`",
+        "switch_usage.py": "the analysis layer; builds "
+                           "`switch_usage_stopped`",
+        "tile_variety.py": "the analysis layer; builds "
+                           "`tile_variety_stopped`",
+    }
+
+    def source_files(self):
+        root = (Path(__file__).resolve().parent.parent / "src"
+                / "rpgvxace_mcp")
+        found = sorted(root.rglob("*.py"))
+        self.assertGreater(len(found), 5, "found almost no modules")
+        return found
+
+    def test_no_module_builds_a_suffixed_key_by_hand(self):
+        """A key assigned under one of these suffixes, outside `partial`.
+
+        The type test above reads the *replies*, so it sees a hand-built
+        key as long as the value happens to have the right type -- and the
+        "no key built out of data" test only looks for a format expression.
+        Neither notices `out["strings_clipped_note"] = ...`, which is how
+        eleven of them accumulated beside the function that owns them.
+        """
+        built = []
+        for path in self.source_files():
+            if path.name in self.HAND_BUILT_IS_FINE:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Assign):
+                    continue
+                for target in node.targets:
+                    if not (isinstance(target, ast.Subscript)
+                            and isinstance(target.slice, ast.Constant)
+                            and isinstance(target.slice.value, str)):
+                        continue
+                    key = target.slice.value
+                    if any(key.endswith(suffix)
+                           for suffix in PARTIAL_SUFFIXES):
+                        built.append("%s:%d %s"
+                                     % (path.name, node.lineno, key))
+        self.assertEqual(
+            built, [],
+            "these build a key of the partial-answer vocabulary by hand, so "
+            "the function that owns the suffixes is not the only thing that "
+            "spells them: " + "; ".join(built))
+
+    def test_no_exception_outlives_its_module(self):
+        names = {path.name for path in self.source_files()}
+        stale = sorted(set(self.HAND_BUILT_IS_FINE) - names)
+        self.assertEqual(stale, [], "excused and gone: " + ", ".join(stale))
+
     def test_every_declared_suffix_has_a_type_here(self):
         """The other direction: a suffix the module declares is checked.
 
@@ -1494,7 +1744,6 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
         that own the suffixes, because a rule that forbids its own
         implementation is not a rule.
         """
-        import ast
         root = (Path(__file__).resolve().parent.parent / "src"
                 / "rpgvxace_mcp")
         dynamic = []

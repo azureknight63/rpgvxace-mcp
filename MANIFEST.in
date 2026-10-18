@@ -1,0 +1,6 @@
+include LICENSE README.md server.json .mcp.json
+include .claude-plugin/plugin.json
+recursive-include tests *.py
+recursive-include scripts *.py
+recursive-include docs *.md
+global-exclude __pycache__ *.py[cod]

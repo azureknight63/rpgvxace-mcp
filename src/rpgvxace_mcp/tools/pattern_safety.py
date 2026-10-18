@@ -472,6 +472,17 @@ def _children(name: str, av: Any) -> "list[Any]":
         return [av]
     if name == "BRANCH":
         return list(av[1])
+    if name in ("ASSERT", "ASSERT_NOT"):
+        # `(flags, body)`. `_flatten` refuses a lookaround before it walks
+        # in, so nothing depended on this -- but "a kind with no
+        # sub-patterns gets an empty list" was answered for three kinds
+        # that have one, which makes the next caller's walk silently
+        # partial. `_subjects` is that caller: it now builds subjects out
+        # of the characters inside a lookaround too.
+        return [av[1]]
+    if name == "GROUPREF_EXISTS":
+        # `(group, yes, no)`, and `no` is None when there is no else.
+        return [branch for branch in av[1:] if branch is not None]
     return []
 
 
@@ -724,12 +735,17 @@ def measure_cost(pattern: str) -> None:
             # caching an unmeasured pattern as a measured pass for the life of
             # the process. Measured, not theorised. The child now says which
             # case it is, because only the child knows.
+            # Named, where there is a name for it: "exited abnormally
+            # (code 18)" is an internal number on the one message a caller
+            # is supposed to act on.
+            why = ("could not read the pattern and subjects it was sent"
+                   if done.returncode == PROTOCOL_BROKEN_EXIT
+                   else "exited abnormally (code %d)" % done.returncode)
             verdict = (
-                "this server's safety check on that pattern exited abnormally "
-                "(code %d), so it will not run the pattern either -- a match "
-                "that cannot be interrupted is not something to risk on a "
-                "check that did not complete: %s."
-                % (done.returncode, PLAIN_SEARCH_ADVICE))
+                "this server's safety check on that pattern %s, so it will "
+                "not run the pattern either -- a match that cannot be "
+                "interrupted is not something to risk on a check that did "
+                "not complete: %s." % (why, PLAIN_SEARCH_ADVICE))
     except subprocess.TimeoutExpired:
         verdict = (
             "that pattern did not finish matching in %.1f seconds against "

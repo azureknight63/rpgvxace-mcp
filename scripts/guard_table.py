@@ -42,9 +42,17 @@ LINT_REPORT = _SRC + "analysis/lint/report.py"
 
 
 REFERENCES = _SRC + "analysis/references.py"
+STAT_OUTLIERS = _SRC + "analysis/stat_outliers.py"
+SWITCH_USAGE = _SRC + "analysis/switch_usage.py"
 WALK = _SRC + "analysis/walk.py"
 
 
+RENDER_PNG = _SRC + "render/png.py"
+RENDER_SCENE = _SRC + "render/scene.py"
+RENDER_TILES = _SRC + "render/tiles.py"
+
+
+AUTOTILE = _SRC + "autotile.py"
 BACKUPS = _SRC + "backups.py"
 COMMANDS = _SRC + "commands.py"
 CONVERT = _SRC + "convert.py"
@@ -54,14 +62,22 @@ PROJECT = _SRC + "project.py"
 RUBYTYPES = _SRC + "rubytypes.py"
 SCHEMA = _SRC + "schema.py"
 SERVER = _SRC + "server.py"
+MAIN = _SRC + "__main__.py"
+
+
+LIVE_BRIDGE = _SRC + "live/bridge.py"
+LIVE_SESSION = _SRC + "live/session.py"
 
 
 COMMAND_DOCS = _SRC + "tools/command_docs_tools.py"
 DB_TOOLS = _SRC + "tools/db_tools.py"
 EVENT_TOOLS = _SRC + "tools/event_tools.py"
+LIVE_TOOLS = _SRC + "tools/live_tools.py"
 MAP_COMMON = _SRC + "tools/map_common.py"
 MAP_EDIT = _SRC + "tools/map_edit_tools.py"
+MAP_PAINT = _SRC + "tools/map_paint_tools.py"
 MAP_READ = _SRC + "tools/map_read_tools.py"
+MAP_RENDER = _SRC + "tools/map_render_tools.py"
 MAP_TILE = _SRC + "tools/map_tile_tools.py"
 MISC_TOOLS = _SRC + "tools/misc_tools.py"
 SAFETY = _SRC + "tools/pattern_safety.py"
@@ -116,8 +132,17 @@ def _at(module: str, cls: str) -> str:
     return "tests/%s.py::%s::" % (module, cls)
 
 
+# test_event_dsl
+DSLREAL = _at("test_event_dsl", "TestFormsMatchEditorData")
+ROUTELINES = _at("test_event_dsl", "TestMoveRouteLines")
+DSLREFUSE = _at("test_event_dsl", "TestRefusals")
+DSLSPECS = _at("test_event_dsl", "TestTheSpecsSayWhatTheFormsWrite")
+DSLVX = _at("test_event_dsl", "TestVXLayouts")
+XPCMD = _at("test_event_dsl", "TestXPCommands")
+
+
 # test_guards_arguments
-DSLCHOICE = _at("test_guards_arguments", "TestAChoiceBranchIsNeverDropped")
+DSLCHOICE =_at("test_guards_arguments", "TestAChoiceBranchIsNeverDropped")
 CRAFTEDCOMMON = _at(
     "test_guards_arguments", "TestACraftedCommonEventIsReportedNotCrashed")
 TYPED = _at("test_guards_arguments", "TestADeclaredTypeIsChecked")
@@ -290,6 +315,35 @@ SNAPDRY = _at("test_guards_writes", "TestSnapshotPreviewMatchesTheSnapshot")
 PERFILE = _at("test_guards_writes", "TestStagingIsPerFile")
 STALE = _at("test_guards_writes", "TestStalenessDetection")
 
+# test_map_paint
+PAINTCORRIDOR = _at("test_map_paint", "TestACorridor")
+PAINTDUNGEON = _at("test_map_paint", "TestADungeon")
+PAINTROOM = _at("test_map_paint", "TestARoom")
+PAINTFILL = _at("test_map_paint", "TestFillingARectangle")
+PAINTVX = _at("test_map_paint", "TestOnVX")
+PAINTXP = _at("test_map_paint", "TestOnXP")
+PAINTREFUSE = _at("test_map_paint", "TestRefusals")
+PAINTRESHAPE = _at("test_map_paint", "TestReshapingAnEdit")
+PAINTSHADOW = _at("test_map_paint", "TestTheEditorsShadow")
+PAINTFLOOR = _at("test_map_paint", "TestTheFloorShapeFromNeighbours")
+PAINTWALL = _at("test_map_paint", "TestTheWallShapeFromNeighbours")
+
+
+# test_map_render
+RENDEROPT = _at("test_map_render", "TestOptions")
+RENDERSIZE = _at("test_map_render", "TestWindowAndScale")
+RENDERSHEET = _at("test_map_render", "TestARender")
+RENDERVX = _at("test_map_render", "TestVX")
+RENDERIMAGE = _at("test_map_render", "TestThePictureComesBackAsAnImage")
+# test_live
+LIVEDRIVE = _at("test_live", "TestTheGameIsDriven")
+LIVEEVAL = _at("test_live", "TestEvalNeedsTheOperatorAndTheSession")
+LIVEREADONLY = _at("test_live", "TestReadOnlyRefusesALaunch")
+LIVESTART = _at("test_live", "TestASessionStartsAndStops")
+LIVETEXT = _at("test_live", "TestTheBridgeText")
+LIVEWAIT = _at("test_live", "TestTheServerNeverWaitsForever")
+
+
 # test_marshal
 T = _at("test_marshal", "TestHostileInput")
 L = _at("test_marshal", "TestLosslessEdgeCases")
@@ -299,13 +353,44 @@ L = _at("test_marshal", "TestLosslessEdgeCases")
 HARD = _at("test_protocol", "TestTransportHardening")
 
 
+# test_render_png
+PNGHOSTILE = _at("test_render_png", "TestHostileInput")
+PNGFILTERS = _at("test_render_png", "TestDecodingEveryFilter")
+
+
+# test_render_scene
+SCENECHARS = _at("test_render_scene", "TestCharacters")
+SCENELAYERS = _at("test_render_scene", "TestTheTileLayers")
+SCENEREGION = _at("test_render_scene", "TestShadowsAndRegions")
+
+
+# test_render_tiles
+TILEPLACE = _at("test_render_tiles", "TestWhereATileIsOnItsSheet")
+
+
 # test_schema
 PROF = _at("test_schema", "TestEngineProfiles")
+EDBYTES = _at("test_schema", "TestNewObjectsAreTheEditorsBytes")
 SAFE = _at("test_schema", "TestResponseTextSafety")
 OBS = _at("test_schema", "TestSchemaObservation")
 PROV = _at("test_schema", "TestSchemaReportProvenance")
 DOCSAGREE = _at("test_schema", "TestTheReferenceAgreesWithTheTables")
+LAYERMODEL = _at("test_schema", "TestTheTileLayerModel")
+XPPROF = _at("test_schema", "TestTheXPProfile")
 UNMOD = _at("test_schema", "TestUnmodelledEngine")
+
+
+# test_stat_outliers
+STATSXP = _at("test_stat_outliers", "TestStatOutliersOnXP")
+
+
+# test_tools
+XPREF = _at("test_tools", "TestCommandReferenceXP")
+DATABASE = _at("test_tools", "TestDatabase")
+DETECT = _at("test_tools", "TestEngineDetection")
+EVENTSXP = _at("test_tools", "TestEventsXP")
+MAPSXP = _at("test_tools", "TestMapsXP")
+XPTOOL = _at("test_tools", "TestXPProject")
 
 
 GUARDS = [
@@ -601,7 +686,7 @@ GUARDS = [
     ),
     Guard(
         "advisory notes travel with the data", MISC_TOOLS,
-        '        "tile_id_ranges_note": TILE_ID_RANGES_NOTE,',
+        '        "tile_id_ranges_note": ctx.project.profile.tile_id_ranges_note,',
         "",
         [PROV + "test_advisory_notes_travel_with_the_data"],
         "runtime-derived tile constants are shipped to the client as bare "
@@ -1003,7 +1088,7 @@ GUARDS = [
     ),
     Guard(
         "tile values fit their layer", MAP_TILE,
-        '    _check_tile(ctx, tile_id, rect.z, "tile_id")',
+        '    _check_tile(ctx, tile_id, rect.z, "tile_id", rect.view)',
         '    pass  # check removed',
         [MAPW + "test_a_tile_value_the_layer_cannot_hold_is_refused",
          MAPW + "test_a_region_id_beyond_the_layer_is_refused"],
@@ -1476,8 +1561,8 @@ GUARDS = [
     ),
     Guard(
         'a common event read refuses page arguments', EVENT_TOOLS,
-        '    refuse_inert(\n        args, ("event_ids", "name_contains", "page"),',
-        '    _unused = (\n        args, ("event_ids", "name_contains", "page"),',
+        '    refuse_inert(\n        args, ("event_ids", "name_contains", "page", "offset"),',
+        '    _unused = (\n        args, ("event_ids", "name_contains", "page", "offset"),',
         [READDROP + "test_a_common_event_read_refuses_page_arguments"],
         'event_get common_event_id=N name_contains=X returns the event whether or not it matches, and the reply reads exactly like a positive match',
     ),
@@ -1570,8 +1655,8 @@ GUARDS = [
     ),
     Guard(
         'the measurement fails closed', SAFETY,
-        '            verdict = (\n                "this server\'s safety check on that pattern exited abnormally "',
-        '            verdict = None\n            _unused = (\n                "this server\'s safety check on that pattern exited abnormally "',
+        '            verdict = (\n                "this server\'s safety check on that pattern %s, so it will "',
+        '            verdict = None\n            _unused = (\n                "this server\'s safety check on that pattern %s, so it will "',
         [FAILCLOSED + "test_a_child_killed_by_a_signal_is_refused",
          FAILCLOSED + "test_a_child_that_exits_nonzero_silently_is_refused"],
         'a child that dies for any reason but a bad pattern is recorded as a measured pass and cached, so an unmeasured pattern then runs in-process',
@@ -2256,7 +2341,7 @@ GUARDS = [
         """    raw = command.get("code", CODE_BLANK)
     code = CODE_BLANK if raw is None else as_int(raw)
     if code is None:
-        return command_name(raw)""",
+        return command_name(raw, engine)""",
         """    raw = command.get("code", CODE_BLANK)
     code = raw or CODE_BLANK""",
         [BYTES + "test_a_command_code_that_is_not_a_number_is_rendered_anyway"],
@@ -2438,7 +2523,7 @@ GUARDS = [
         '    if False:',
         [MAPW + "test_a_tile_value_the_layer_cannot_hold_is_refused",
          MAPW + "test_a_region_id_beyond_the_layer_is_refused"],
-        'Table.set masks to 16 bits, so an out-of-range id was silently stored as a different tile and then reported back as the value the caller asked for -- and layer 3 holds region ids the editor numbers 0 to 63, so 2816 is a plausible value from a tileset that reads as a region',
+        'Table.set masks to 16 bits, so an out-of-range id was silently stored as a different tile and then reported back as the value the caller asked for -- and the editor numbers regions 0 to 63, so a region view value of 64 would be stored in bits RGSS3 reads as a region no editor can paint',
     ),
     Guard(
         'an unreadable alphabet is a refusal', SAFETY,
@@ -2470,5 +2555,624 @@ GUARDS = [
          '        pass  # the set is never rebuilt'],
         [ONETRUTH + "test_a_restore_leaves_them_agreeing"],
         'the list and the set are two forms of one fact, held twice over: `_forget_map_ids` drops both, and `map_ids_on_disk` rebuilds the set whenever it rebuilds the list. Reverting either alone proves nothing, which is what a single-anchor version of this guard reported as VACUOUS -- so both are reverted, and then a membership test answers from before the last change to the folder',
+    ),
+    Guard(
+        'a PNG that inflates past its header is a bomb', RENDER_PNG,
+        '    if len(raw) > expected or decoder.unconsumed_tail:',
+        '    if False:',
+        [PNGHOSTILE + "test_a_decompression_bomb_is_stopped_at_the_declared_size"],
+        'a 2 x 2 image whose deflate stream holds 50 MB of zeros is a few kilobytes on disk; inflating without a ceiling turns one sheet named by a project file into the whole of the server\'s memory',
+    ),
+    Guard(
+        'every PNG chunk is held to its CRC', RENDER_PNG,
+        '        if zlib.crc32(kind + payload) & 0xFFFFFFFF != crc:',
+        '        if False:',
+        [PNGHOSTILE + "test_a_bad_crc"],
+        'a flipped byte in a header or palette draws a wrong picture that looks like a rendering bug rather than a damaged file',
+    ),
+    Guard(
+        'a PNG declaring too many pixels is refused unread', RENDER_PNG,
+        '    if width * height > MAX_PNG_PIXELS:',
+        '    if False:',
+        [PNGHOSTILE + "test_huge_dimensions_are_refused_before_allocating"],
+        'the header is the only thing a 40-byte file needs to say 8000 x 8000, and the decoder allocates four bytes a pixel for whatever it says',
+    ),
+    Guard(
+        'an interlaced PNG is refused', RENDER_PNG,
+        '    if interlace != 0:',
+        '    if False:',
+        [PNGHOSTILE + "test_interlaced_is_refused"],
+        'the rows of an Adam7 image are in seven passes, so reading them as one pass draws noise with no error anywhere',
+    ),
+    Guard(
+        'the Paeth filter predicts from the three neighbours', RENDER_PNG,
+        '                row[i] = (row[i] + predictor) & 255',
+        '                row[i] = (row[i] + a) & 255',
+        [PNGFILTERS + "test_each_filter_type_alone_restores_the_rows"],
+        'Paeth is the filter encoders choose most for pixel art, and getting it wrong shifts colours by a few levels in a way no one looks at twice',
+    ),
+    Guard(
+        'which ids come from which sheet', RENDER_TILES,
+        '        return "A5", n % 8 * TILE, n // 8 % 16 * TILE',
+        '        return "A5", n % 8 * TILE, n // 8 % 8 * TILE',
+        [TILEPLACE + "test_plain_tiles_use_the_split_halves_of_b_to_e"],
+        'A5 is eight tiles wide and sixteen tall; reading it as eight by eight draws the lower half of the sheet as the upper half and nothing about the picture says so',
+    ),
+    Guard(
+        'A4 alternates floor rows and wall rows', AUTOTILE,
+        '    by = int((ty - 10) * 2.5 + (0.5 if wall else 0))',
+        '    by = int((ty - 10) * 2.5)',
+        [TILEPLACE + "test_where_each_autotile_block_starts"],
+        'A4 rows are three tiles tall for a roof top and two for the wall under it, so a wall row starts half a tile later than 2.5 a row says -- one row off puts every building front on the wrong tiles',
+    ),
+    Guard(
+        'a flagged tile is drawn over characters, not under', RENDER_SCENE,
+        '                if tile_id == 0 or (self.flag(tile_id) & STAR_FLAG != 0) != above:',
+        '                if tile_id == 0 or False != above:',
+        [SCENELAYERS + "test_a_flagged_tile_goes_over_a_character"],
+        'the star flag is how a roof, a treetop or an archway hides what walks behind it; without it the map shows a character standing on top of the building',
+    ),
+    Guard(
+        'the region id is the byte above the shadow bits', RENDER_SCENE,
+        '            region = region_of(grid.at(x, y, META_LAYER))',
+        '            region = grid.at(x, y, META_LAYER)',
+        [SCENEREGION + "test_the_region_id_is_the_byte_above_the_shadow_bits"],
+        'the fourth layer of a VX Ace map holds a region as 256 times its number and shadow as the low four bits; read whole, a map with no regions at all shows a region id for every shadowed tile',
+    ),
+    Guard(
+        'a character lower on the map is drawn over one above it', RENDER_SCENE,
+        '        for sprite in sorted(sprites, key=lambda s: (s.y, s.event_id)):',
+        '        for sprite in sprites:',
+        [SCENECHARS + "test_the_sprite_lower_on_the_map_is_drawn_over_the_one_above"],
+        'events are drawn in the order the map hash lists them, which is by id; a tall character then lands under one standing behind it',
+    ),
+    Guard(
+        'a picture over the output ceiling is refused', MAP_RENDER,
+        '    if out_w * out_h > MAX_OUTPUT_PIXELS:',
+        '    if False:',
+        [RENDERSIZE + "test_a_picture_over_the_output_ceiling_is_refused"],
+        'the encoder is a Python loop over every row, and tile_size multiplies a 1000 x 1000 map to sixty-four million pixels',
+    ),
+    Guard(
+        'a window over the native ceiling is refused before drawing', MAP_RENDER,
+        '    if ww * wh * TILE * TILE > MAX_NATIVE_PIXELS:',
+        '    if False:',
+        [RENDERSIZE + "test_a_window_over_the_native_ceiling_is_refused_before_drawing"],
+        'the canvas is drawn at 32 pixels a tile whatever tile_size is, so a small tile_size alone does not make a big map cheap -- the work is allocated before the output ceiling is looked at',
+    ),
+    Guard(
+        'VX is refused rather than drawn from the wrong layout', MAP_RENDER,
+        '    if project.profile.tileset_layout != "ace":',
+        '    if False:',
+        [RENDERVX + "test_a_vx_project_is_refused_with_the_reason"],
+        'VX keeps one global tileset in Graphics/System with another autotile layout, and drawing it with Ace\'s tables gives a confident picture of the wrong tiles',
+    ),
+    Guard(
+        'the render folder keeps a bounded number of pictures', MAP_RENDER,
+        '    for stale in kept[MAX_KEPT_RENDERS:]:',
+        '    for stale in []:',
+        [RENDEROPT + "test_the_render_folder_keeps_only_the_newest"],
+        'every edit to a map is a new picture under a new name, so a session of editing and looking fills the folder without bound',
+    ),
+    Guard(
+        'a decoded sheet is keyed by its file\'s modification time', MAP_RENDER,
+        '    key = (str(path), info.st_mtime_ns, info.st_size)',
+        '    key = (str(path), 0, 0)',
+        [RENDERSHEET + "test_an_edited_sheet_is_read_again"],
+        'the cache outlives a tool call, so a tileset the artist saved a minute ago would be drawn as it was before until the server restarts',
+    ),
+    Guard(
+        "VX's shop layout is VX's", COMMANDS,
+        '    302: ["goods_type", "goods_id", "purchase_only"],',
+        '    302: ["goods_type", "goods_id", "price_type", "price"],',
+        [DSLVX + "test_vx_shop_spec_is_what_vx_reads",
+         DSLSPECS + "test_spec_lengths_match_compiled_lengths"],
+        "command_reference told a VX caller that Shop Processing carried a price kind and a price, which are VX Ace's: VX's command_302 reads `shop_purchase_only = @params[2]`, so a 302 written to the served layout put a price kind where VX reads the purchase-only flag",
+    ),
+    Guard(
+        "VX's Show Animation has no wait flag", COMMANDS,
+        '    212: ["character_id", "animation_id"],',
+        '    212: ["character_id", "animation_id", "wait"],',
+        [DSLSPECS + "test_spec_lengths_match_compiled_lengths"],
+        "the shared table gave both engines VX Ace's three-parameter Show Animation, so command_reference served VX a parameter its command_212 never reads",
+    ),
+    Guard(
+        "a VX balloon or animation refuses a wait flag", COMMANDS,
+        '''        if "wait" in obj:
+            raise _engine_lacks("wait flag", key)''',
+        '''        if False:
+            raise _engine_lacks("wait flag", key)''',
+        [DSLVX + "test_vx_animation_and_balloon_have_no_wait_flag"],
+        "VX has no wait on Show Balloon Icon or Show Animation, so a wait the caller asked for would be dropped and the page reported as written -- a cutscene that no longer waits, with nothing saying so",
+    ),
+    Guard(
+        "move steps 39 and 40 are transparency", COMMANDS,
+        '    38: "Through OFF", 39: "Transparent ON", 40: "Transparent OFF",',
+        '    38: "Through OFF", 39: "Always on Top ON", 40: "Always on Top OFF",',
+        [ROUTELINES + "test_39_and_40_are_transparency_in_both_engines"],
+        "the table carried XP's names for 39 and 40, while both VX and VX Ace's Game_Character set `@transparent` for them -- so event_get rendered a step that hides the character as one that changes its draw priority",
+    ),
+    Guard(
+        "a route's step line is the route's own step", COMMANDS,
+        '            steps.append(_cmd(step_code, indent, [move]))',
+        '            steps.append(_cmd(step_code, indent, [RubyObject(move.cls, dict(move.ivars))]))',
+        [ROUTELINES + "test_each_step_has_a_505_line_sharing_its_object"],
+        "every one of the 1,037 step lines in the real projects is a Marshal link to the route's own command; a copy reads the same in the editor but writes a file that is not the one the editor would write",
+    ),
+    Guard(
+        "a layout form refuses a field it does not know", COMMANDS,
+        '''    if unknown:
+        raise CommandError(
+            "%s does not take %s; it takes %s"''',
+        '''    if False:
+        raise CommandError(
+            "%s does not take %s; it takes %s"''',
+        [DSLREFUSE + "test_an_unknown_field_inside_a_form_is_refused_not_ignored"],
+        'a misspelt field was ignored and its default written: {"bgm": {"naem": "Town1"}} would compile to a BGM with no name -- the editor\'s "(None)", which stops the music -- and report success',
+    ),
+    Guard(
+        "ME and SE put pitch before volume", SCHEMA,
+        '    "RPG::ME": ("name", "pitch", "volume"),',
+        '    "RPG::ME": ("name", "volume", "pitch"),',
+        [DSLREAL + "test_me_has_the_ivar_order_the_editor_writes"],
+        "Marshal keeps instance variables in the order it is given them, and the editor writes ME and SE with @pitch before @volume -- the opposite of BGM and BGS -- so one shared order wrote files that load but are not the editor's",
+    ),
+    Guard(
+        'a region is the byte above the shadow bits', SCHEMA,
+        '    return word >> REGION_SHIFT',
+        '    return word',
+        [LAYERMODEL + "test_the_region_is_the_byte_above_the_shadow_bits"],
+        'RGSS3 reads a region as data[x, y, 3] >> 8; read whole, every shadowed cell of a map with no regions reports a region, and region 1 reads as 256',
+    ),
+    Guard(
+        'the shadow is the low four bits of layer 3', SCHEMA,
+        '    return word & MAX_SHADOW',
+        '    return word',
+        [LAYERMODEL + "test_the_region_is_the_byte_above_the_shadow_bits"],
+        'a cell holding region 1 is the word 256; read whole as a shadow it is a mask no four-bit field can hold',
+    ),
+    Guard(
+        'a raw layer-3 word may set only the region and shadow bits', MAP_COMMON,
+        '            and tile_id & ~META_LAYER_BITS):',
+        '            and False):',
+        [MAPW + "test_a_raw_word_with_bits_no_field_holds_is_refused"],
+        'nothing in RGSS3 reads bits 4-7 or a region above 63, so a value using them is a tile id sent to the wrong layer -- stored, it reads back as a region or a shadow nobody painted',
+    ),
+    Guard(
+        'painting one part of layer 3 keeps the other', MAP_TILE,
+        '            if merge is not None:',
+        '            if False:',
+        [MAPW + "test_painting_a_region_keeps_the_shadow_and_back"],
+        'a region and the wall shadow under it share one word; written whole, painting an encounter region erases every shadow it covers, and a region value written raw is a shadow',
+    ),
+    Guard(
+        'the map edge joins a floor', AUTOTILE,
+        '        return not layer.inside(nx, ny) or layer.kind(nx, ny) == kind',
+        '        return layer.inside(nx, ny) and layer.kind(nx, ny) == kind',
+        [PAINTFLOOR + "test_the_map_edge_joins_a_floor"],
+        'the editor draws a floor running off the map with no border at the edge; treating the edge as a different kind outlines every map in its own border',
+    ),
+    Guard(
+        'an inner corner shows only between two joined sides', AUTOTILE,
+        '        if not (set(beside) & absent) and not joined(dx, dy))',
+        '        if not joined(dx, dy))',
+        [PAINTFLOOR + "test_a_diagonal_beside_an_open_side_is_ignored"],
+        'a diagonal beside an open side is covered by that side\'s border; counting it names a pattern none of the 47 shapes has, and the paint fails on an ordinary corner',
+    ),
+    Guard(
+        'a wall joins sideways only a run of the same rows', AUTOTILE,
+        '            if _run(layer, nx, ny, kind, runs) != _run(layer, x, y, kind,',
+        '            if False and _run(layer, nx, ny, kind, runs) != _run(layer, x, y, kind,',
+        [PAINTWALL + "test_a_wall_stepping_down_beside_another_shows_its_edge"],
+        'a wall that steps up or down beside another is drawn as one flat face, hiding the corner the editor shows there',
+    ),
+    Guard(
+        'an A4 face joins the A4 tile beside it', AUTOTILE,
+        '        elif not (other is not None and sheet_of(kind) == "A4"',
+        '        elif not (False and sheet_of(kind) == "A4"',
+        [PAINTWALL + "test_an_a4_face_joins_the_a4_top_beside_it"],
+        'every inner corner of a room draws a vertical seam where the face meets the ceiling column beside it, which the editor does not -- 275 of 278 faces beside their own wall top in the real game join it',
+    ),
+    Guard(
+        'a wall opens up and down at the map edge', AUTOTILE,
+        '            if dy:\n                bits |= WALL_BITS[name]\n            continue',
+        '            if False:\n                bits |= WALL_BITS[name]\n            continue',
+        [PAINTWALL + "test_the_map_edge_joins_sideways_and_opens_up_and_down"],
+        'a wall face at the top or bottom of the map loses its border there, unlike every one the editor stores',
+    ),
+    Guard(
+        'the neighbourhood of an edit follows a wall run beside it', AUTOTILE,
+        '                out.update((column, row) for row in range(top, bottom + 1))',
+        '                pass',
+        [PAINTRESHAPE + "test_the_neighbourhood_follows_a_wall_run_beside_it"],
+        'lengthening a wall changes whether the columns beside it join along their whole height, and only the cells next to the edit would be re-shaped',
+    ),
+    Guard(
+        'the shadow is written into the word, keeping the region', AUTOTILE,
+        '        value = with_shadow(word, WALL_SHADOW if high else 0)',
+        '        value = WALL_SHADOW if high else 0',
+        [PAINTSHADOW + "test_a_region_under_the_shadow_is_kept"],
+        'region and shadow share layer 3; written whole, every shadow a wall casts erases the encounter region under it',
+    ),
+    Guard(
+        'a wall casts no shadow on itself', AUTOTILE,
+        '        high = (not is_high(ground.get(x, y))',
+        '        high = (True',
+        [PAINTSHADOW + "test_a_wall_is_not_shaded_by_the_wall_beside_it"],
+        'every wall face but the first in a row is shaded by the one before it, a dark stripe the editor never draws (it shades no wall cell in the real game)',
+    ),
+    Guard(
+        'a painted cell\'s neighbours are re-shaped', MAP_PAINT,
+        '        around = neighbourhood(self.layer, self.painted)',
+        '        around = sorted(self.painted)',
+        [PAINTFILL + "test_the_rectangle_and_its_ring_take_their_shapes"],
+        'the cells around a painted patch keep the shapes they had, so the patch sits in the ground as a square with no border joining it',
+    ),
+    Guard(
+        're-shaping is bounded', MAP_PAINT,
+        '        if len(around) > MAX_RESHAPE_CELLS:',
+        '        if False:',
+        [PAINTREFUSE + "test_a_re_shape_over_its_ceiling_is_refused_and_undone"],
+        'a wall run beside an edit is re-shaped whole, so a small paint next to a map of tall walls walks every row of every column beside it',
+    ),
+    Guard(
+        'a block past the end of its sheet is refused', MAP_PAINT,
+        '    if not index.isdigit() or int(index) >= count:',
+        '    if not index.isdigit():',
+        [PAINTREFUSE + "test_a_block_past_the_end_of_its_sheet_names_the_range"],
+        'A2:32 is read as the first A3 kind, so a caller who miscounted the sheet paints a roof where they asked for ground',
+    ),
+    Guard(
+        'a rectangle is bounded by the cell ceiling', MAP_PAINT,
+        '    _check_budget(w * h, verb)',
+        '    pass',
+        [PAINTREFUSE + "test_a_rectangle_over_the_cell_ceiling",
+         PAINTDUNGEON + "test_a_dungeon_too_large_is_refused"],
+        'fill and dungeon default to the whole map, and a 1000 x 1000 map is a million Python-level writes and re-shapes in one call',
+    ),
+    Guard(
+        'a kind on a sheet the tileset does not name is refused', MAP_PAINT,
+        '        if kind.sheet not in named:',
+        '        if False:',
+        [PAINTREFUSE + "test_a_sheet_the_tileset_does_not_name"],
+        'the game draws a cell whose sheet the tileset names no file for as nothing at all, and the write reports success',
+    ),
+    Guard(
+        'map_paint gates its op arguments', MAP_PAINT,
+        '    check_op_args(op, args, PAINT_OP_ARGS, "map_paint")',
+        '    pass  # gate removed',
+        [PAINTREFUSE + "test_the_other_ops_arguments"],
+        'a fill carrying a cell list paints the rectangle and never looks at the cells, and reports the paint',
+    ),
+    Guard(
+        'map_paint refuses VX and XP', MAP_PAINT,
+        '    _refuse_engine(ctx)\n',
+        '    pass\n',
+        [PAINTVX + "test_vx_is_refused_with_the_reason",
+         PAINTXP + "test_xp_is_refused_with_the_reason"],
+        'VX keeps one global tileset with another autotile layout and XP seven autotiles of its own; shapes computed with VX Ace\'s rules are a confident write of the wrong tiles',
+    ),
+    Guard(
+        'a room needs rows above it for its wall', MAP_PAINT,
+        '    if y < wall_height:',
+        '    if False:',
+        [PAINTREFUSE + "test_a_room_with_no_space_above_for_its_wall"],
+        'the wall is cut off by the top of the map and the room is reported as built',
+    ),
+    Guard(
+        'a wall face never covers floor', MAP_PAINT,
+        '                if above < 0 or self.is_floor(cx, above):',
+        '                if above < 0:',
+        [PAINTCORRIDOR + "test_a_bend_reaches_both_ends"],
+        'the cells above a vertical passage are themselves floor, and a face written over them walls the passage shut',
+    ),
+    Guard(
+        'one seed builds one dungeon', MAP_PAINT,
+        '        rng = random.Random(seed)',
+        '        rng = random.Random()',
+        [PAINTDUNGEON + "test_the_same_seed_builds_the_same_dungeon"],
+        'the seed is reported and does not reproduce the map, so a dungeon cannot be rebuilt after the map is edited or lost',
+    ),
+    Guard(
+        'every room of a dungeon is joined to the others', MAP_PAINT,
+        '        for a, b in _joins(rooms, width):',
+        '        for a, b in _joins(rooms, width)[:1]:',
+        [PAINTDUNGEON + "test_every_floor_cell_can_be_reached"],
+        'a room with no corridor to it is a room the player cannot reach, in a dungeon reported as generated',
+    ),
+    Guard(
+        'a door in the top wall opens through the face and the ceiling', MAP_PAINT,
+        '            builder.add_floor(x + door_at, y - wall_height - 1, 1,',
+        '            builder.add_floor(x + door_at, y - 1, 1,',
+        [PAINTROOM + "test_a_door_in_the_top_wall"],
+        'the gap is cut through the bottom row of the wall only, so the door is a notch in the face that leads into rock',
+    ),
+    Guard(
+        'a render comes back as an image', MAP_RENDER,
+        '    return ImageReply(reply, encoded)',
+        '    return reply',
+        [RENDERIMAGE + "test_the_tool_returns_the_png_beside_its_path",
+         RENDERIMAGE + "test_the_server_sends_an_image_block_after_the_text"],
+        'a model that can look at a picture was handed a path on a disk it may not share, and had to read the file back to see what it had just drawn',
+    ),
+    Guard(
+        'a render over the inline cap is a path, not an error', MAP_RENDER,
+        '    inline = len(encoded) <= MAX_INLINE_IMAGE_BYTES',
+        '    inline = True',
+        [RENDERIMAGE + "test_a_png_over_the_inline_cap_comes_back_as_a_path_only"],
+        'the server refuses a reply whose image passes its budget, so a large render that worked and was written would come back as an error telling the caller to narrow a request that had nothing wrong with it',
+    ),
+    Guard(
+        'a wedged game is killed after one wait, not two', LIVE_SESSION,
+        """                self.request("quit", seconds=QUIT_SECONDS)
+                self.process.wait(timeout=QUIT_SECONDS)
+            except (LiveError, subprocess.TimeoutExpired):
+                pass""",
+        """                self.request("quit", seconds=QUIT_SECONDS)
+            except LiveError:
+                pass
+            try:
+                self.process.wait(timeout=QUIT_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass""",
+        [LIVEWAIT + "test_stop_waits_once_for_a_wedged_game"],
+        'a game that did not answer quit is wedged, and stop then spent the quit timeout and the exit timeout back to back before the kill that was always coming -- six seconds on the real engine to end a game already known to be dead',
+    ),
+    Guard(
+        'a dialog while booting is a refusal, not a timeout', LIVE_SESSION,
+        """                raise LiveError(
+                    "the game stopped while starting%s. It has been ended."
+                    % self.dialog_sentence())""",
+        "                break",
+        [LIVEWAIT + "test_a_dialog_while_booting_is_read_and_not_waited_out"],
+        'RGSS shows an error raised while the scripts load in a modal box and then waits for a click forever; the refusal read the dialog but opened with "did not come up within 60 seconds" four seconds in, naming a timeout that had not happened',
+    ),
+    Guard(
+        'eval is refused by the tool unless the session allowed it',
+        LIVE_TOOLS,
+        '    if not running.options.get("allow_eval"):',
+        '    if False:',
+        [LIVEDRIVE + "test_eval_is_refused_unless_the_session_allowed_it"],
+        'eval runs arbitrary Ruby in a process on the user\'s desktop; without this the only gate is the bridge reading its config, and its refusal does not name the flag that would lift it',
+    ),
+    Guard(
+        'allow_eval at start needs the server flag', LIVE_TOOLS,
+        '    if allow_eval and not ctx.project.allow_live_eval:',
+        '    if False:',
+        [LIVEEVAL + "test_start_with_allow_eval_is_refused_without_the_server_flag"],
+        "the model alone turns on arbitrary Ruby in a process on the user's desktop, by asking for allow_eval -- the per-session key was never a key the human held",
+    ),
+    Guard(
+        'eval reads the server flag on every call', LIVE_TOOLS,
+        '    if not ctx.project.allow_live_eval:\n        missing.append(_EVAL_NOT_ALLOWED)',
+        '    if False:\n        missing.append(_EVAL_NOT_ALLOWED)',
+        [LIVEEVAL + "test_eval_checks_the_server_flag_as_well"],
+        "the start check alone makes the operator's flag a value copied once into a session; eval must answer to the setting as it is, not as it was when the game came up",
+    ),
+    Guard(
+        'the command line hands --allow-live-eval to the project', MAIN,
+        '            allow_live_eval=args.allow_live_eval,\n',
+        '',
+        [LIVEEVAL + "test_main_hands_the_flag_to_the_project"],
+        'a flag that parses and is never passed on reads as set in --help and leaves eval refused for the operator who set it, with no error to say why',
+    ),
+    Guard(
+        'how a session started is not reported as how it is', LIVE_SESSION,
+        '"started_with": dict(self.options)}',
+        '"options": dict(self.options)}',
+        [LIVESTART + "test_how_it_started_is_not_mistaken_for_how_it_is"],
+        'status carried options.paused true beside paused false after a resume, which reads as a contradiction about the one fact a deterministic test depends on',
+    ),
+    Guard(
+        'read-only refuses a launch', LIVE_TOOLS,
+        '    if ctx.project.read_only:',
+        '    if False:',
+        [LIVEREADONLY + "test_start_is_refused"],
+        '--read-only is how a user says nothing should happen to a project; a live session does not write it, but starting a game on the desktop is not exploring either',
+    ),
+    Guard(
+        'a reset or an exit is not reported as a crash', LIVE_BRIDGE,
+        """  def run
+    mcp_bridge_run
+  rescue RGSSReset, SystemExit
+    raise
+  rescue Exception => e""",
+        """  def run
+    mcp_bridge_run
+  rescue Exception => e""",
+        [LIVETEXT + "test_it_never_rescues_a_reset_or_an_exit"],
+        'F12 raises RGSSReset and the quit op raises SystemExit; caught by the crash handler, the first would freeze the game in the crash loop on a keypress and the second would leave stop to kill a game that was trying to exit',
+    ),
+    Guard(
+        'every wait reminds the game it is active', LIVE_SESSION,
+        """            nudged = self._nudge(nudged)
+            if response_path.exists():""",
+        """            if response_path.exists():""",
+        [LIVEDRIVE + "test_every_request_tells_the_game_it_is_active"],
+        'RGSS3 blocks inside Graphics.update whenever its window is inactive, so the moment the user clicked back to their editor -- or minimised the game -- every request timed out as an unresponsive game; found on the real engine, where WM_ACTIVATEAPP posted to the game window brings it back without taking focus',
+    ),
+
+    # -- T13a: created objects carry the editor's ivar order ------------------
+    Guard(
+        'an event command is written indent first', SCHEMA,
+        '        "@indent": indent, "@code": code, "@parameters": list(parameters or []),',
+        '        "@code": code, "@indent": indent, "@parameters": list(parameters or []),',
+        [EDBYTES + "test_a_blank_command_is_the_editors_bytes",
+         EDBYTES + "test_a_new_page_is_the_editors_bytes"],
+        'all 13,900 commands in two editor-written projects store @indent before @code; Marshal keeps the order it is given, so every command the server wrote loaded but was not the bytes the editor writes',
+    ),
+    Guard(
+        'a created audio object is put in the editor order', SCHEMA,
+        '        return in_editor_order(RubyObject(cls, {',
+        '        return (RubyObject(cls, {',
+        [EDBYTES + "test_me_and_se_are_the_editors_bytes"],
+        'the profile built every audio class as name, volume, pitch; the editor writes ME and SE with @pitch before @volume',
+    ),
+    Guard(
+        'a created map is put in the editor order', SCHEMA,
+        '        return in_editor_order(RubyObject("RPG::Map", ivars))',
+        '        return RubyObject("RPG::Map", ivars)',
+        [EDBYTES + "test_events_map_infos_and_maps_have_the_editors_order"],
+        'map_edit create wrote its 24 fields in the order the template listed them, which is not the one order every editor-written map in two projects holds',
+    ),
+    Guard(
+        'a raw object parameter is put in the editor order', COMMANDS,
+        '    return in_editor_order(obj)',
+        '    return obj',
+        [EDBYTES + "test_a_raw_object_parameter_is_put_in_the_editors_order"],
+        'a {"__class__": ...} parameter kept the key order the caller typed, so a raw SE typed volume-first was written as no editor writes one',
+    ),
+    Guard(
+        'a blank database entry takes its sibling order', DB_TOOLS,
+        '        entry.ivars = ordered_like(entry.ivars, request.sibling_order())',
+        '        pass',
+        [DATABASE + "test_a_blank_entry_takes_its_siblings_field_order"],
+        'a blank create wrote the patch keys in the order typed and @id last, where every sibling in the table holds another order',
+    ),
+
+    # -- T13b: VX stores the RPG::BGM family ----------------------------------
+    Guard(
+        'VX audio is the BGM family', SCHEMA,
+        """    audio_classes=dict(BGM_FAMILY_AUDIO),
+    # RGSS2 runs Ruby 1.8: strings are bare bytes.""",
+        """    audio_classes={"bgm": "RPG::AudioFile", "bgs": "RPG::AudioFile",
+                   "me": "RPG::AudioFile", "se": "RPG::AudioFile"},
+    # RGSS2 runs Ruby 1.8: strings are bare bytes.""",
+        [PROF + "test_vx_audio_is_the_bgm_family"],
+        'RGSS2 calls play on every stored audio object and only RPG::BGM, BGS, ME and SE have it; a map created with RPG::AudioFile music is a NoMethodError the moment the player enters it',
+    ),
+    Guard(
+        'VX is offered the audio forms', COMMANDS,
+        """        "the editor puts there (VX Ace writes nil)"),
+}""",
+        """        "the editor puts there (VX Ace writes nil)"),
+    "bgm": "audio", "bgs": "audio", "me": "audio", "se": "audio",
+}""",
+        [DSLVX + "test_vx_audio_forms_write_the_bgm_family"],
+        'the four audio forms stayed refused on VX over a class question the RGSS2 runtime settles',
+    ),
+    Guard(
+        'a route se step is offered on VX', COMMANDS,
+        '        return [_audio("se", value, enc, what)]',
+        '        raise CommandError("RPG Maker VX: the se step is not offered")',
+        [DSLVX + "test_vx_audio_forms_write_the_bgm_family"],
+        "VX's Game_Character plays a route's SE with command.parameters[0].play, the same as VX Ace's; refusing the step left VX routes without sound for no reason",
+    ),
+
+    # -- T13c: RPG Maker XP is modelled ---------------------------------------
+    Guard(
+        'XP is a profile of its own', SCHEMA,
+        '            for profile in (ACE_PROFILE, VX_PROFILE, XP_PROFILE)}',
+        '            for profile in (ACE_PROFILE, VX_PROFILE)}',
+        [DETECT + "test_xp_opens_without_a_flag_and_is_modelled_as_xp"],
+        'an XP project opened only with --allow-other-engines and was described with the VX model: VX\'s page fields, VX\'s command names, a VX map when one was created',
+    ),
+    Guard(
+        'a new map has only this engine\'s documented fields', SCHEMA,
+        '                 if key[1:] in documented}',
+        '                 if True}',
+        [XPPROF + "test_a_new_map_is_xp_s"],
+        'map_edit create wrote VX\'s parallax and scroll fields into an XP map, which XP\'s RPG::Map does not have',
+    ),
+    Guard(
+        'a new XP page is XP\'s', SCHEMA,
+        '    page_template=new_xp_page,',
+        '    page_template=None,',
+        [XPPROF + "test_a_new_page_is_xp_s"],
+        'event_edit built XP pages with priority_type and an item and actor condition, where XP\'s page has always_on_top and a smaller condition and graphic',
+    ),
+    Guard(
+        'XP commands are named from XP\'s table', COMMANDS,
+        '    known = (XP_COMMAND_NAMES if engine == "xp" else COMMAND_NAMES).get(number)',
+        '    known = COMMAND_NAMES.get(number)',
+        [XPCMD + "test_xp_commands_render_with_xp_s_names",
+         EVENTSXP + "test_get_renders_a_readable_script"],
+        'XP\'s 202 to 209 mean other things than VX\'s: its fog tone read as Set Move Route and its Set Event Location as Set Vehicle Location',
+    ),
+    Guard(
+        'XP takes only the forms checked against its Interpreter', COMMANDS,
+        '    if engine == "xp" and key not in XP_FORMS:',
+        '    if False:',
+        [XPCMD + "test_the_other_forms_are_refused_and_say_why"],
+        'a wait form wrote VX\'s 230, which XP\'s Interpreter does not dispatch, and the audio forms wrote RPG::BGM into an engine that stores RPG::AudioFile',
+    ),
+    Guard(
+        'XP\'s Show Text holds its first line', COMMANDS,
+        '''    if engine == "xp":
+        return _compile_xp_text(entry, lines, enc, indent)''',
+        '''    if False:
+        return _compile_xp_text(entry, lines, enc, indent)''',
+        [XPCMD + "test_text_is_written_xp_s_way"],
+        'XP\'s command_101 shows parameters[0] as the first line; VX\'s layout puts a face name there, so every XP message would open with a blank line and an unused face',
+    ),
+    Guard(
+        'XP\'s Control Variables stops at its operand', COMMANDS,
+        '    if engine == "xp" and operand_type != OPERAND_RANDOM:',
+        '    if False:',
+        [XPCMD + "test_xp_s_control_variables_stops_where_its_operand_does"],
+        'every constant or variable Control Variables in XP editor data has five parameters; a sixth zero loads and runs, but is not the file XP\'s editor writes',
+    ),
+    Guard(
+        'XP\'s route lines are 509 after a 209', EVENT_TOOLS,
+        '    route_code, step_code = route_codes(engine)',
+        '    route_code, step_code = 205, 505',
+        [EVENTSXP + "test_move_route_gains_its_editor_step_lines"],
+        'XP\'s Set Move Route got no step lines, so the editor shows it empty -- and its 205, a fog tone, would have been read as a route',
+    ),
+    Guard(
+        'XP\'s reference rules are its own', REFERENCES,
+        '_ENGINE_INDEXES = {"xp": _RuleIndex(XP_REFERENCE_RULES)}',
+        '_ENGINE_INDEXES = {}',
+        [XPTOOL + "test_a_battle_names_its_troop_in_xp_s_place"],
+        'XP\'s Battle Processing keeps the troop in parameters[0]; VX\'s rule read parameters[1] (the can-escape flag), so a missing troop went unreported and a delete was told nothing referred to it',
+    ),
+    Guard(
+        'XP skips the VX asset rules on commands', LINT_COMMANDS,
+        '            if checker is not None and check_assets:',
+        '            if checker is not None:',
+        [XPTOOL + "test_xp_s_show_text_is_not_read_as_a_face"],
+        'XP\'s Show Text holds its message where VX\'s holds a face, so every message was reported as a missing face graphic',
+    ),
+    Guard(
+        'XP\'s Erase Event releases an autorun', LINT_PAGES,
+        '    releasing = (_XP_PAGE_RELEASES_CONTROL if project.engine == "xp"',
+        '    releasing = (PAGE_RELEASES_CONTROL if project.engine == "xp"',
+        [XPTOOL + "test_an_autorun_that_erases_itself_is_not_reported"],
+        'XP\'s Erase Event is 116, not 214, so every XP cutscene that ended by erasing itself was reported as trapping the player',
+    ),
+    Guard(
+        'switch usage reads XP\'s commands', SWITCH_USAGE,
+        '        self.route_code = route_codes(project.engine)[0]',
+        '        self.route_code = 205',
+        [XPTOOL + "test_switch_usage_reads_xp_s_commands"],
+        'a switch an XP route turns on was reported as read but never set, because the scan looked for routes at VX\'s 205',
+    ),
+    Guard(
+        'XP\'s stats are compared by XP\'s fields', STAT_OUTLIERS,
+        '                     "xp": _XP_FIELDS}',
+        '                     }',
+        [STATSXP + "test_xp_s_own_fields_are_read"],
+        'XP fell back to VX\'s allowlist, which has no pdef, mdef, str, dex or int, so most of an XP table\'s stats were never compared',
+    ),
+    Guard(
+        'XP tile ids are named by XP\'s ranges', MAP_READ,
+        '                                                ranges or TILE_ID_RANGES)}',
+        '                                                TILE_ID_RANGES)}',
+        [MAPSXP + "test_get_reports_properties_events_and_layers"],
+        'map_get named XP\'s tileset tile 384 as VX\'s sheet C and its autotile 48 as sheet B',
+    ),
+    Guard(
+        'the workflow offers map_paint only where it paints', DOCS,
+        '                  if project.profile.tileset_layout == "ace" else "")',
+        '                  if project.profile.has_tileset_database else "")',
+        [XPTOOL + "test_the_documents_describe_xp"],
+        'XP has a Tilesets table too, so an XP project was told to build its maps with map_paint, which refuses XP',
+    ),
+    Guard(
+        'command_reference says XP\'s layouts are its own', COMMAND_DOCS,
+        '    modelled = engine == ctx.project.profile.key',
+        '    modelled = ctx.project.command_layouts_modelled',
+        [XPREF + "test_the_layouts_are_xp_s_own"],
+        'every XP lookup carried a warning that the layouts were VX Ace\'s and unconfirmed, beside layouts read from XP\'s own Interpreter',
     ),
 ]

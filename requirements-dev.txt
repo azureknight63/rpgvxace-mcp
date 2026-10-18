@@ -1,0 +1,4 @@
+# Development-only. The server itself has no dependencies (stdlib only).
+# pytest is needed by scripts/prove_guards.py, which runs each guard's tests
+# through it; the test modules themselves also run under plain unittest.
+pytest>=7

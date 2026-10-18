@@ -23,8 +23,7 @@ from ..schema import (
     SchemaWalk,
     TILESET_FLAG_BITS,
     TILESET_FLAG_BITS_NOTE,
-    TILE_ID_RANGES,
-    TILE_ID_RANGES_NOTE,
+    XP_PASSAGE_BITS,
 )
 from .registry import (
     ARR,
@@ -43,6 +42,7 @@ from .registry import (
     opt_bool,
     opt_int_default,
     opt_str,
+    partial,
     prop,
     schema,
     scopes_arg,
@@ -97,7 +97,12 @@ MAX_MAP_IDS = 4096
     "class is refused rather than adding one -- a db_edit patch may name "
     "exactly the observed fields, while a map, event page or common event also "
     "accepts a field documented for its class that the entry happens not to "
-    "carry yet. So this report is the floor, not the whole list.",
+    "carry yet. So this report is the floor, not the whole list. A folder "
+    "holding only Game.rgss3a or Game.rgss2a opens read-only from that "
+    "archive (the report's archive field says so, and every write is "
+    "refused); it is refused if it has more than 100000 entries, a name "
+    "over 260 bytes, a file over 536870912 bytes, or more than 4294967296 "
+    "bytes in total.",
     schema({
         "include_schema": prop(BOOL, "Report the instance variables observed on "
                                      "each RPG:: class in this project."),
@@ -187,13 +192,18 @@ def _schema_report(ctx: Context, refresh: bool) -> dict[str, Any]:
                 "the map and event classes; a database class has no reference "
                 "table here, so its fields are listed with empty descriptions "
                 "and are no less real for it." % ctx.project.profile.label,
-        "tile_id_ranges": TILE_ID_RANGES,
-        "tile_id_ranges_note": TILE_ID_RANGES_NOTE,
+        "tile_id_ranges": ctx.project.profile.tile_id_ranges,
+        "tile_id_ranges_note": ctx.project.profile.tile_id_ranges_note,
         "map_layers": ctx.project.profile.map_layers,
     }
-    if ctx.project.profile.has_tileset_database:
+    # By what a tileset row holds, not by whether there is a table: XP has
+    # one too, and its passages entry is not VX Ace's flag word.
+    if ctx.project.profile.tileset_layout == "ace":
         report["tileset_flag_bits"] = TILESET_FLAG_BITS
-        report["tileset_flag_bits_note"] = TILESET_FLAG_BITS_NOTE
+        report.update(partial("tileset_flag_bits",
+                              notes=(TILESET_FLAG_BITS_NOTE,)))
+    elif ctx.project.profile.tileset_layout == "xp":
+        report["tileset_passage_bits"] = XP_PASSAGE_BITS
     if walk.truncated:
         # Say so rather than present a partial tally as the whole picture.
         report["incomplete"] = (

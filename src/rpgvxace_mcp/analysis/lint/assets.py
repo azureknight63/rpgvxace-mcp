@@ -3,10 +3,11 @@
 Three walks are here, and a fourth -- `check_tilesets` -- is in
 `database.py`, because a tileset's nine sheets are files on disk.
 
-The three here share one `_AssetChecker`. `check_tilesets` builds its own,
-and `validate` shares one across the events and assets scopes only when
-both are selected -- so the number of checkers in a run is between one and
-two, and it is not four. The finding ceiling lives on the collector rather
+The three here share one `_AssetChecker`, and so does `check_tilesets`
+unless `validate` hands it none: a whole-scope run builds exactly one,
+which `TestOneAssetCheckerForAWholeRun` asserts by counting constructions.
+"Between one and two" was this paragraph's own claim and is a weaker one
+than the test holds. The finding ceiling lives on the collector rather
 than at the call sites for the same reason either way: the one site that
 carried the guard had written it against the wrong list.
 """
@@ -332,9 +333,10 @@ def _check_command_assets(project: Project, checker: _AssetChecker,
     `validate scopes=["assets"]`, which has no such walk to join.
     """
     if not project.command_layouts_modelled:
-        # An unmodelled engine's parameter layouts are different: XP's Show
-        # Text keeps the message where Ace keeps the face graphic, so these
-        # rules would invent a missing file for every line of dialogue.
+        # These rules read the VX family's layouts. XP's (and an unmodelled
+        # engine's) are different: XP's Show Text keeps the message where
+        # Ace keeps the face graphic, so these rules would invent a missing
+        # file for every line of dialogue.
         return
     for location, commands in iter_command_lists(project, map_ids, budget):
         if checker.full:

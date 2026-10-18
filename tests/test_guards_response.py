@@ -19,6 +19,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+sys.path.insert(0, str(HERE))  # tool_case: bare-name import must work from the repo root
 
 
 from rpgvxace_mcp import (  # noqa: E402
@@ -44,9 +45,109 @@ from rpgvxace_mcp.tools.search_tools import (  # noqa: E402
 )
 from tool_case import (  # noqa: E402
     SharedObjectMap,
-    ToolTest,
-    ValidateTest,
+    ToolTest as _ToolTest,
+    ValidateTest as _ValidateTest,
 )
+
+
+class _BuildOnFirstUse:
+    """Defer the demo-project build until a test first touches the project.
+
+    `ToolTest.setUp` builds and opens a whole project for every method, and
+    a good many methods here only parse `src` or compare two tables and never
+    read it. `tmp`, `project` and `ctx` are what `setUp` creates, so each is a
+    property that runs the real `setUp` on first read or write -- a test that
+    uses the project gets exactly the fixture it always got, and one that does
+    not no longer pays for it. Writes build first too, so an early assignment
+    cannot be overwritten by a later build.
+
+    A class may also set `shared_fixture = True` when none of its tests
+    writes: it then gets one project for the class instead of one per
+    method. That is only safe while the claim is true, so it is enforced
+    rather than trusted -- every file's size and mtime is recorded when
+    the project is built and compared after each test, and a test that
+    changed anything fails by name.
+    """
+
+    _built = False
+    shared_fixture = False
+
+    @staticmethod
+    def _signature(root):
+        return sorted((str(path.relative_to(root)), path.stat().st_size,
+                       path.stat().st_mtime_ns)
+                      for path in root.rglob("*") if path.is_file())
+
+    @classmethod
+    def _shared(cls):
+        """The class's one project, built by the real `setUp` on first use."""
+        if "_shared_fixture" not in cls.__dict__:
+            holder = _ToolTest("setUp")
+            holder.engine, holder.read_only = cls.engine, cls.read_only
+            holder.setUp()
+            cls.addClassCleanup(holder.doCleanups)
+            cls._shared_fixture = (
+                holder, cls._signature(holder.tmp / "project"))
+        return cls._shared_fixture
+
+    def _assert_unchanged(self, holder, before):
+        self.assertEqual(
+            self._signature(holder.tmp / "project"), before,
+            "%s sets shared_fixture and a test wrote to the project it "
+            "shares" % type(self).__name__)
+
+    def setUp(self):
+        self._built = False
+
+    def _ensure_built(self):
+        if self._built:
+            return
+        self._built = True
+        if not self.shared_fixture:
+            super().setUp()
+            return
+        holder, before = self._shared()
+        self.addCleanup(self._assert_unchanged, holder, before)
+        self.__dict__.update(_tmp=holder.tmp, _project=holder.project,
+                             _ctx=holder.ctx)
+
+    @property
+    def tmp(self):
+        self._ensure_built()
+        return self.__dict__["_tmp"]
+
+    @tmp.setter
+    def tmp(self, value):
+        self._ensure_built()
+        self.__dict__["_tmp"] = value
+
+    @property
+    def project(self):
+        self._ensure_built()
+        return self.__dict__["_project"]
+
+    @project.setter
+    def project(self, value):
+        self._ensure_built()
+        self.__dict__["_project"] = value
+
+    @property
+    def ctx(self):
+        self._ensure_built()
+        return self.__dict__["_ctx"]
+
+    @ctx.setter
+    def ctx(self, value):
+        self._ensure_built()
+        self.__dict__["_ctx"] = value
+
+
+class ToolTest(_BuildOnFirstUse, _ToolTest):
+    pass
+
+
+class ValidateTest(_BuildOnFirstUse, _ValidateTest):
+    pass
 
 
 class TestScriptInflateLimit(ToolTest):
@@ -203,6 +304,9 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
         "MAX_DATA_FILE_BYTES": "how large a data file may be to read",
         "MAX_SCRIPT_BYTES": "how large the script pack may be to read",
         "MAX_GAME_INI_BYTES": "how large Game.ini may be to read",
+        "MAX_CHANGE_LINE_BYTES": "how long one line of this server's "
+                                 "own change log may be before it is "
+                                 "skipped as unreadable",
         "MAX_TABLE_CELLS": "cells in one RGSS Table being read",
         "MAX_PAYLOAD_BYTES": "a base64 payload in a write, named in its own "
                              "refusal along with the size that was sent",
@@ -214,6 +318,17 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
         # truncation, nothing in a reply. A caller cannot detect it and has
         # nothing to do about it, which is the test for "internal" here.
         "MAX_CACHED_BYTES": "how much decoded file the cache keeps",
+        # The same test for decoded tileset sheets: past it a sheet is
+        # decoded again, which costs time and shows nowhere in a reply.
+        "MAX_CACHED_SHEETS": "how many decoded sheets map_render keeps",
+        # The live bridge's wire. The bridge itself caps every string at
+        # MAX_BRIDGE_TEXT and every list at MAX_STATE_ENTRIES, both
+        # advertised, so a reply that reaches these was not written by it;
+        # they bound what this server will parse, and nothing a caller can
+        # ask for changes whether they are reached.
+        "MAX_WIRE_BYTES": "one message file read from the live bridge",
+        "MAX_WIRE_DEPTH": "how deep a live bridge reply may nest",
+        "MAX_WIRE_TEXT": "one string in a live bridge reply",
     }
 
     CEILING = re.compile(
@@ -644,6 +759,8 @@ class TestARawPathCannotBeUnboundedlyLong(ToolTest):
     know about one.
     """
 
+    shared_fixture = True
+
     def test_a_path_with_too_many_segments_is_refused(self):
         long_path = "/".join(["events"] + ["1"] * 5000)
         with self.assertRaises(ToolError) as caught:
@@ -781,6 +898,8 @@ class TestAListingBuildsOnlyItsWindow(ToolTest):
     says it "bounds the response and not the work or the memory".
     """
 
+    shared_fixture = True
+
     def test_db_list_builds_only_the_window(self):
         out = self.call("db_list", table="items", limit=1)
         self.assertEqual(len(out["entries"]), 1)
@@ -815,9 +934,11 @@ class TestAPathCannotOutscanItsFile(ToolTest):
 
     def craft_self_referencing_hash(self, pairs):
         game_map = self.project.load_map(1)
-        events = RubyHash()
-        for key in range(pairs):
-            events.set(key, key)
+        # Built from the pair list in one call. `set` is O(1) for an
+        # indexable key now (it was a linear scan per insert, which made
+        # 20,000 of them ~25s of this test), so a loop of `set` would build
+        # the same hash; the pair list is just the shorter way to say it.
+        events = RubyHash([(key, key) for key in range(pairs)])
         events.set(9999, events)          # legal Marshal: a hash in itself
         game_map.set("events", events)
         self.project.path_for(self.project.map_file(1)).write_bytes(

@@ -6,13 +6,12 @@ from typing import Any
 
 from ..commands import (
     CODE_BLANK,
-    CODE_MOVE_ROUTE_STEP,
-    CODE_SET_MOVE_ROUTE,
     CommandError,
     DSL_HELP,
     compile_commands,
     move_route_steps,
     render_script,
+    route_codes,
 )
 from ..convert import (
     TABLE_MODES,
@@ -26,11 +25,8 @@ from ..project import MAX_MAP_ID
 from ..rubytypes import RubyHash, RubyObject, as_list
 from ..schema import (
     COMMON_EVENT_TRIGGER_NAMES,
-    PAGE_FIELDS,
     TRIGGER_NAMES,
-    new_event,
     new_event_command,
-    new_page,
     on_map,
     unreadable_events_note,
 )
@@ -75,6 +71,11 @@ MAX_EVENT_ID = 9999
 # How many events one read will render. Each carries its whole command list as
 # a readable script, so this is a response budget rather than a map limit.
 MAX_EVENT_IDS_PER_CALL = 200
+
+# The most events one map read will list. A page-less event costs a step and a
+# reply row, and the events hash's size comes out of the file, so the step
+# allowance alone allowed a reply of up to 200,000 rows. `offset` pages past it.
+MAX_EVENT_ROWS = 2000
 
 # The most commands one page or common event will be written with. The editor's
 # own list becomes unusable far below this; the point is that a compiled list
@@ -191,14 +192,24 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
         return {"page": index, "command_count": len(commands),
                 **partial("commands", not_read={
                     "page": "the command walk stopped before this page"})}
+    # One read, not three: `dict.get`'s default argument is evaluated
+    # whether or not it is used, so `TRIGGER_NAMES.get(page.get(...),
+    # page.get(...))` read the ivar twice and the line below read it again.
+    trigger = page.get("trigger")
     view: dict[str, Any] = {
         "page": index,
         # The trigger twice: the name for a reader and the code for a
-        # caller that means to write it back.
-        "trigger": TRIGGER_NAMES.get(page.get("trigger"), page.get("trigger")),
-        "trigger_code": page.get("trigger"),
+        # caller that means to write it back. Read once and converted, not
+        # passed through: these were the only two page fields that skipped
+        # `to_json` -- the loop below skips them because `trigger` is a
+        # documented page field -- so an `@trigger` holding an Array of a million
+        # links to 0 is a few kilobytes on disk, serialises fine, and was
+        # emitted twice per page against a charge of one.
+        "trigger": TRIGGER_NAMES.get(trigger, to_json(trigger, ctx.codec,
+                                                      walk)),
+        "trigger_code": to_json(trigger, ctx.codec, walk),
         "command_count": len(commands),
-        "script": render_script(commands, ctx.codec),
+        "script": render_script(commands, ctx.codec, ctx.project.engine),
     }
     # And every other field of the class, from the list that documents it.
     # These were eleven keys written out by hand, of the thirteen fields
@@ -211,10 +222,12 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
     # `command_count` above, and `_check_page_patch` refuses to patch it
     # wholesale. Nothing else is: a field this engine's files do not carry
     # answers `null`, which says "this page has no value here" rather than
-    # leaving a caller to infer it from a missing key -- and every field in
-    # `PAGE_FIELDS` is one `event_edit` will accept a patch to, so a caller
-    # reading the view sees the same set it may write.
-    for field in sorted(PAGE_FIELDS):
+    # leaving a caller to infer it from a missing key -- and every documented
+    # page field is one `event_edit` will accept a patch to, so a caller
+    # reading the view sees the same set it may write. This engine's page,
+    # from its profile: it was the VX family's `PAGE_FIELDS` for every
+    # engine, and XP's page has always_on_top where theirs has priority_type.
+    for field in sorted(ctx.project.profile.class_fields["RPG::Event::Page"]):
         if field in view or field == "list":
             continue
         value = page.get(field)
@@ -238,7 +251,9 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
     "Read the events on a map, or a common event, including their command lists "
     "rendered as readable, indented script lines. Pass include_raw to also get "
     "the exact code/indent/parameters of every command, which is what you need "
-    "before editing anything unusual.",
+    "before editing anything unusual. Lists at most %d events per call -- "
+    "\"events_truncated\" says when there are more, and offset skips the "
+    "first matching events to reach them." % MAX_EVENT_ROWS,
     schema({
         "map_id": prop(INT, "Read events from this map."),
         "common_event_id": prop(INT, "Read this common event instead of a "
@@ -261,6 +276,9 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
                           "counted from the end: "
                           "raw_data's paths do count from the end, and these "
                           "two tools differ on that.", minimum=0),
+        "offset": prop(INT, "Skip this many matching events first, to page "
+                            "past the %d a call lists. Maps only."
+                            % MAX_EVENT_ROWS, minimum=0),
         "include_raw": prop(BOOL, "Include raw command objects as well as the "
                                   "readable script."),
         "refresh": REFRESH,
@@ -288,7 +306,7 @@ def _common_event_view(ctx: Context, args: dict[str, Any], common_id: int,
                        refresh: bool, include_raw: bool) -> dict[str, Any]:
     """One common event: its trigger, its switch and its command list."""
     refuse_inert(
-        args, ("event_ids", "name_contains", "page"),
+        args, ("event_ids", "name_contains", "page", "offset"),
         "a common event has no pages and is addressed by its own id, so "
         "reading one",
         remedy="Drop them, or read a map's events with map_id instead.")
@@ -329,7 +347,7 @@ def _common_event_view(ctx: Context, args: dict[str, Any], common_id: int,
             common.get("trigger"), common.get("trigger")),
         "switch_id": common.get("switch_id"),
         "command_count": len(commands),
-        "script": render_script(shown, ctx.codec),
+        "script": render_script(shown, ctx.codec, ctx.project.engine),
     }
     if include_raw:
         result["commands"] = [
@@ -374,8 +392,11 @@ def _map_events_view(ctx: Context, args: dict[str, Any], map_id: int,
     # while `raw_data` gives -1 the opposite meaning, so silence here was the
     # one reading a caller could not check.
     only_page = opt_int(args, "page", minimum=0)
+    offset = opt_int_default(args, "offset", 0, minimum=0)
 
     out = []
+    skipped = 0
+    more = False
     for event_id, event in events.sorted_items():
         # One step per event before anything about it is read. `_page_view`
         # spends the same budget per page, but an event with no pages reached
@@ -389,6 +410,12 @@ def _map_events_view(ctx: Context, args: dict[str, Any], map_id: int,
         name = decoded(ctx, event.get("name"))
         if needle and needle not in name.lower():
             continue
+        if skipped < offset:
+            skipped += 1
+            continue
+        if len(out) >= MAX_EVENT_ROWS:
+            more = True
+            break
         pages = []
         for index, page in enumerate(as_list(event.get("pages"))):
             # Before both skips. `_page_view` charges per command, so a slot
@@ -419,9 +446,14 @@ def _map_events_view(ctx: Context, args: dict[str, Any], map_id: int,
         "note": "VX runs the LAST page whose conditions are satisfied, so a "
                 "later page with no conditions hides the pages before it."}
     if only_page is not None and not any(e["pages"] for e in out):
-        result["page_note"] = (
-            "no event on this map has a page %d; the pages each one does have "
-            "are counted in page_count" % only_page)
+        result.update(partial("page", notes=(
+            "no event on this map has a page %d; the pages each one does "
+            "have are counted in page_count" % only_page,)))
+    if more:
+        result.update(partial("events", truncated=True, notes=(
+            "this call lists at most %d events and more match; pass offset=%d "
+            "for the next ones, or narrow with event_ids or name_contains"
+            % (MAX_EVENT_ROWS, offset + len(out)),)))
     stopped = command_budget.note("event_get")
     if stopped:
         # One reply built once, with each thing it has to admit added to it.
@@ -786,7 +818,8 @@ def _op_create(request: _EventRequest, raw_op: dict[str, Any],
     y = opt_int_default(raw_op, "y", 0, minimum=0)
     _check_bounds(x, y, request.width, request.height)
     event = normalize_strings(
-        new_event(event_id, opt_str(raw_op, "name") or "", x, y),
+        request.ctx.project.profile.new_event(
+            event_id, opt_str(raw_op, "name") or "", x, y),
         request.ctx.codec)
     if opt_str(raw_op, "name"):
         # Again, through apply_patch: `new_event` puts the name in as UTF-8
@@ -858,7 +891,8 @@ def _op_add_page(request: _EventRequest, raw_op: dict[str, Any],
                  op: str) -> dict[str, Any]:
     event_id, event = request.event(raw_op, op)
     pages = request.pages(event, event_id)
-    page = normalize_strings(new_page(), request.ctx.codec)
+    page = normalize_strings(request.ctx.project.profile.new_page(),
+                             request.ctx.codec)
     # The page being built is not in `pages` yet, so the index it will land at
     # is len(pages). Naming the index of a page that already exists here
     # raised UnboundLocalError, a crash, in place of a refusal.
@@ -1038,10 +1072,13 @@ def _appended(ctx: Context, existing: Any, entries: list[Any]) -> list[Any]:
 def _build_list(ctx: Context, entries: list[Any]) -> list[RubyObject]:
     """Compile DSL entries into a command list the interpreter will accept."""
     try:
-        commands = compile_commands(entries, ctx.codec)
+        # The open project's engine: the layout forms write VX's parameter
+        # lists for VX and refuse an engine neither model describes.
+        commands = compile_commands(entries, ctx.codec,
+                                    engine=ctx.project.engine)
     except CommandError as exc:
         raise ToolError(str(exc)) from exc
-    commands = _insert_move_route_steps(commands)
+    commands = _insert_move_route_steps(commands, ctx.project.engine)
     # Every list ends with a blank command at indent 0.
     commands.append(new_event_command(CODE_BLANK, 0, []))
     _check_list_length(commands)
@@ -1066,23 +1103,28 @@ def _check_list_length(commands: list[Any]) -> None:
             % (len(commands), MAX_COMMANDS_PER_LIST))
 
 
-def _insert_move_route_steps(commands: list[RubyObject]) -> list[RubyObject]:
+def _insert_move_route_steps(commands: list[RubyObject],
+                             engine: str) -> list[RubyObject]:
     """Add the 505 lines the editor writes beside a Set Move Route command.
 
     The interpreter ignores them, but without them the editor shows an empty
-    move route where the steps should be.
+    move route where the steps should be. XP numbers the two 209 and 509;
+    its 205 is a fog tone, which a route-code test written for VX would
+    have read as a route.
     """
+    route_code, step_code = route_codes(engine)
     out: list[RubyObject] = []
     for index, command in enumerate(commands):
         out.append(command)
-        if command.get("code") != CODE_SET_MOVE_ROUTE:
+        if command.get("code") != route_code:
             continue
         following = commands[index + 1] if index + 1 < len(commands) else None
         if (isinstance(following, RubyObject)
-                and following.get("code") == CODE_MOVE_ROUTE_STEP):
+                and following.get("code") == step_code):
             continue
         params = as_list(command.get("parameters"))
         route = params[1] if len(params) > 1 else None
         if isinstance(route, RubyObject) and route.cls == "RPG::MoveRoute":
-            out.extend(move_route_steps(route, command.get("indent", 0) or 0))
+            out.extend(move_route_steps(route, command.get("indent", 0) or 0,
+                                        step_code))
     return out

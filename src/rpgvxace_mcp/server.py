@@ -9,9 +9,9 @@ stdout carries protocol traffic and nothing else. Diagnostics go to stderr.
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
-import traceback
 from typing import Any, TextIO
 
 from . import __version__
@@ -22,9 +22,13 @@ from .tools import (  # noqa: F401
     command_docs_tools,
     db_tools,
     event_tools,
+    live_tools,
     map_common,
+    map_critique_tools,
     map_edit_tools,
+    map_paint_tools,
     map_read_tools,
+    map_render_tools,
     map_tile_tools,
     misc_tools,
     raw_tools,
@@ -40,6 +44,7 @@ from .tools import (  # noqa: F401
 # the copy every tool calls is the one handed raw arguments.
 from .tools.registry import (
     Context,
+    ImageReply,
     REGISTRY,
     ToolError,
     all_tools,
@@ -160,6 +165,8 @@ class Server:
             # result instead, so the model can read them and correct itself.
             return _error(request_id, INVALID_PARAMS, str(exc))
         except Exception as exc:  # noqa: BLE001 - the loop must survive any tool
+            import traceback  # only a fault pays for it: ~10 ms at start-up
+
             self._log(traceback.format_exc())
             return _error(request_id, INTERNAL_ERROR, "%s: %s" % (type(exc).__name__, exc))
 
@@ -224,6 +231,12 @@ class Server:
             # a handler lands here too, which is the right trade -- the model
             # sees a failure it can report rather than a dead tool.
             return _tool_error(exc, tool.name)
+        image = None
+        if isinstance(payload, ImageReply):
+            # A picture rides in its own content block, after the text, so
+            # `content[0]` is the JSON reply for every tool alike.
+            payload, image = payload.body, base64.b64encode(
+                payload.png).decode("ascii")
         try:
             text = _dump_json(payload)
         except (ValueError, RecursionError) as exc:
@@ -235,7 +248,7 @@ class Server:
                 "less of it -- most tools take a limit, and the raw forms of "
                 "the map and event tools are the ones that can be cyclic."
                 % exc), tool.name)
-        if len(text) > MAX_TOOL_RESULT_CHARS:
+        if len(text) + len(image or "") > MAX_TOOL_RESULT_CHARS:
             # Returned, not raised: raising would reach handle()'s ToolError
             # branch and come back as a protocol error, when this is exactly
             # the kind of failure the model can recover from by narrowing its
@@ -245,10 +258,11 @@ class Server:
                 "Narrow the request -- most tools take a limit, and the map and "
                 "event tools take an id -- then call it again."
                 % (len(text), MAX_TOOL_RESULT_CHARS)), tool.name)
-        return {
-            "content": [{"type": "text", "text": text}],
-            "isError": False,
-        }
+        content = [{"type": "text", "text": text}]
+        if image is not None:
+            content.append({"type": "image", "data": image,
+                            "mimeType": "image/png"})
+        return {"content": content, "isError": False}
 
     def _read_resource(self, params: dict[str, Any]) -> dict[str, Any]:
         uri = params.get("uri")

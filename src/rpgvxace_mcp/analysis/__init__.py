@@ -1,24 +1,53 @@
-"""`analysis`: the walks, the reference rules, and the linter.
+"""`analysis`: the walks, the reference rules, the reachability graph, and the linter.
 
 One module until it reached two thousand lines over three separable
 subjects, at which point the dependency boundary and the criticality
 boundary turned out to coincide: everything the four map tool modules import
 lives in `walk`, everything the two delete paths import lives in
 `references`, and `misc_tools` is the only importer of anything in `lint`.
-That last claim is a test rather than a sentence -- `test_schema.py` reads
-every tool module's imports and requires that only `misc_tools` takes a
-name from `lint` -- because it is the reason the boundary is where it is,
+That last claim is a test rather than a sentence --
+`test_codebase_shape.py` reads every tool module's imports and requires
+that only `misc_tools` takes a name from `lint` -- because it is the reason the boundary is where it is,
 and a second importer would make it false while leaving it written down.
+
+`reachability` is a fourth subject at the same bottom layer as `references`:
+it walks (from `walk`) and nothing else in this package walks it, because it
+answers a design-quality question -- which map can nobody reach -- rather
+than `references`'s correctness question of what still points at a thing
+about to be deleted. `map_critique_tools` is its one caller, the way
+`misc_tools` is `lint`'s.
+
+`map_shape` is a fifth, also importing only `walk`: per-map ground emptiness
+and occupied bounding box, read from the tile table with no command walk.
+`map_critique_tools` combines it with `reachability`; neither imports the
+other.
+
+`switch_usage` is another at that layer for the same reason: it walks (from
+`walk`) and answers a design-quality question -- which game switch or
+variable is read and never set -- that `references` does not ask. Its one
+caller is `map_critique_tools`, as `reachability`'s is.
+
+`tile_variety` (Shannon entropy of each tile layer's ids, with Ace's region
+and shadow layer counted apart) and `stat_outliers`
+(IQR fences over a database table) sit there too, importing only `walk`.
+`dead_ends` is the one module a step up: it reads `reachability`'s edge
+builder and start map rather than parsing transfers a second time. All
+three are `map_critique_tools`'s alone.
+
+`summary` sits above `stat_outliers` and nothing else: it walks nothing,
+reads the replies the other scopes already built, and fences a project's
+maps with `stat_outliers.tukey_fences` so a map and a database field are
+judged by one rule. `map_critique_tools` is its one caller too.
 
 `lint` is itself a package of seven modules now, for the same reason at the
 next scale down; its own `__init__` gives that order.
 
 Re-exported from here so `from ..analysis import X` keeps working: the split
 is about how this code is read and changed, not about making every caller
-learn which of three files a name lives in. `tests/test_schema.py` holds
-both layerings -- a tool module is a leaf, these three are ordered
-`walk <- references <- lint`, and every module in either package is named in
-the table that constrains it.
+learn which of nine modules a name lives in. `tests/test_codebase_shape.py`
+holds both layerings -- a tool module is a leaf, `walk` sits under every
+other module here, and every module in either package is named in the
+table that constrains it.
 """
 
 from .walk import (  # noqa: F401
@@ -36,7 +65,11 @@ from .walk import (  # noqa: F401
     iter_command_lists,
     iter_maps,
 )
-from . import lint, references, walk  # noqa: F401
+from . import (  # noqa: F401
+    lint,
+    references,
+    walk,
+)
 from .references import (  # noqa: F401
     DEFAULT_REFERENCE_LIMIT,
     MAP_TARGET,
@@ -44,6 +77,7 @@ from .references import (  # noqa: F401
     REFERENCE_RULES,
     ReferencePreview,
     TABLE_NOUNS,
+    XP_REFERENCE_RULES,
     _as_preview,
     _referenced_ids,
     _requires_met,
@@ -51,6 +85,7 @@ from .references import (  # noqa: F401
     find_references_for,
     reference_preview,
     reference_previews,
+    rule_index,
 )
 # Every name `lint` re-exports, and the same set: this list and the one
 # in `lint/__init__` were written by hand and had drifted eleven names
@@ -68,6 +103,7 @@ from .lint import (  # noqa: F401
     MAX_FINDINGS,
     NESTED_DB_REFERENCES,
     OPAQUE_ESCAPE_CODES,
+    PAGE_RELEASES_CONTROL,
     SEVERITIES,
     VALIDATE_SCOPES,
     WARNING,
@@ -107,3 +143,32 @@ from .lint import (  # noqa: F401
     page_graphic,
     validate,
 )
+
+
+# The critique analyses are one tool's alone (`map_critique`), and loading
+# them is most of what the rest of this package costs, so they load on the
+# first name taken from them rather than when the server starts. `SEVERITIES`
+# is not here: `lint`'s binding is the one this package has always exported.
+# `tests/test_startup.py` holds that importing the server loads none of them.
+# The table is inside the function so that the package namespace gains no
+# name `test_every_re_exported_name_is_really_there` would have to excuse.
+def __getattr__(name: str):
+    import importlib
+
+    lazy = {
+        "dead_ends": ("map_dead_ends",),
+        "map_shape": ("map_shapes",),
+        "reachability": ("map_reachability",),
+        "stat_outliers": ("stat_outlier_report", "tukey_fences"),
+        "summary": ("SUMMARY_NOTE", "critique_summary"),
+        "switch_usage": ("map_switch_usage",),
+        "tile_variety": ("MAX_TILE_VARIETY_CELLS", "TILE_VARIETY_METHOD",
+                         "layer_variety", "map_tile_variety",
+                         "meta_layer_counts", "shannon_entropy"),
+    }
+    if name in lazy:
+        return importlib.import_module("." + name, __name__)
+    for module, names in lazy.items():
+        if name in names:
+            return getattr(importlib.import_module("." + module, __name__), name)
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))

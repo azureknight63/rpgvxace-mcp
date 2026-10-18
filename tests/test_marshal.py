@@ -9,16 +9,22 @@ the separate symbol and object link tables, and Ruby 1.8's bare strings.
 
 import math
 import struct
+import sys
 import unittest
+from pathlib import Path
 
-from rpgvxace_mcp.marshal_rb import (
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "src"))
+
+from rpgvxace_mcp.marshal_rb import (  # noqa: E402
     MarshalError,
     MarshalReader,
     dump,
     load,
     load_with_warnings,
 )
-from rpgvxace_mcp.rubytypes import (
+from rpgvxace_mcp.rubytypes import (  # noqa: E402
     Color,
     RubyClassRef,
     RubyFloat,

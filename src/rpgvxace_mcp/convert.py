@@ -480,6 +480,10 @@ def table_to_json(table: Table, mode: str = "summary",
         out["cells"] = list(table.data)
     else:
         out["cells_omitted"] = table.size
+        # Built by hand, and one of the two places in the project that is:
+        # `registry.partial` owns these suffixes and this module sits below
+        # `tools`, so reaching it would invert the layering.
+        # `TestOneVocabularyForAPartialAnswer` names both exceptions.
         out["cells_truncated"] = True
         out["cells_note"] = (
             "use map_tiles to read or write regions of this table"

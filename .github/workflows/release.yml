@@ -1,0 +1,73 @@
+# Build on every v* tag and publish to PyPI via Trusted Publishing (OIDC, no
+# API token stored in the repo).
+#
+# One-time setup, done by hand:
+#   1. On pypi.org, add a *pending* trusted publisher for project
+#      "rpgvxace-mcp": owner azureknight63, repo rpgvxace-mcp, workflow
+#      release.yml, environment "pypi".
+#   2. In the GitHub repo, create an environment named "pypi" (optionally with
+#      required reviewers, so a tag push waits for approval).
+# Then: bump __version__, server.json and .claude-plugin/plugin.json together,
+# commit, and `git tag v<version> && git push --tags`.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag, package version, server.json and plugin.json must agree
+        run: |
+          python - <<'PY'
+          import json, os, re, sys
+          tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          init = open("src/rpgvxace_mcp/__init__.py", encoding="utf-8").read()
+          pkg = re.search(r'^__version__\s*=\s*"([^"]+)"', init, re.M).group(1)
+          server = json.load(open("server.json", encoding="utf-8"))
+          plugin = json.load(open(".claude-plugin/plugin.json", encoding="utf-8"))
+          found = {
+              "tag": tag,
+              "__version__": pkg,
+              "server.json version": server["version"],
+              "server.json package version": server["packages"][0]["version"],
+              "plugin.json version": plugin["version"],
+          }
+          for name, value in found.items():
+              print(f"{name:30} {value}")
+          if len(set(found.values())) != 1:
+              sys.exit("version mismatch")
+          PY
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rpgvxace-mcp
+    permissions:
+      id-token: write   # required for trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

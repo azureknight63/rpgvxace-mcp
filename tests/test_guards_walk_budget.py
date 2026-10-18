@@ -17,6 +17,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+sys.path.insert(0, str(HERE))  # tool_case: bare-name import must work from the repo root
 
 
 from rpgvxace_mcp import convert, marshal_rb  # noqa: E402
@@ -42,11 +43,52 @@ from rpgvxace_mcp.tools import (  # noqa: E402
     map_read_tools,
 )
 from tool_case import (  # noqa: E402
-    EmptyPageMap,
-    SharedObjectMap,
+    EmptyPageMap as _EmptyPageMap,
+    SharedObjectMap as _SharedObjectMap,
     ToolTest,
     ValidateTest,
 )
+
+
+# Speed only. Every crafted-map test re-marshalled a map that is byte-for-byte
+# the same one. It is a pure function of its inputs, so each is computed once
+# per process and written back for the tests after the first.
+_CRAFTED = {}
+
+
+class _CachedCraft:
+    """Marshal a crafted map once; later tests write the same bytes.
+
+    The map is a pure function of the arguments to `craft_page_map` and of
+    the built project, which is identical for every test. The size assertion
+    and the reopen are kept, so what the test sees is unchanged.
+    """
+
+    def craft_page_map(self, commands, pages, events, max_bytes, what,
+                       condition=None):
+        key = (len(commands), pages, events, condition is not None, tuple(
+                   (c.get("code"), len(c.get("parameters") or []))
+                   for c in commands[:1]))
+        data = _CRAFTED.get(key)
+        path = self.project.path_for(self.project.map_file(1))
+        if data is None:
+            super().craft_page_map(commands, pages, events, max_bytes, what,
+                                   condition=condition)
+            _CRAFTED[key] = path.read_bytes()
+            return
+        path.write_bytes(data)
+        self.assertLess(path.stat().st_size, max_bytes,
+                        "%s is meant to be small and is %d bytes"
+                        % (what, path.stat().st_size))
+        self.ctx = self.reopen()
+
+
+class SharedObjectMap(_CachedCraft, _SharedObjectMap):
+    pass
+
+
+class EmptyPageMap(_CachedCraft, _EmptyPageMap):
+    pass
 
 
 class TestCollectionIsBounded(ValidateTest):
@@ -280,6 +322,96 @@ class TestSharedChildrenCannotAmplifyAWalk(SharedObjectMap, ToolTest):
                       "validate reports a clean bill from a walk that never "
                       "finished: %s" % sorted(out))
 
+    def test_map_critique_stops_and_says_so(self):
+        """The reachability walk shares the same `WalkBudget` the others do."""
+        self.craft_shared_map()
+        out = self.assert_bounded("map_critique", scopes=["reachability"])
+        reach = out["reachability"]
+        self.assertIn("reachability_stopped", reach,
+                      "map_critique reports a clean reachability graph from "
+                      "a walk that never finished: %s" % sorted(reach))
+
+    def test_map_critique_switch_usage_stops_and_says_so(self):
+        """The switch walk is bounded by the same allowance, and reports it.
+
+        A walk that stopped part way would otherwise list a switch as read
+        and never set because the command that sets it was never visited --
+        a false "never set" is the one claim this scope must not make.
+        """
+        self.craft_shared_map()
+        out = self.assert_bounded("map_critique", scopes=["switch_usage"])
+        usage = out["switch_usage"]
+        self.assertIn("switch_usage_stopped", usage,
+                      "map_critique reports switch usage from a walk that "
+                      "never finished: %s" % sorted(usage))
+        # And every claim it did make says it may be wrong.
+        for kind in ("switches", "variables"):
+            for which in ("read_but_never_set", "set_but_never_read"):
+                for row in usage[kind][which]["shown"]:
+                    self.assertEqual(row["confidence"], "low")
+
+
+    def test_map_critique_dead_ends_stops_and_says_so(self):
+        """A partial graph invents dead ends, so it must say it stopped."""
+        self.craft_shared_map()
+        out = self.assert_bounded("map_critique", scopes=["dead_ends"])
+        dead = out["dead_ends"]
+        self.assertIn("dead_ends_stopped", dead,
+                      "map_critique reports dead ends from a walk that "
+                      "never finished: %s" % sorted(dead))
+        self.assertEqual(dead["no_exit"], [],
+                         "findings were reported from a partial graph")
+
+    def test_map_critique_summary_says_its_inputs_stopped(self):
+        """A summary of stopped walks is a summary of half a project.
+
+        It must say so in its own words, and must not rank a dead end that
+        a partial graph invented.
+        """
+        self.craft_shared_map()
+        out = self.assert_bounded("map_critique")
+        summary = out["summary"]
+        self.assertIsInstance(summary.get("findings_stopped"), str,
+                              "the summary does not say its inputs stopped: "
+                              "%s" % sorted(summary))
+        self.assertEqual([r for r in summary["findings"]
+                          if r["scope"] == "dead_ends"], [])
+
+
+class TestOneAllowanceForAMapCritiqueCall(ToolTest):
+    """Every scope of one `map_critique` call spends one `WalkBudget`.
+
+    The rule `WalkBudget` states and `validate` keeps: a call that walks
+    several times spends one allowance across all of them, so a crafted
+    file buys one allowance's work per call however many scopes are named.
+    `map_critique` built a fresh one per scope -- four on a default call --
+    under a comment claiming the opposite.
+
+    Counted at the class, so a scope handed no budget (which then builds
+    its own) is counted too.
+    """
+
+    def constructed(self, **arguments):
+        from rpgvxace_mcp.analysis import walk as walk_module
+        original = walk_module.WalkBudget.__init__
+        made = []
+
+        def counting(budget, *args, **kwargs):
+            made.append(1)
+            original(budget, *args, **kwargs)
+
+        self.addCleanup(setattr, walk_module.WalkBudget, "__init__", original)
+        walk_module.WalkBudget.__init__ = counting
+        self.call("map_critique", **arguments)
+        return len(made)
+
+    def test_a_default_call_builds_one_allowance(self):
+        self.assertEqual(self.constructed(), 1)
+
+    def test_every_scope_at_once_builds_one_allowance(self):
+        from rpgvxace_mcp.tools.map_critique_tools import MAP_CRITIQUE_SCOPES
+        self.assertEqual(self.constructed(scopes=list(MAP_CRITIQUE_SCOPES)), 1)
+
 
 class TestSearchBoundsItsTotalWork(ToolTest):
     """A pattern measured against 2 KB then runs over the whole project.
@@ -399,6 +531,27 @@ class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
     docstring describes as fixed.
     """
 
+    def craft_long_common_event(self):
+        """Common event 1 becomes 250,000 links to one command.
+
+        Saved through the project the first time; later tests in the process
+        write the file that produced, which is the same bytes.
+        """
+        filename = self.project.filename_for("common_events")
+        data = _CRAFTED.get("long common event")
+        if data is None:
+            common = self.project.get_entry("common_events", 1)
+            command = new_event_command(
+                108, 0, [self.project.codec.make_string("x")])
+            common.set("list", [command] * 250_000)
+            self.project.save_file(filename, tool="test",
+                                   summary="one shared command")
+            _CRAFTED["long common event"] = (
+                self.project.path_for(filename).read_bytes())
+        else:
+            self.project.path_for(filename).write_bytes(data)
+        self.ctx = self.reopen()
+
     def test_deleting_an_entry_bounds_its_reference_scan(self):
         self.craft_shared_map()
         out = self.assert_bounded("db_edit", table="items", dry_run=True,
@@ -445,14 +598,8 @@ class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
 
     def test_reading_a_common_event_is_bounded(self):
         """One shared command repeated past the ceiling, in a common event."""
-        common = self.project.get_entry("common_events", 1)
-        command = new_event_command(108, 0,
-                                    [self.project.codec.make_string("x")])
         # Above MAX_WALK_STEPS, so a budget must stop it.
-        common.set("list", [command] * 250_000)
-        self.project.save_file(self.project.filename_for("common_events"),
-                               tool="test", summary="one shared command")
-        self.ctx = self.reopen()
+        self.craft_long_common_event()
 
         # Either bound may fire: the walk budget truncates and says so,
         # or the conversion refuses because the reply would not fit the
@@ -469,13 +616,7 @@ class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
 
     def test_a_bounded_common_event_still_reports_its_real_length(self):
         """Stopping the render must not misreport how long the list is."""
-        common = self.project.get_entry("common_events", 1)
-        command = new_event_command(108, 0,
-                                    [self.project.codec.make_string("x")])
-        common.set("list", [command] * 250_000)
-        self.project.save_file(self.project.filename_for("common_events"),
-                               tool="test", summary="one shared command")
-        self.ctx = self.reopen()
+        self.craft_long_common_event()
 
         out = self.assert_bounded("event_get", common_event_id=1)
         self.assertEqual(out["command_count"], 250_000)
@@ -678,10 +819,11 @@ class TestEveryWalkSpendsItsAllowance(ToolTest):
         self.ctx = Context(self.project)
 
     def hash_of(self, value):
-        events = RubyHash()
-        for event_id in range(1, self.SLOTS + 1):
-            events.set(event_id, value)
-        return events
+        # Pairs handed to the constructor: the same hash `set` builds for
+        # distinct keys. `set` is O(1) for integer keys now, so this is a
+        # convenience and not a workaround for a quadratic insert.
+        return RubyHash([(event_id, value)
+                         for event_id in range(1, self.SLOTS + 1)])
 
     def event_with_pages(self, pages):
         event = new_event(1, "E")
@@ -821,13 +963,17 @@ class TestAnEventWithNoPagesStillCostsARow(ToolTest):
     def craft(self):
         event = new_event(1, "E")
         event.set("pages", [])                     # no pages at all
-        events = RubyHash()
-        for event_id in range(1, map_read_tools.MAX_EVENT_SUMMARY_ROWS * 3):
-            events.set(event_id, event)
-        game_map = self.project.load_map(1)
-        game_map.set("events", events)
-        self.project.path_for(self.project.map_file(1)).write_bytes(
-            marshal_rb.dump(game_map))
+        path = self.project.path_for(self.project.map_file(1))
+        data = _CRAFTED.get("map of events with no pages")
+        if data is None:
+            events = RubyHash(
+                [(event_id, event) for event_id in
+                 range(1, map_read_tools.MAX_EVENT_SUMMARY_ROWS * 3)])
+            game_map = self.project.load_map(1)
+            game_map.set("events", events)
+            data = _CRAFTED["map of events with no pages"] = (
+                marshal_rb.dump(game_map))
+        path.write_bytes(data)
         self.ctx = self.reopen()
 
     def test_the_summary_stops_at_the_ceiling(self):
@@ -850,6 +996,47 @@ class TestAnEventWithNoPagesStillCostsARow(ToolTest):
         self.assertLess(len(out["events"]),
                         map_read_tools.MAX_EVENT_SUMMARY_ROWS * 3)
 
+    def test_event_get_holds_its_listing_to_a_row_ceiling(self):
+        """Well under the step allowance, and still not an unbounded reply."""
+        from rpgvxace_mcp.tools import event_tools
+        self.craft()
+        out = self.call("event_get", map_id=1)
+        ceiling = event_tools.MAX_EVENT_ROWS
+        self.assertLessEqual(len(out["events"]), ceiling,
+                             "%d page-less events came back against a "
+                             "ceiling of %d" % (len(out["events"]), ceiling))
+        self.assertTrue(out.get("events_truncated"),
+                        "the listing was cut and the reply does not say so")
+
+    def test_event_get_offset_reaches_the_events_past_the_ceiling(self):
+        from rpgvxace_mcp.tools import event_tools
+        self.craft()
+        ceiling = event_tools.MAX_EVENT_ROWS
+        out = self.call("event_get", map_id=1, offset=ceiling)
+        self.assertEqual(out["events"][0]["id"], ceiling + 1)
+        self.assertGreater(len(out["events"]), 0)
+
+    def test_event_get_charges_a_step_for_each_event_with_no_pages(self):
+        """What actually bounds `event_get` is `WalkBudget`, one step per event.
+
+        The test above cannot see it: the crafted map holds one event fewer
+        than its own bound, and the real allowance is 200,000 steps, so it
+        passes with no charge at all. Here the allowance is small, so a
+        page-less event that cost nothing would return every one.
+        """
+        from unittest import mock
+        from rpgvxace_mcp.tools import event_tools
+        self.craft()
+        limit = 1000
+        real = event_tools.WalkBudget
+        with mock.patch.object(event_tools, "WalkBudget",
+                               lambda: real(limit=limit)):
+            out = self.call("event_get", map_id=1)
+        self.assertLessEqual(len(out["events"]), limit,
+                             "%d page-less events came back against an "
+                             "allowance of %d" % (len(out["events"]), limit))
+        self.assertIn("command_walk_stopped", out)
+
 
 class TestASkippedPageSlotIsStillCountedForReading(ToolTest):
     """Round 7 made every appended row count. Not every examined slot.
@@ -868,9 +1055,8 @@ class TestASkippedPageSlotIsStillCountedForReading(ToolTest):
         game_map = self.project.load_map(1)
         event = new_event(1, "E")
         event.set("pages", pages)
-        events = RubyHash()
-        for event_id in range(1, self.EVENTS + 1):
-            events.set(event_id, event)
+        events = RubyHash([(event_id, event)
+                           for event_id in range(1, self.EVENTS + 1)])
         game_map.set("events", events)
         path = self.project.path_for(self.project.map_file(1))
         path.write_bytes(marshal_rb.dump(game_map))
@@ -900,10 +1086,9 @@ class TestASkippedPageSlotIsStillCountedForReading(ToolTest):
         which is why the guard on the outer one read VACUOUS.
         """
         from rpgvxace_mcp.tools import map_read_tools
-        events = RubyHash()
-        for event_id in range(1,
-                              map_read_tools.MAX_EVENT_SUMMARY_ROWS + 500):
-            events.set(event_id, 42)
+        events = RubyHash(
+            [(event_id, 42) for event_id in
+             range(1, map_read_tools.MAX_EVENT_SUMMARY_ROWS + 500)])
         game_map = self.project.load_map(1)
         game_map.set("events", events)
         self.project.path_for(self.project.map_file(1)).write_bytes(
@@ -1304,7 +1489,6 @@ class TestOneCommandWalkForAWholeValidate(ToolTest):
         # `lower_the_finding_ceiling` exists: `from .walk import
         # iter_command_lists` binds it in the importer, so patching only
         # `walk` leaves every real call reading the original.
-        import sys
         patched = [module for name, module in sorted(sys.modules.items())
                    if name.startswith("rpgvxace_mcp")
                    and getattr(module, "iter_command_lists", None) is original]

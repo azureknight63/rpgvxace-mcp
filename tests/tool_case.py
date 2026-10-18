@@ -10,9 +10,13 @@ the crafted files only the bound tests need: a map whose objects share
 children, and a map of events with empty pages.
 """
 
+import atexit
+import os
 import shutil
+import stat
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -57,9 +61,13 @@ from rpgvxace_mcp.tools import (  # noqa: E402,F401
     command_docs_tools,
     db_tools,
     event_tools,
+    live_tools,
     map_common,
+    map_critique_tools,
     map_edit_tools,
+    map_paint_tools,
     map_read_tools,
+    map_render_tools,
     map_tile_tools,
     misc_tools,
     raw_tools,
@@ -67,20 +75,147 @@ from rpgvxace_mcp.tools import (  # noqa: E402,F401
 )
 
 
+class _Workspace:
+    """One built demo project per engine, handed to one test at a time.
+
+    Building the project costs 0.15-0.3 s of mostly file creation on Windows,
+    and every test paid it in `setUp` (211 times in `test_tools` alone). So
+    each engine's project is built once, its bytes are remembered, and every
+    checkout puts the directory back to exactly those bytes before handing it
+    over: files that changed are rewritten, files that appeared (backups,
+    temp files, a sibling `outside` directory) are removed, files that went
+    missing come back. That is the same isolation as a fresh build -- the
+    tree is byte-identical at the start of every test -- for the cost of
+    reading ~60 small files.
+
+    A workspace is leased to one test at a time. A second concurrent request
+    (a test that builds two projects, or one that calls `setUp` again from
+    inside a `subTest`) is the same owner re-leasing, or falls back to a
+    private fresh build, so nothing is ever shared between two live tests.
+    Any failure while restoring discards the workspace and rebuilds it.
+    """
+
+    _lock = threading.Lock()
+    _by_engine: dict = {}
+    _created: list = []
+
+    def __init__(self, engine):
+        self.engine = engine
+        self.owner = None
+        self.root = Path(tempfile.mkdtemp(prefix="rpgvxace-test-"))
+        _Workspace._created.append(self.root)
+        self._materialise()
+
+    def _materialise(self):
+        shutil.rmtree(self.root / "project", ignore_errors=True)
+        build(self.root / "project", self.engine)
+        self.files, self.dirs = {}, {self.root}
+        for directory, subdirs, names in os.walk(self.root):
+            self.dirs.update(Path(directory, d) for d in subdirs)
+            for name in names:
+                path = Path(directory, name)
+                self.files[path] = path.read_bytes()
+
+    def restore(self):
+        """Make the tree byte-identical to the build, or rebuild it."""
+        try:
+            self._restore()
+        except OSError:
+            _force_rmtree(self.root / "project")
+            for extra in list(self.root.iterdir()):
+                _force_rmtree(extra)
+            self._materialise()
+
+    def _restore(self):
+        seen = set()
+        for directory, subdirs, names in os.walk(self.root, topdown=True):
+            here = Path(directory)
+            for entry in list(subdirs):
+                path = here / entry
+                if path in self.dirs and not path.is_symlink():
+                    continue
+                subdirs.remove(entry)
+                _force_rmtree(path)
+            for name in names:
+                path = here / name
+                wanted = self.files.get(path)
+                if wanted is None or path.is_symlink():
+                    _force_rmtree(path)
+                    continue
+                seen.add(path)
+                if path.stat().st_size != len(wanted) or path.read_bytes() != wanted:
+                    path.write_bytes(wanted)
+        for path in self.dirs:
+            path.mkdir(parents=True, exist_ok=True)
+        for path, wanted in self.files.items():
+            if path not in seen:
+                path.write_bytes(wanted)
+
+    @classmethod
+    def lease(cls, engine, owner):
+        """A workspace for `owner`: (workspace, shared?)."""
+        with cls._lock:
+            space = cls._by_engine.get(engine)
+            if space is None:
+                space = cls._by_engine[engine] = cls(engine)
+                space.owner = owner
+                return space, True
+            if space.owner is None or space.owner is owner:
+                space.owner = owner
+                space.restore()
+                return space, True
+        return cls(engine), False
+
+    def release(self, owner):
+        with _Workspace._lock:
+            if self.owner is owner:
+                self.owner = None
+
+
+def _force_rmtree(path):
+    """Remove a file, link or directory, clearing read-only on the way."""
+    path = Path(path)
+    if path.is_symlink() or path.is_file():
+        try:
+            path.unlink()
+        except PermissionError:
+            os.chmod(path, stat.S_IWRITE)
+            path.unlink()
+        return
+
+    def clear(function, target, _excinfo):
+        os.chmod(target, stat.S_IWRITE)
+        function(target)
+    shutil.rmtree(path, onerror=clear)
+
+
+@atexit.register
+def _remove_workspaces():
+    for root in _Workspace._created:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 class ToolTest(unittest.TestCase):
     """Base class giving each test its own copy of the demo project.
 
     Subclasses set ``engine`` to run the same checks against the other engine
     in the family.
+
+    The copy is a restored shared directory rather than a fresh build (see
+    `_Workspace`); `self.tmp` is the same path in every test of one engine,
+    and is byte-for-byte what a fresh build would be when `setUp` returns.
     """
 
     read_only = False
     engine = "vx_ace"
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-test-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        build(self.tmp / "project", self.engine)
+        space, shared = _Workspace.lease(self.engine, self)
+        self.tmp = space.root
+        if shared:
+            self.addCleanup(space.release, self)
+        else:
+            self.addCleanup(shutil.rmtree, space.root, ignore_errors=True)
         self.project = Project(self.tmp / "project", read_only=self.read_only)
         self.ctx = Context(self.project)
 
@@ -89,8 +224,12 @@ class ToolTest(unittest.TestCase):
         return self.engine == "vx_ace"
 
     @property
+    def xp(self) -> bool:
+        return self.engine == "xp"
+
+    @property
     def extension(self) -> str:
-        return ".rvdata2" if self.ace else ".rvdata"
+        return self.project.profile.extension
 
     def call(self, tool_name, /, **arguments):
         # run(), not handler(): a real call goes through the argument check,

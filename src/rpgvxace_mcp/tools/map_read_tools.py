@@ -12,9 +12,12 @@ from ..convert import TABLE_MODES, new_walk, to_json
 from ..project import MAX_MAP_ID, ProjectError
 from ..rubytypes import RubyHash, RubyObject, RubyString, Table, as_list
 from ..schema import (
+    META_LAYER,
     PAGE_CONDITION_FLAGS,
     TILE_ID_RANGES,
     TRIGGER_NAMES,
+    region_of,
+    shadow_of,
     unreadable_events_note,
 )
 from .map_common import MAX_CELLS_PER_WALK, _check_budget
@@ -165,7 +168,7 @@ def map_list(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                     # Rather than the 0 above standing unexplained: a count of
                     # zero from a field that could not be read is the one
                     # reading a caller cannot check.
-                    row["events_note"] = unreadable
+                    row.update(partial("events", notes=(unreadable,)))
                 bgm = game_map.get("bgm")
                 if isinstance(bgm, RubyObject) and game_map.get("autoplay_bgm"):
                     row["bgm"] = decoded(ctx, bgm.get("name"))
@@ -224,6 +227,9 @@ def _start_position(ctx: Context) -> dict[str, Any] | None:
                            "%d most common tile ids on each layer with how "
                            "often each appears, how many distinct ids the "
                            "layer holds, and how many of them are not listed. "
+                           "Each entry names its tileset sheet, except on VX "
+                           "Ace's layer 3, which holds no tiles: there each "
+                           "value is given as its region and shadow. "
                            "Not every id: a layer can hold thousands, and "
                            "\"tile_ids_not_shown\" says how many were left "
                            "out. A tally covers the whole tile table by "
@@ -278,10 +284,10 @@ def map_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     tiles = one_of(args, "tiles", list(TILE_DETAIL), TILE_DETAIL[0])
     if not isinstance(data, Table):
         if tiles == "counts":
-            result["tile_counts_note"] = (
+            result.update(partial("tile_counts", notes=(
                 "this map holds its tile data as %s rather than a Table, so "
                 "there was nothing to count. Run validate to see what is "
-                "wrong with the file." % type(data).__name__)
+                "wrong with the file." % type(data).__name__,)))
     else:
         result["tile_table"] = {
             "xsize": data.xsize, "ysize": data.ysize, "zsize": data.zsize,
@@ -290,36 +296,51 @@ def map_get(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                        for z in range(data.zsize)},
         }
         if tiles == "counts":
-            result["tile_counts"] = _tile_counts(data)
+            result["tile_counts"] = _tile_counts(
+                data, META_LAYER if ctx.project.profile.has_region_layer
+                else None, ctx.project.profile.tile_id_ranges)
 
     if opt_bool(args, "include_events", True):
         result["events"], cut_short = _event_summaries(ctx, game_map)
-        if cut_short:
-            # A boolean *and* a sentence, from `partial`. This used to be the
-            # sentence under the boolean's name, while `references_truncated`
-            # two modules over was a boolean -- so one suffix meant two
-            # types and a caller reading either had to know which.
-            result.update(partial(
-                "events", truncated=True, notes=(
-                    "this map describes more than %d event and page rows, so "
-                    "the summary stops there. A map that large is usually a "
-                    "file that shares one page object across many slots "
-                    "rather than a big map -- run validate. Read particular "
-                    "events with event_get." % MAX_EVENT_SUMMARY_ROWS,)))
-        unreadable = unreadable_events_note(game_map.get("events"))
-        if unreadable:
-            result["events_note"] = unreadable
+        # A boolean *and* a sentence, from `partial`. The sentence used to
+        # be under the boolean's name, while `references_truncated` two
+        # modules over was a boolean -- so one suffix meant two types and a
+        # caller reading either had to know which.
+        #
+        # One call for both facts, because they are two sentences about the
+        # same subject: `result["events_note"] = unreadable` was assigned
+        # afterwards and dropped the truncation sentence whenever a map was
+        # both truncated and unreadable. `partial` joins what it is given.
+        result.update(partial(
+            "events", truncated=cut_short, notes=(
+                ("this map describes more than %d event and page rows, so "
+                 "the summary stops there. A map that large is usually a "
+                 "file that shares one page object across many slots "
+                 "rather than a big map -- run validate. Read particular "
+                 "events with event_get." % MAX_EVENT_SUMMARY_ROWS)
+                if cut_short else "",
+                unreadable_events_note(game_map.get("events")))))
     warnings = ctx.project.file_warnings(ctx.project.map_file(map_id))
     if warnings:
         result["file_warnings"] = warnings
     return result
 
 
-def _tile_counts(data: Table) -> dict[str, Any]:
+def _tile_counts(data: Table, packed_layer: "int | None" = None,
+                 ranges: "dict[str, tuple[int, int]] | None" = None
+                 ) -> dict[str, Any]:
     """How often each tile id appears on each layer.
 
     Bounded like every other whole-table walk: this is a per-cell Python loop,
     and a crafted map can declare millions of cells.
+
+    ``packed_layer`` is VX Ace's shadow and region layer, whose values are
+    not tile ids: they are reported as the region and shadow they hold
+    rather than named after the sheet whose id range they happen to fall in
+    (256, region 1, used to read as a tile from sheet C).
+
+    ``ranges`` names the sheets: the VX family's A1-E by default, XP's
+    autotiles and tileset for an XP map.
     """
     _check_budget(
         data.xsize * data.ysize * data.zsize, "count the tiles of",
@@ -347,7 +368,8 @@ def _tile_counts(data: Table) -> dict[str, Any]:
         out[str(z)] = {
             "distinct_tile_ids": len(counter),
             "most_common": [{"tile_id": tile, "count": count,
-                             "sheet": _tile_sheet(tile)}
+                             **_what_a_value_is(tile, z == packed_layer,
+                                                ranges or TILE_ID_RANGES)}
                             for tile, count in counter.most_common(TOP_TILE_IDS)],
             # Said in the reply, not only in the description: a caller asking
             # whether one tile is used anywhere read a short list, did not find
@@ -357,10 +379,18 @@ def _tile_counts(data: Table) -> dict[str, Any]:
     return out
 
 
-def _tile_sheet(tile_id: int) -> str:
+def _what_a_value_is(value: int, packed: bool,
+                     ranges: dict[str, tuple[int, int]]) -> dict[str, Any]:
+    """The sheet a tile id is cut from, or the parts of a layer-3 word."""
+    if packed:
+        return {"region": region_of(value), "shadow": shadow_of(value)}
+    return {"sheet": _tile_sheet(value, ranges)}
+
+
+def _tile_sheet(tile_id: int, ranges: dict[str, tuple[int, int]]) -> str:
     if tile_id == 0:
         return "empty"
-    for sheet, (low, high) in TILE_ID_RANGES.items():
+    for sheet, (low, high) in ranges.items():
         if low <= tile_id <= high:
             return sheet
     return "unknown"

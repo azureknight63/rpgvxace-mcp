@@ -7,6 +7,7 @@ dropped argument into a refusal, and every id that is refused rather than
 coerced -- `int(2.9)` is 2, and an id addresses a different thing.
 """
 
+import ast
 import shutil
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+sys.path.insert(0, str(HERE))  # tool_case: bare-name import must work from the repo root
 
 from build_project import build  # noqa: E402
 
@@ -44,7 +46,9 @@ from rpgvxace_mcp.tools.registry import (  # noqa: E402
 from rpgvxace_mcp.tools import (  # noqa: E402
     db_tools,
     event_tools,
+    live_tools,
     map_edit_tools,
+    map_paint_tools,
     map_tile_tools,
     misc_tools,
     raw_tools,
@@ -557,11 +561,13 @@ class TestEveryOpSelectingToolHasATable(unittest.TestCase):
     TABLES = {
         ("map_edit", None): map_edit_tools.MAP_OP_ARGS,
         ("map_tiles", None): map_tile_tools.TILE_OP_ARGS,
+        ("map_paint", None): map_paint_tools.PAINT_OP_ARGS,
         ("db_edit", "ops"): db_tools.DB_OP_ARGS,
         ("event_edit", "ops"): event_tools.EVENT_OP_ARGS,
         ("raw_data", None): raw_tools.RAW_OP_ARGS,
         ("scripts", None): misc_tools.SCRIPT_OP_ARGS,
         ("backups", None): misc_tools.BACKUP_OP_ARGS,
+        ("live", None): live_tools.LIVE_OP_ARGS,
     }
 
     def op_selecting_tools(self):
@@ -613,7 +619,9 @@ class TestEveryOpSelectingToolHasATable(unittest.TestCase):
         for label, dispatch, declared in (
                 ("db_edit", db_tools._DB_OPS, db_tools.DB_OP_ARGS),
                 ("event_edit", event_tools._EVENT_OPS,
-                 event_tools.EVENT_OP_ARGS)):
+                 event_tools.EVENT_OP_ARGS),
+                ("map_paint", map_paint_tools._PLANNERS,
+                 map_paint_tools.PAINT_OP_ARGS)):
             with self.subTest(tool=label):
                 self.assertEqual(set(dispatch), set(declared))
 
@@ -737,11 +745,13 @@ class TestNoOpSlipsPastTheGate(ToolTest):
     TABLES = {
         ("map_edit", None): map_edit_tools.MAP_OP_ARGS,
         ("map_tiles", None): map_tile_tools.TILE_OP_ARGS,
+        ("map_paint", None): map_paint_tools.PAINT_OP_ARGS,
         ("db_edit", "ops"): db_tools.DB_OP_ARGS,
         ("event_edit", "ops"): event_tools.EVENT_OP_ARGS,
         ("raw_data", None): raw_tools.RAW_OP_ARGS,
         ("scripts", None): misc_tools.SCRIPT_OP_ARGS,
         ("backups", None): misc_tools.BACKUP_OP_ARGS,
+        ("live", None): live_tools.LIVE_OP_ARGS,
     }
 
     def ops_one_of_accepts(self, tool_name, key):
@@ -848,7 +858,6 @@ class TestReadToolsDropNoArgumentsEither(ToolTest):
         `command_docs_tools.py` two of the three call sites went with it --
         which the count below caught, and which is why the count is there.
         """
-        import ast
         tools = (Path(__file__).resolve().parent.parent / "src"
                  / "rpgvxace_mcp" / "tools")
         calls = []
@@ -1549,7 +1558,6 @@ class TestEveryIdInTheDslRefusesACoercibleValue(ToolTest):
         of the entry dict passed straight to `int` -- so a new one written
         the same way is caught without anybody remembering the rule.
         """
-        import ast
         source = (Path(__file__).resolve().parent.parent / "src"
                   / "rpgvxace_mcp" / "commands.py").read_text(encoding="utf-8")
         bad = []
@@ -1742,7 +1750,6 @@ class TestAnArrayFieldThatIsNotAnArrayIsReadSafely(ToolTest):
         `x.get(...) or []` is the shape; `required or []` on a schema
         argument is not, because that value came from this server.
         """
-        import ast
         root = (Path(__file__).resolve().parent.parent / "src"
                 / "rpgvxace_mcp")
         spelled = []
@@ -1845,7 +1852,6 @@ class TestEveryDeclaredOpLeadsItsReply(unittest.TestCase):
         the mistake that made six coercion cases pass on a typo in an
         earlier round.
         """
-        import ast
         source = (Path(__file__).resolve().parent
                   / "test_guards_replies.py").read_text(encoding="utf-8")
         tree = ast.parse(source)

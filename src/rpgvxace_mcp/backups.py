@@ -33,6 +33,13 @@ from .paths import (
 )
 
 
+# How long one line of the change log may be. This server writes that file
+# itself and a record it writes is a few hundred bytes -- but the file sits
+# in a folder the threat model treats as untrusted, so the bound is a fact
+# about where it lives rather than about who wrote it.
+MAX_CHANGE_LINE_BYTES = 64 * 1024
+
+
 class BackupStore:
     """The backup store and the change log, mixed into `Project`.
 
@@ -314,8 +321,30 @@ class BackupStore:
             with open(path, encoding="utf-8", errors="replace") as handle:
                 # A deque keeps only the tail: the log grows for the life of
                 # the project and there is no reason to hold all of it.
-                rows = deque((line for line in handle if line.strip()),
-                             maxlen=limit)
+                rows: "deque[str]" = deque(maxlen=limit)
+                # Bounded per line as well. `for line in handle` reads to
+                # the next newline however far away it is, and this file
+                # lives in the project folder -- which the threat model
+                # treats as untrusted, and which is routinely the process
+                # CWD -- so one line with no newline in it is an unbounded
+                # read into memory before `maxlen` can drop anything. The
+                # same bound `MAX_GAME_INI_BYTES` and `server._read_line`
+                # were written for; this was the reader still without it.
+                while True:
+                    line = handle.readline(MAX_CHANGE_LINE_BYTES + 1)
+                    if not line:
+                        break
+                    if len(line) > MAX_CHANGE_LINE_BYTES:
+                        # Dropped, not truncated: half a JSON record is not
+                        # a record. The rest of it is read past one bounded
+                        # chunk at a time, so the next line starts at a
+                        # record boundary.
+                        while line and not line.endswith("\n"):
+                            line = handle.readline(
+                                MAX_CHANGE_LINE_BYTES + 1)
+                        continue
+                    if line.strip():
+                        rows.append(line)
         except OSError:
             return []
         out = []

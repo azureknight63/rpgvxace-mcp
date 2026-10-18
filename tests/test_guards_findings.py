@@ -7,6 +7,7 @@ appends inside a loop is in scope, and the scanning tests here are
 what catch a rule nobody thought to bound.
 """
 
+import ast
 import json
 import sys
 import unittest
@@ -16,6 +17,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+sys.path.insert(0, str(HERE))  # tool_case: bare-name import must work from the repo root
 
 
 from rpgvxace_mcp import marshal_rb  # noqa: E402
@@ -577,6 +579,11 @@ class TestEveryScopeSpendsTheSameAllowance(ToolTest):
         """
         from rpgvxace_mcp import analysis
         infos = RubyHash()
+        # Fifty times the allowance below. The cycle only has to be longer
+        # than the budget, but the length is what makes a walk that keeps
+        # scanning after the budget is gone show itself: it re-walks the
+        # chain from every start the early break left unsettled, so the
+        # lookups are counted below rather than timed.
         total = 5000
         for map_id in range(1, total + 1):
             info = RubyObject("RPG::MapInfo")
@@ -588,11 +595,25 @@ class TestEveryScopeSpendsTheSameAllowance(ToolTest):
         # on disk, which fills the collector to MAX_FINDINGS before the
         # chain loop is reached -- so the test would pass on a walk that
         # never happened.
+        class Counting(dict):
+            lookups = 0
+
+            def get(self, key, default=None):
+                Counting.lookups += 1
+                return dict.get(self, key, default)
+
         budget = analysis.WalkBudget(limit=100)
-        analysis._parent_cycles(dict(infos.items()), analysis._Findings(),
+        analysis._parent_cycles(Counting(infos.items()), analysis._Findings(),
                                 budget)
         self.assertTrue(budget.exhausted,
                         "a %d-entry cycle was walked free" % total)
+        # One walk of the chain is `total` lookups. Once the budget is gone
+        # nothing more is worth walking, so a second pass from another start
+        # is the quadratic behaviour this bounds.
+        self.assertLessEqual(
+            Counting.lookups, 2 * total,
+            "%d lookups for a %d-entry cycle: the walk kept scanning "
+            "starts after its budget was exhausted" % (Counting.lookups, total))
 
     def test_a_parent_chain_cannot_collect_past_the_ceiling(self):
         """The ceiling was on the outer loop; one long cycle is one pass."""
@@ -673,7 +694,6 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
 
     def functions(self):
         """Every top-level function of the linter, wherever it lives."""
-        import ast
         for path in self.modules():
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in tree.body:
@@ -682,7 +702,6 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
 
     def looping_functions(self):
         """Every top-level function in the linter with a loop in it."""
-        import ast
         out = {}
         for _, node in self.functions():
             if any(isinstance(inner, (ast.For, ast.While))
@@ -713,7 +732,6 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
         A `budget` argument that is accepted and never spent reads, at
         every call site, as a walk that is bounded.
         """
-        import ast
         idle = []
         for stem, node in self.functions():
             if "budget" not in [a.arg for a in node.args.args]:
@@ -1000,7 +1018,6 @@ class TestEveryCollectorIsShared(unittest.TestCase):
 
     def functions(self):
         """Every top-level function of the linter, with its source."""
-        import ast
         package = (Path(__file__).resolve().parent.parent / "src"
                    / "rpgvxace_mcp" / "analysis" / "lint")
         found = sorted(path for path in package.glob("*.py")
@@ -1014,7 +1031,6 @@ class TestEveryCollectorIsShared(unittest.TestCase):
 
     def collectors(self):
         """Functions that both loop and build a findings list of their own."""
-        import ast
         out = {}
         for stem, node, body in self.functions():
             loops = any(isinstance(inner, (ast.For, ast.While))
@@ -1075,7 +1091,6 @@ class TestEveryCollectorIsShared(unittest.TestCase):
 
     def collector_classes(self):
         """Every class in the linter holding a `list[Finding]` attribute."""
-        import ast
         package = (Path(__file__).resolve().parent.parent / "src"
                    / "rpgvxace_mcp" / "analysis" / "lint")
         found = {}
@@ -1249,7 +1264,6 @@ class TestEveryCollectorReturnsWhatItCollected(unittest.TestCase):
 
     def rules(self):
         """Every function in the linter that takes a `collected` argument."""
-        import ast
         package = (Path(__file__).resolve().parent.parent / "src"
                    / "rpgvxace_mcp" / "analysis" / "lint")
         found = []
@@ -1271,7 +1285,6 @@ class TestEveryCollectorReturnsWhatItCollected(unittest.TestCase):
         self.assertIn("check_map_tree", names)
 
     def test_no_rule_returns_a_list_it_built_in_the_return(self):
-        import ast
         wrong = []
         for stem, node in self.rules():
             for inner in ast.walk(node):

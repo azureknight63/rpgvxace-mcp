@@ -29,6 +29,9 @@ BACKUP_DIR = "backups"
 CHANGE_LOG = "changes.jsonl"
 
 
+RENDER_DIR = "renders"
+
+
 BACKUP_STAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 

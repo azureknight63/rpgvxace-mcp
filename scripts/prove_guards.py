@@ -61,8 +61,14 @@ def run_tests(tree: Path, tests: list[str]) -> subprocess.CompletedProcess | Non
     try:
         return subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "--no-header", *tests],
+            # UTF-8 both ways, named: left to the platform, the child wrote
+            # in one code page and this side decoded in another, and a
+            # failure message neither could hold left stdout as None.
             cwd=tree, capture_output=True, text=True,
-            env={**dict(__import__("os").environ), "PYTHONPATH": str(tree / "src")},
+            encoding="utf-8", errors="replace",
+            env={**dict(__import__("os").environ),
+                 "PYTHONPATH": str(tree / "src"),
+                 "PYTHONIOENCODING": "utf-8"},
             timeout=TEST_TIMEOUT,
         )
     except subprocess.TimeoutExpired:

@@ -13,11 +13,13 @@ from __future__ import annotations
 from typing import Any
 
 from ..commands import (
-    CONTINUATION_CODES,
     DSL_HELP,
     MOVE_COMMAND_NAMES,
+    XP_AUTHORING_NOTE,
+    XP_MOVE_COMMAND_NAMES,
     command_name,
     command_table,
+    continuation_codes,
     param_specs,
 )
 from .registry import (
@@ -40,7 +42,8 @@ from .registry import (
     "Look up event command codes",
     "The event command codes this project's engine dispatches, and how to "
     "write them with event_edit. Search by name or look up a single code to "
-    "see its parameter layout. For an engine outside the VX family (only "
+    "see its parameter layout. XP has a table of its own (its Wait is 106 and "
+    "its Set Move Route 209). For an engine this server does not model (only "
     "reachable with --allow-other-engines) the codes and layouts reported are "
     "VX Ace's, which are not that engine's -- every reply says which it is in "
     "\"layouts_are_this_engines\", because a parameter layout believed to be "
@@ -64,7 +67,10 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     engine = ctx.project.engine
     specs = param_specs(engine)
     table = command_table(engine)
-    modelled = ctx.project.command_layouts_modelled
+    # Whether the table and layouts are this engine's own -- true for XP,
+    # whose are, though they are not the VX family's that
+    # `command_layouts_modelled` asks about.
+    modelled = engine == ctx.project.profile.key
     borrowed = None if modelled else (
         "This is a %s project, which this server does not model. The codes "
         "and parameter layouts below are VX Ace's and are not confirmed for "
@@ -82,13 +88,17 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         # so was the one reply that omitted the key the description promises
         # every reply carries. A move route's codes are borrowed for an
         # unmodelled engine exactly as the command codes are.
+        names = XP_MOVE_COMMAND_NAMES if engine == "xp" else MOVE_COMMAND_NAMES
         moves: dict[str, Any] = {
             "move_commands": [{"code": code, "name": name}
-                              for code, name in sorted(MOVE_COMMAND_NAMES.items())],
+                              for code, name in sorted(names.items())],
             "layouts_are_this_engines": modelled,
-            "note": "Move command codes come from the shared XP/VX/Ace move "
-                    "command set rather than the VX reference manual. Confirm "
-                    "against an existing route before relying on one.",
+            "note": "Move command codes are the ones Game_Character "
+                    "dispatches, identical in VX and VX Ace; XP's 39 and 40 "
+                    "toggle Always on Top instead of transparency. "
+                    "event_edit's move_route form takes each step by name "
+                    "(not on XP); see \"authoring\" in a reply without "
+                    "move_commands.",
         }
         if borrowed:
             moves["engine_warning"] = borrowed
@@ -99,7 +109,8 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         refuse_inert(args, ("search",),
                      "a lookup of one code answers for that code alone, so it",
                      remedy="Ask for one or the other.")
-        entry: dict[str, Any] = {"code": code, "name": command_name(code)}
+        entry: dict[str, Any] = {"code": code,
+                                 "name": command_name(code, engine)}
         # A list, because both notes can apply at once: a code this engine
         # does not dispatch AND whose layout is unrecorded used to lose the
         # first message to the second, leaving the model hunting for an example
@@ -128,10 +139,11 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         return entry
 
     needle = (opt_str(args, "search") or "").lower()
+    continuing = continuation_codes(engine)
     rows = [
         {"code": code, "name": name,
          "parameters": specs.get(code),
-         "continuation": code in CONTINUATION_CODES}
+         "continuation": code in continuing}
         for code, name in sorted(table.items())
         if not needle or needle in name.lower()
     ]
@@ -143,6 +155,7 @@ def command_reference(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
         # the size of the table. Same rename, same reason as `event_get` in `event_tools`.
         "matching_commands": len(rows),
         **({"engine_warning": borrowed} if borrowed else {}),
+        **({"authoring_note": XP_AUTHORING_NOTE} if engine == "xp" else {}),
         "authoring": DSL_HELP,
         "indent_rule": "Commands inside a branch or loop sit one indent deeper. "
                        "event_edit handles indentation for if/loop/choices; if you "
