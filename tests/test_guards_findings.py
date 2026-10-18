@@ -7,6 +7,7 @@ appends inside a loop is in scope, and the scanning tests here are
 what catch a rule nobody thought to bound.
 """
 
+import ast
 import json
 import sys
 import unittest
@@ -16,6 +17,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+sys.path.insert(0, str(HERE))  # tool_case: bare-name import must work from the repo root
 
 
 from rpgvxace_mcp import marshal_rb  # noqa: E402
@@ -227,8 +229,8 @@ class TestNoWalkCollectsPastTheCeiling(ToolTest):
     def test_the_asset_walk_stops_collecting(self):
         self.craft_broken_map()
         found = self.analysis.check_assets(self.project, [1])
-        self.assertLessEqual(len(found), self.CEILING,
-                             "the asset walk collected %d findings past a "
+        self.assertEqual(len(found), self.CEILING,
+                         "the asset walk collected %d findings past a "
                              "ceiling of %d" % (len(found), self.CEILING))
 
     def test_the_asset_checker_itself_stops_collecting(self):
@@ -249,8 +251,8 @@ class TestNoWalkCollectsPastTheCeiling(ToolTest):
         """Shadowed pages: one finding per event, and EVENTS is from the file."""
         self.craft_broken_map()
         found = self.analysis.check_event_pages(self.project, [1])
-        self.assertLessEqual(len(found), self.CEILING,
-                             "the page walk collected %d findings past a "
+        self.assertEqual(len(found), self.CEILING,
+                         "the page walk collected %d findings past a "
                              "ceiling of %d" % (len(found), self.CEILING))
 
     def test_the_tileset_walk_stops_collecting(self):
@@ -266,8 +268,8 @@ class TestNoWalkCollectsPastTheCeiling(ToolTest):
         if not broken:
             self.skipTest("no tilesets in this engine's fixture")
         found = self.analysis.check_tilesets(self.project, [1], tables)
-        self.assertLessEqual(len(found), self.CEILING,
-                             "the tileset walk collected %d findings past a "
+        self.assertEqual(len(found), self.CEILING,
+                         "the tileset walk collected %d findings past a "
                              "ceiling of %d" % (len(found), self.CEILING))
 
     def test_an_ordinary_project_still_reports_everything(self):
@@ -349,6 +351,13 @@ class TestNarrowingValidateActuallyNarrowsIt(ToolTest):
         """Narrowing the loading must not narrow the checking."""
         out = self.call("validate", scopes=["events"])
         self.assertNotIn("command_walk_stopped", out)
+        # And the maps really were read: the absence of one key is also what a
+        # run that checked nothing reports.
+        loaded = set(self.loaded_maps(scopes=["events"]))
+        on_disk = set(self.ctx.project.map_ids_on_disk())
+        self.assertTrue(on_disk <= loaded,
+                        "a whole run left maps unread: %s"
+                        % sorted(on_disk - loaded))
 
     def test_a_transfer_to_an_undersized_map_is_still_caught(self):
         """The finding the eager lookup existed to produce.
@@ -459,7 +468,7 @@ class TestTheMapScopeStopsCollecting(ToolTest):
         self.assertGreater(len(maps), 1, "this needs more than one map")
         tables = self.analysis._Tables(self.project)
         found = self.analysis.check_maps(self.project, maps, tables)
-        self.assertLessEqual(
+        self.assertEqual(
             len(found), self.CEILING,
             "check_maps collected %d findings from %d maps against a ceiling "
             "of %d, because the guard was on a list it discards"
@@ -473,7 +482,9 @@ class TestTheMapScopeStopsCollecting(ToolTest):
         self.assertNotIn(missing, troop_ids)
         found = self.analysis._check_encounters(
             self.project, 1, game_map, troop_ids)
-        self.assertLessEqual(len(found), self.CEILING)
+        # Exactly the ceiling: a walk that found nothing would also be
+        # "at most" it.
+        self.assertEqual(len(found), self.CEILING)
 
     def test_a_real_encounter_list_is_still_checked(self):
         """The ceiling must not stop a project's genuine findings."""
@@ -577,6 +588,11 @@ class TestEveryScopeSpendsTheSameAllowance(ToolTest):
         """
         from rpgvxace_mcp import analysis
         infos = RubyHash()
+        # Fifty times the allowance below. The cycle only has to be longer
+        # than the budget, but the length is what makes a walk that keeps
+        # scanning after the budget is gone show itself: it re-walks the
+        # chain from every start the early break left unsettled, so the
+        # lookups are counted below rather than timed.
         total = 5000
         for map_id in range(1, total + 1):
             info = RubyObject("RPG::MapInfo")
@@ -588,11 +604,29 @@ class TestEveryScopeSpendsTheSameAllowance(ToolTest):
         # on disk, which fills the collector to MAX_FINDINGS before the
         # chain loop is reached -- so the test would pass on a walk that
         # never happened.
+        class Counting(dict):
+            lookups = 0
+
+            def get(self, key, default=None):
+                Counting.lookups += 1
+                return dict.get(self, key, default)
+
         budget = analysis.WalkBudget(limit=100)
-        analysis._parent_cycles(dict(infos.items()), analysis._Findings(),
+        analysis._parent_cycles(Counting(infos.items()), analysis._Findings(),
                                 budget)
         self.assertTrue(budget.exhausted,
                         "a %d-entry cycle was walked free" % total)
+        # The bound below is on lookups, which a walk that never looked
+        # anything up also satisfies.
+        self.assertGreater(Counting.lookups, 0,
+                           "the walk never asked the map tree for a parent")
+        # One walk of the chain is `total` lookups. Once the budget is gone
+        # nothing more is worth walking, so a second pass from another start
+        # is the quadratic behaviour this bounds.
+        self.assertLessEqual(
+            Counting.lookups, 2 * total,
+            "%d lookups for a %d-entry cycle: the walk kept scanning "
+            "starts after its budget was exhausted" % (Counting.lookups, total))
 
     def test_a_parent_chain_cannot_collect_past_the_ceiling(self):
         """The ceiling was on the outer loop; one long cycle is one pass."""
@@ -612,6 +646,28 @@ class TestEveryScopeSpendsTheSameAllowance(ToolTest):
                              "a %d-entry cycle collected %d findings against "
                              "a ceiling of %d"
                              % (total, len(findings), MAX_FINDINGS))
+
+    def test_a_parent_chain_fills_the_ceiling_and_no_more(self):
+        """The chain loop on its own, with a collector of its own.
+
+        `test_a_parent_chain_cannot_collect_past_the_ceiling` goes through
+        `check_map_tree`, where the outer loop can fill the collector first.
+        """
+        from rpgvxace_mcp import analysis
+        infos = {}
+        total = MAX_FINDINGS + 200
+        for map_id in range(1, total + 1):
+            info = RubyObject("RPG::MapInfo")
+            info.set("name", self.project.codec.make_string("M%d" % map_id))
+            info.set("parent_id", map_id + 1 if map_id < total else 1)
+            infos[map_id] = info
+        collector = analysis._Findings()
+        analysis._parent_cycles(infos, collector,
+                                analysis.WalkBudget(limit=10 ** 9))
+        self.assertEqual(len(collector.items), MAX_FINDINGS,
+                         "a %d-entry cycle left %d findings against a "
+                         "ceiling of %d" % (total, len(collector.items),
+                                            MAX_FINDINGS))
 
     def test_an_ordinary_project_still_reports_its_real_findings(self):
         """The charges must not make a real project look crafted."""
@@ -673,7 +729,6 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
 
     def functions(self):
         """Every top-level function of the linter, wherever it lives."""
-        import ast
         for path in self.modules():
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in tree.body:
@@ -682,7 +737,6 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
 
     def looping_functions(self):
         """Every top-level function in the linter with a loop in it."""
-        import ast
         out = {}
         for _, node in self.functions():
             if any(isinstance(inner, (ast.For, ast.While))
@@ -713,7 +767,6 @@ class TestEveryLintWalkTakesAnAllowance(unittest.TestCase):
         A `budget` argument that is accepted and never spent reads, at
         every call site, as a walk that is bounded.
         """
-        import ast
         idle = []
         for stem, node in self.functions():
             if "budget" not in [a.arg for a in node.args.args]:
@@ -901,7 +954,9 @@ class TestTheCeilingStopsTheWalkingToo(ToolTest):
         self.craft_shared_events(self.shadowing_pages())
         found = self.lint.check_event_pages(self.project, [1],
                                             self.analysis.WalkBudget())
-        self.assertLessEqual(len(found), self.CEILING)
+        # Exactly the ceiling: 3000 shadowed events fill a ceiling of 4, and
+        # "at most" is also true of a walk that found nothing.
+        self.assertEqual(len(found), self.CEILING)
 
 
 class TestAFindingNamesTheRightCommand(ValidateTest):
@@ -1000,7 +1055,6 @@ class TestEveryCollectorIsShared(unittest.TestCase):
 
     def functions(self):
         """Every top-level function of the linter, with its source."""
-        import ast
         package = (Path(__file__).resolve().parent.parent / "src"
                    / "rpgvxace_mcp" / "analysis" / "lint")
         found = sorted(path for path in package.glob("*.py")
@@ -1014,7 +1068,6 @@ class TestEveryCollectorIsShared(unittest.TestCase):
 
     def collectors(self):
         """Functions that both loop and build a findings list of their own."""
-        import ast
         out = {}
         for stem, node, body in self.functions():
             loops = any(isinstance(inner, (ast.For, ast.While))
@@ -1075,7 +1128,6 @@ class TestEveryCollectorIsShared(unittest.TestCase):
 
     def collector_classes(self):
         """Every class in the linter holding a `list[Finding]` attribute."""
-        import ast
         package = (Path(__file__).resolve().parent.parent / "src"
                    / "rpgvxace_mcp" / "analysis" / "lint")
         found = {}
@@ -1249,7 +1301,6 @@ class TestEveryCollectorReturnsWhatItCollected(unittest.TestCase):
 
     def rules(self):
         """Every function in the linter that takes a `collected` argument."""
-        import ast
         package = (Path(__file__).resolve().parent.parent / "src"
                    / "rpgvxace_mcp" / "analysis" / "lint")
         found = []
@@ -1271,7 +1322,6 @@ class TestEveryCollectorReturnsWhatItCollected(unittest.TestCase):
         self.assertIn("check_map_tree", names)
 
     def test_no_rule_returns_a_list_it_built_in_the_return(self):
-        import ast
         wrong = []
         for stem, node in self.rules():
             for inner in ast.walk(node):

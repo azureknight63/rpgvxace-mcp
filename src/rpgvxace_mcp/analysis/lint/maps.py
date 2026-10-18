@@ -124,7 +124,10 @@ def _parent_cycles(infos: dict[Any, Any],
     findings = _Findings.given(findings)
     settled: dict[int, bool] = {}   # map id -> is its chain sound
     for start in infos:
-        if not findings.room:
+        # An exhausted budget ends the scan, not only the chain it ran out
+        # in: each later start would walk its chain again, unbudgeted,
+        # because the entries after the break were never settled.
+        if not findings.room or (budget is not None and budget.exhausted):
             break
         if _int(start) is None or start in settled:
             continue

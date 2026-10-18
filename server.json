@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.azureknight63/rpgvxace-mcp",
+  "description": "Read and edit RPG Maker VX Ace, VX and XP projects (database, maps, events, scripts), no Ruby.",
+  "repository": {
+    "url": "https://github.com/azureknight63/rpgvxace-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "rpgvxace-mcp",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": { "type": "stdio" },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "valueHint": "project_path",
+          "description": "Path to the project folder: the one holding Game.rvproj2 (VX Ace) or Game.rvproj (VX).",
+          "format": "filepath",
+          "isRequired": true
+        }
+      ]
+    }
+  ]
+}

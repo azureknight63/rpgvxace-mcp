@@ -102,39 +102,71 @@ TABLE_NOUNS = {
 }
 
 
-# The rules again, keyed by the command code they apply to. Most commands match
-# nothing, and a project has tens of thousands of them, so the walk asks this
-# once per command instead of trying every rule.
-_RULES_BY_CODE: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+# XP's rules: the VX family's, where XP's interpreter reads the same
+# parameter, and XP's own where it does not. XP's command_301 takes the troop
+# from parameters[0] with no designation before it, its Show Animation is
+# 207 rather than 212, and its Show Battle Animation (337) keeps the
+# animation in parameters[2], after a battler kind and an index. Every other
+# rule above reads the same position in XP's Interpreter (126-129, 111's
+# item, weapon, armor and actor types, 117, 201, 302/605, 303 and 320-322).
+XP_REFERENCE_RULES: dict[str, list[dict[str, Any]]] = {
+    **REFERENCE_RULES,
+    "troops": [{"code": 301, "index": 0}],
+    "animations": [{"code": 207, "index": 1}, {"code": 337, "index": 2}],
+}
 
 
-for _table, _rules in REFERENCE_RULES.items():
-    for _rule in _rules:
-        _RULES_BY_CODE.setdefault(_rule["code"], []).append((_table, _rule))
+class _RuleIndex:
+    """One engine's rules, keyed the three ways the walks ask them.
+
+    * ``by_code`` -- the rules keyed by the command code they apply to. Most
+      commands match nothing, and a project has tens of thousands of them,
+      so the walk asks this once per command instead of trying every rule.
+    * ``codes`` -- the codes alone, for the question asked most often: does
+      this command refer to anything at all? Sixteen codes carry a reference
+      and the other eighty-odd do not -- 401 (a line of text), 0 (the blank
+      end marker), 108 (a comment), 355 and 655 (script lines) are most of a
+      real project. Asking the mapping instead builds a `dict.get` result, a
+      generator frame and a `set` per command and discards all three empty,
+      which is a cost paid on every delete preview: `find_references_for`'s
+      ordinary answer, "nothing points at this", is the one that costs a
+      full traversal.
+    * ``by_table_and_code`` -- keyed by (table, code), for the caller that
+      wants one table. `_referenced_ids` yields for every table a code
+      touches and the caller filtered with `found == table`, so a
+      Conditional Branch -- code 111, one of the commonest commands in real
+      event data -- ran `_requires_met` four times (items, weapons, armors,
+      actors) to answer about one.
+
+    These were three module-level tables built from the VX family's rules;
+    XP needs the same three built from its own.
+    """
+
+    __slots__ = ("by_code", "codes", "by_table_and_code")
+
+    def __init__(self, rules: dict[str, list[dict[str, Any]]]):
+        self.by_code: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+        self.by_table_and_code: dict[tuple[str, int],
+                                     list[dict[str, Any]]] = {}
+        for table, table_rules in rules.items():
+            for rule in table_rules:
+                self.by_code.setdefault(rule["code"], []).append(
+                    (table, rule))
+                self.by_table_and_code.setdefault(
+                    (table, rule["code"]), []).append(rule)
+        self.codes = frozenset(self.by_code)
 
 
-# And the codes alone, for the question asked most often: does this command
-# refer to anything at all? Sixteen codes carry a reference and the other
-# eighty-odd do not -- 401 (a line of text), 0 (the blank end marker), 108
-# (a comment), 355 and 655 (script lines) are most of a real project. Asking
-# the mapping instead builds a `dict.get` result, a generator frame and a
-# `set` per command and discards all three empty, which is a cost paid on
-# every delete preview: `find_references_for`'s ordinary answer, "nothing
-# points at this", is the one that costs a full traversal.
-_REFERENCE_CODES = frozenset(_RULES_BY_CODE)
+_VX_FAMILY_INDEX = _RuleIndex(REFERENCE_RULES)
+_ENGINE_INDEXES = {"xp": _RuleIndex(XP_REFERENCE_RULES)}
 
-# The rules once more, keyed by (table, code), for the caller that wants one
-# table. `_referenced_ids` yields for every table a code touches and the
-# caller filtered with `found == table`, so a Conditional Branch -- code 111,
-# one of the commonest commands in real event data -- ran `_requires_met`
-# four times (items, weapons, armors, actors) to answer about one.
-_RULES_BY_TABLE_AND_CODE: dict[tuple[str, int], list[dict[str, Any]]] = {}
+# The VX family's codes, under the name the linter imports.
+_REFERENCE_CODES = _VX_FAMILY_INDEX.codes
 
 
-for _table, _rules in REFERENCE_RULES.items():
-    for _rule in _rules:
-        _RULES_BY_TABLE_AND_CODE.setdefault(
-            (_table, _rule["code"]), []).append(_rule)
+def rule_index(engine: str) -> _RuleIndex:
+    """The reference rules of one engine: XP's, or the VX family's."""
+    return _ENGINE_INDEXES.get(engine, _VX_FAMILY_INDEX)
 
 
 def _requires_met(params: list[Any], requires: dict[int, Any] | None) -> bool:
@@ -153,7 +185,9 @@ def _requires_met(params: list[Any], requires: dict[int, Any] | None) -> bool:
     return True
 
 
-def _referenced_ids(code: Any, params: list[Any]) -> Iterator[tuple[str, int]]:
+def _referenced_ids(code: Any, params: list[Any],
+                    index: _RuleIndex = _VX_FAMILY_INDEX
+                    ) -> Iterator[tuple[str, int]]:
     """Every ``(table, id)`` one command refers to.
 
     The single place the rules table is interpreted. Two copies of this walk
@@ -163,11 +197,12 @@ def _referenced_ids(code: Any, params: list[Any]) -> Iterator[tuple[str, int]]:
     code = _int(code)
     if code is None:
         return
-    for table, rule in _RULES_BY_CODE.get(code, ()):
+    for table, rule in index.by_code.get(code, ()):
         yield from _from_rule(table, rule, params)
 
 
-def _ids_in(table: str, code: Any, params: list[Any]) -> Iterator[int]:
+def _ids_in(table: str, code: Any, params: list[Any],
+            index: _RuleIndex = _VX_FAMILY_INDEX) -> Iterator[int]:
     """Every id one command refers to *in one table*.
 
     `_referenced_ids` with the table asked for rather than filtered
@@ -177,7 +212,7 @@ def _ids_in(table: str, code: Any, params: list[Any]) -> Iterator[int]:
     code = _int(code)
     if code is None:
         return
-    for rule in _RULES_BY_TABLE_AND_CODE.get((table, code), ()):
+    for rule in index.by_table_and_code.get((table, code), ()):
         for _, value in _from_rule(table, rule, params):
             yield value
 
@@ -337,6 +372,7 @@ def find_references_for(project: Project, table: str, entry_ids: "set[int]",
     hits: dict[int, list[dict[str, Any]]] = {i: [] for i in entry_ids}
     if table not in REFERENCE_RULES or not entry_ids:
         return hits
+    rules = rule_index(project.engine)
     wanted = set(entry_ids)
     for location, commands in iter_command_lists(project, None, budget):
         for index, command in enumerate(commands):
@@ -348,10 +384,10 @@ def find_references_for(project: Project, table: str, entry_ids: "set[int]",
             # comprehension below allocates a generator frame and a set --
             # three objects per command, for the eighty-odd codes out of a
             # hundred that can refer to nothing.
-            if _int(code) not in _REFERENCE_CODES:
+            if _int(code) not in rules.codes:
                 continue
             params = _seq(command.get("parameters"))
-            named = {value for value in _ids_in(table, code, params)
+            named = {value for value in _ids_in(table, code, params, rules)
                      if value in wanted}
             if not named:
                 continue
@@ -362,8 +398,8 @@ def find_references_for(project: Project, table: str, entry_ids: "set[int]",
             row = {
                 "where": located.describe(),
                 "location": located.as_dict(),
-                "command": command_name(code),
-                "summary": summarize(command, project.codec),
+                "command": command_name(code, project.engine),
+                "summary": summarize(command, project.codec, project.engine),
             }
             for entry_id in named:
                 rows = hits[entry_id]

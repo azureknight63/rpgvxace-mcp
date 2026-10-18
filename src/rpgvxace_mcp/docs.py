@@ -5,8 +5,8 @@ them per call: which files hold what, which command code does what, how tile ids
 map to the tileset sheets, and which of that is certain versus advisory.
 
 Every document is generated for the engine of the project that is actually open,
-because VX Ace and VX differ in exactly the places an agent would otherwise get
-wrong.
+because VX Ace, VX and XP differ in exactly the places an agent would otherwise
+get wrong.
 """
 
 from __future__ import annotations
@@ -14,26 +14,36 @@ from __future__ import annotations
 from typing import Any
 
 from .commands import (
+    AUTHORED_LAYOUT_FORMS,
     CHARACTER_TARGETS,
     COMPARISONS,
     CONDITION_KINDS,
-    CONTINUATION_CODES,
     MOVE_COMMAND_NAMES,
+    MOVE_STEP_CODES,
     SHARED_VARIABLE_OPERANDS,
     SWITCH_OPERATIONS,
     VARIABLE_OPERATIONS,
     VARIABLE_OP_CODES,
+    VX_UNCONFIRMED_FORMS,
     VX_VARIABLE_OPERANDS,
+    XP_FORMS,
+    XP_MOVE_COMMAND_NAMES,
+    XP_REFUSED_FORMS,
     command_table,
+    continuation_codes,
     param_specs,
+    route_codes,
 )
 from .project import CHANGE_LOG, WORK_DIR, Project
 from .schema import (
+    MAX_REGION_ID,
+    MAX_SHADOW,
+    META_LAYER,
     TILESET_FLAG_BITS,
     TILESET_FLAG_BITS_NOTE,
-    TILE_ID_RANGES,
-    TILE_ID_RANGES_NOTE,
+    TILE_LAYER_COUNT,
     TRIGGER_NAMES,
+    XP_PASSAGE_BITS,
     numbered,
 )
 
@@ -77,6 +87,11 @@ def server_instructions(project: Project) -> str:
         "Run validate after a batch of edits: it catches transfers to missing maps "
         "or off-map coordinates, missing graphics and audio, dangling database "
         "references and autorun pages that can never stop.",
+        "",
+        "To see a change working, live runs a scratch copy of the game (never "
+        "the project itself) under your control: start it, pause and step "
+        "frames so a test is deterministic, press virtual keys, read state, "
+        "and stop it when done -- one session at a time.",
     ]
     return "\n".join(lines)
 
@@ -140,7 +155,8 @@ def _shared_values(engine: str) -> list[str]:
     Engine-keyed for the operands, because that is the one entry here whose
     answer really does differ between the two.
     """
-    operands = (VX_VARIABLE_OPERANDS if engine == "vx"
+    # XP's command_122 reads the same eight operand kinds as VX's.
+    operands = (VX_VARIABLE_OPERANDS if engine in ("vx", "xp")
                 else SHARED_VARIABLE_OPERANDS)
     lines = [
         "* Switch and self-switch operations: %s."
@@ -154,7 +170,7 @@ def _shared_values(engine: str) -> list[str]:
            ", ".join(sorted(set(VARIABLE_OP_CODES) - set("=+-*/%")))),
         "* Variable operand types: %s." % _numbered(operands),
     ]
-    if engine != "vx":
+    if engine == "vx_ace":
         # Said here rather than left to be inferred: the numbers above 2 exist
         # on VX Ace and mean something else, and a model that reads a closed
         # list will write one of them.
@@ -200,13 +216,24 @@ def data_format_reference(project: Project) -> str:
         "",
     ]
 
-    if profile.has_tileset_database:
+    if profile.tileset_layout == "ace":
         lines += [
             "VX Ace has a `Tilesets` database and each map names one with",
             "`tileset_id`. It has no `Areas` file: encounter regions are painted",
-            "onto tile layer 3 instead, and a map's `encounter_list` holds",
+            "into the region byte of tile layer 3 instead (see Tile data), and a",
+            "map's `encounter_list` holds",
             "`RPG::Map::Encounter` entries carrying a troop, a weight and the set",
             "of regions the encounter applies to.",
+            "",
+        ]
+    elif profile.tileset_layout == "xp":
+        lines += [
+            "XP has a `Tilesets` database and each map names one with",
+            "`tileset_id`. An XP tileset is one graphic in `Graphics/Tilesets`",
+            "(eight tiles wide), seven `autotile_names` in `Graphics/Autotiles`,",
+            "and three tables indexed by tile id: `passages`, `priorities` and",
+            "`terrain_tags` (see Tile data). There are no encounter areas or",
+            "regions: a map's `encounter_list` is an array of troop ids.",
             "",
         ]
     else:
@@ -236,25 +263,42 @@ def data_format_reference(project: Project) -> str:
         "## Tile data",
         "",
         "`RPG::Map#data` is an RGSS `Table`: `width x height x %d`, addressed"
-        % profile.tile_layer_count,
+        % profile.map_table_depth,
         "`[x, y, z]` with x running left to right and y top to bottom.",
         "",
     ]
     for layer, meaning in profile.map_layers.items():
         lines.append("* `z = %d` -- %s" % (layer, meaning))
+    lines.append("")
+    if profile.has_region_layer:
+        lines += [
+            "Layers 0 to %d hold tile ids. Layer %d does not: each cell is one"
+            % (TILE_LAYER_COUNT - 1, META_LAYER),
+            "word, `region * 256 + shadow`. The region id (0 to %d) is the byte"
+            % MAX_REGION_ID,
+            "above four shadow bits (0 to %d), one per quarter of the cell: 1"
+            % MAX_SHADOW,
+            "top-left, 2 top-right, 4 bottom-left, 8 bottom-right. RGSS3 reads",
+            "the region as `data[x, y, 3] >> 8`, so region 1 is stored as 256",
+            "and a bare 1 is a shadow. `map_tiles view=region` and",
+            "`view=shadow` read and write one part and keep the other.",
+        ]
+    elif profile.layer_note:
+        lines.append(profile.layer_note)
     lines += [
         "",
-        "Tile id ranges for a tileset's sheets. " + TILE_ID_RANGES_NOTE,
+        "Tile id ranges for a tileset's sheets. " + profile.tile_id_ranges_note,
         "",
     ]
-    for sheet, (low, high) in TILE_ID_RANGES.items():
+    for sheet, (low, high) in profile.tile_id_ranges.items():
         lines.append("* `%s` -- %d to %d" % (sheet, low, high))
 
-    # The capability, not the engine key: `_schema_report` asks the
-    # capability for this same content, and naming the engine here meant a
-    # profile that gained a tileset database would lose the flags table
-    # without anything saying so.
-    if profile.has_tileset_database:
+    # What a tileset row holds, not the engine key: `_schema_report` asks
+    # the same attribute for this same content, and naming the engine here
+    # meant a profile that gained a tileset database would lose the flags
+    # table without anything saying so -- which XP, whose table is not VX
+    # Ace's, would otherwise have been handed.
+    if profile.tileset_layout == "ace":
         lines += [
             "",
             "### Tileset flags",
@@ -263,6 +307,19 @@ def data_format_reference(project: Project) -> str:
             "per tile id. " + TILESET_FLAG_BITS_NOTE,
             "",
             *_bullets(TILESET_FLAG_BITS),
+        ]
+    elif profile.tileset_layout == "xp":
+        lines += [
+            "",
+            "### Tileset tables",
+            "",
+            "`passages`, `priorities` and `terrain_tags` are 1-dimensional",
+            "`Table`s indexed by tile id, as long as the highest id plus one.",
+            "A `priorities` entry is 0 (drawn under characters) or 1 to 5 (over",
+            "them, higher later); a `terrain_tags` entry is 0 to 7. The bits of",
+            "a `passages` entry, from the RGSS1 reference and XP's `Game_Map`:",
+            "",
+            *_bullets(XP_PASSAGE_BITS),
         ]
 
     lines += [
@@ -280,6 +337,14 @@ def data_format_reference(project: Project) -> str:
             "RGSS3 runs Ruby 1.9, so strings carry their encoding and are normally",
             "UTF-8. The server detects the code page at startup and reports it in",
             "`project_info`; override it with `--encoding` if that looks wrong.",
+        ]
+    elif profile.key == "xp":
+        lines += [
+            "RGSS1 runs Ruby 1.8, whose strings are bytes with no encoding",
+            "attached. Which code page an XP editor writes has not been checked",
+            "here. The server detects a code page at startup and reports it in",
+            "`project_info`; override it with `--encoding` if the detection",
+            "looks wrong.",
         ]
     else:
         lines += [
@@ -318,11 +383,15 @@ def command_reference_document(project: Project) -> str:
         "| Code | Command | Parameters | Notes |",
         "| --- | --- | --- | --- |",
     ]
+    continuing = continuation_codes(engine)
     for code in sorted(table):
         spec = specs.get(code)
         params = ", ".join(spec) if spec else ""
-        note = "continues the command above" if code in CONTINUATION_CODES else ""
+        note = "continues the command above" if code in continuing else ""
         lines.append("| %d | %s | %s | %s |" % (code, table[code], params, note))
+    route, step = route_codes(engine)
+    xp = engine == "xp"
+    move_names = XP_MOVE_COMMAND_NAMES if xp else MOVE_COMMAND_NAMES
 
     lines += [
         "",
@@ -340,25 +409,90 @@ def command_reference_document(project: Project) -> str:
         "",
         "## Move route commands",
         "",
-        "Set Move Route (205) carries an `RPG::MoveRoute` in its second parameter.",
-        "The editor also writes one 505 command per step so it can display the",
+        "Set Move Route (%d) carries an `RPG::MoveRoute` in its second "
+        "parameter." % route,
+        "The editor also writes one %d command per step so it can display the"
+        % step,
         "route; the interpreter ignores those, and `event_edit` adds them for you.",
-        "These codes come from the move command set shared across XP, VX and VX",
-        "Ace:",
+        "These codes are the ones `Game_Character` dispatches, the same in VX and",
+        ("VX Ace; XP's differ only in 39 and 40, which toggle Always on Top. "
+         "There is no `move_route` form on XP:" if xp else
+         "VX Ace; the step name is what `event_edit`'s `move_route` form takes:"),
         "",
-        "| Code | Move command |",
-        "| --- | --- |",
+        "| Code | Move command | Step name |",
+        "| --- | --- | --- |",
     ]
-    for code in sorted(MOVE_COMMAND_NAMES):
-        lines.append("| %d | %s |" % (code, MOVE_COMMAND_NAMES[code]))
+    step_names = ({} if xp else
+                  {code: name for name, code in MOVE_STEP_CODES.items()})
+    for code in sorted(move_names):
+        lines.append("| %d | %s | %s |" % (code, move_names[code],
+                                           step_names.get(code, "")))
+    lines += ["", *_authoring_forms(project)]
     return "\n".join(lines)
+
+
+def _authoring_forms(project: Project) -> list[str]:
+    """Which of `event_edit`'s layout forms this project's engine can take.
+
+    From the tables the compiler refuses with, so this cannot offer a form
+    the compiler then turns down -- or keep quiet about one it accepts.
+    """
+    lines = ["## Authoring forms", ""]
+    if project.engine == "xp" and project.profile.key == "xp":
+        lines += [
+            "On XP, `event_edit` takes these forms: %s. `text` writes XP's Show"
+            % ", ".join("`%s`" % key for key in sorted(XP_FORMS)),
+            "Text, the first line in the 101 itself and no face. Every other",
+            "command is written with `raw`, from the table above.",
+        ]
+        for key in sorted(XP_REFUSED_FORMS):
+            lines.append("* `%s` is not offered: %s." % (key,
+                                                         XP_REFUSED_FORMS[key]))
+        return lines
+    if not project.command_layouts_modelled:
+        return lines + [
+            "This engine is not modelled, so `event_edit` offers none of its",
+            "layout forms here; write those commands with `raw`.",
+        ]
+    # The detected engine, which is what `event_edit` compiles for; it is
+    # the modelled one here, the case above having returned.
+    refused = VX_UNCONFIRMED_FORMS if project.engine == "vx" else {}
+    offered = sorted(AUTHORED_LAYOUT_FORMS - set(refused))
+    lines += [
+        "Beside text, branches and the other basic forms, `event_edit` writes",
+        "these commands from a friendly form, in the parameter layout this",
+        "engine's editor writes: %s." % ", ".join("`%s`" % key
+                                                    for key in offered),
+    ]
+    for key in sorted(refused):
+        lines.append("* `%s` is not offered: %s." % (key, refused[key]))
+    return lines
 
 
 def workflow_document(project: Project) -> str:
     label = project.profile.label
-    regions_note = ("\n\nRegions: on VX Ace, tile layer 3 holds region ids, so "
-                    "paint them with\n`map_tiles z=3`."
+    regions_note = ("\n\nRegions: on VX Ace, tile layer 3 holds each cell's "
+                    "region id above its shadow bits,\nso paint regions with "
+                    "`map_tiles view=region` (and shadows with `view=shadow`):"
+                    "\neach keeps the other part of the cell."
                     if project.profile.has_region_layer else "")
+    # Only where map_paint works: it refuses VX's global tileset and XP's
+    # autotiles, so it asks what a tileset row holds, not whether one exists.
+    paint_note = ("\n\nBuilding: `map_paint` paints by autotile *kind* -- "
+                  "`A2:0`, `A4:8`, `A5:3`, a sheet\nand the block's place on "
+                  "it -- and writes each cell's edge and corner shape from\n"
+                  "its neighbours, re-shaping the cells around the edit as "
+                  "the editor does.\n`room`, `corridor` and a seeded "
+                  "`dungeon` lay out floor, wall faces and wall\ntops in "
+                  "the VX Ace dungeon style. Look at the result with "
+                  "`map_render`."
+                  if project.profile.tileset_layout == "ace" else "")
+    forms_note = ("\n\nOn XP only the basic forms compile -- %s -- because XP "
+                  "numbers and\nlays out the rest of its commands its own way "
+                  "(its Wait is 106, its Set\nMove Route 209). `map_render` "
+                  "does not draw XP maps."
+                  % ", ".join(sorted(XP_FORMS))
+                  if project.profile.key == "xp" else "")
     return """\
 # Working on a %(label)s project through this server
 
@@ -399,7 +533,25 @@ message boxes, branches, loops and choices, including indentation:
          "else": [{"text": "The gate is shut."}]}
       ]}]
 
-Tiles: `map_tiles` reads and writes rectangles of tile ids per layer.%(tiles)s
+The same DSL has friendly forms for the commands events use most -- move
+routes, shops, pictures, screen tints, flashes, shakes and fades, gold,
+items and party members, battles with their win/escape/lose branches, name
+input, music and sound, event locations, balloons and animations -- each
+written in the parameter layout this engine's editor writes:
+
+    {"move_route": {"target": "player", "steps": ["move_up", {"wait": 15},
+                                                  "turn_down"]}}
+    {"battle": {"troop": 3, "can_escape": true},
+     "win": [{"gold": {"op": "add", "value": 100}}], "escape": []}
+
+`command_reference` lists every form under "authoring", and the event
+command reference names the ones this engine cannot take. Anything else is
+`{"raw": {"code": ..., "parameters": [...]}}`, copied from a working
+example.%(forms)s
+
+Tiles: `map_tiles` reads and writes rectangles of tile ids per layer.%(tiles)s%(paint)s
+
+Seeing: `map_render` draws a VX Ace map to a PNG file and returns its path.
 
 Scripts: `scripts` reads and replaces the script editor slots.
 
@@ -416,12 +568,14 @@ Scripts: `scripts` reads and replaces the script editor slots.
 
 ## What this server does not do
 
-It edits files; it does not talk to a running game. There is no live state, no
-screenshotting and no playtest control. Encrypted archives are not read -- point
-the server at an unpacked project.
+It edits files. Playtesting goes through `live`, which runs a scratch copy of
+the game and never the project folder itself. Encrypted archives are not read --
+point the server at an unpacked project.
 """ % {
         "label": label,
         "tiles": regions_note,
+        "paint": paint_note,
+        "forms": forms_note,
         "work_dir": WORK_DIR,
         "change_log": CHANGE_LOG,
     }

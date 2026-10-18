@@ -7,6 +7,7 @@ test to fail.
 """
 
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -21,18 +22,43 @@ sys.path.insert(0, str(HERE / "fixtures"))
 from build_project import build  # noqa: E402
 
 from rpgvxace_mcp import marshal_rb  # noqa: E402
-from rpgvxace_mcp.convert import TextCodec, to_json  # noqa: E402
+from rpgvxace_mcp.commands import compile_commands  # noqa: E402
+from rpgvxace_mcp.convert import (  # noqa: E402
+    TextCodec,
+    normalize_strings,
+    to_json,
+)
 from rpgvxace_mcp.docs import (  # noqa: E402
     command_reference_document,
     data_format_reference,
 )
 from rpgvxace_mcp.project import Project  # noqa: E402
 from rpgvxace_mcp.schema import (  # noqa: E402
+    ACE_MAP_LAYERS,
     ACE_PROFILE,
+    MAX_REGION_ID,
+    MAX_SHADOW,
+    META_LAYER,
+    PROFILES,
     SchemaWalk,
+    TILE_LAYER_COUNT,
+    VX_MAP_LAYERS,
     VX_PROFILE,
+    XP_PROFILE,
     map_filename,
+    new_condition,
+    new_event,
+    new_event_command,
+    new_graphic,
+    new_map_info,
+    new_move_command,
+    new_move_route,
+    new_page,
     observe_class_fields,
+    region_of,
+    shadow_of,
+    with_region,
+    with_shadow,
 )
 from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyData,
@@ -44,6 +70,7 @@ from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyUClass,
     RubyUserMarshal,
     printable_text,
+    ruby_children,
 )
 from rpgvxace_mcp.tools import (  # noqa: E402,F401
     db_tools,
@@ -89,6 +116,11 @@ class TestEngineProfiles(unittest.TestCase):
         self.assertTrue(any("four layers" in note for note in ACE_PROFILE.notes))
         self.assertTrue(any("three layers" in note for note in VX_PROFILE.notes))
 
+    def test_the_layer_note_names_three_tile_layers(self):
+        note = next(n for n in ACE_PROFILE.notes if "four layers" in n)
+        self.assertIn("2 upper tile layer", note)
+        self.assertIn("3 shadow and region layer", note)
+
     def test_ace_stat_note_matches_the_real_field_layout(self):
         # An earlier note claimed actors and items carry a params array. They do
         # not: params is an array on weapons/armors/enemies and a Table on
@@ -101,6 +133,21 @@ class TestEngineProfiles(unittest.TestCase):
     def test_absence_hint_explains_the_engine_difference(self):
         self.assertIn("global tileset", VX_PROFILE.absence_hint("tilesets"))
         self.assertIn("region", ACE_PROFILE.absence_hint("areas"))
+
+    def test_vx_audio_is_the_bgm_family(self):
+        # RGSS2 plays every stored audio object itself -- `@map.bgm.play`,
+        # `$data_system.sounds[0].play`, `timing.se.play`, `@params[0].play`
+        # -- and only RPG::BGM, BGS, ME and SE have `play`. An
+        # RPG::AudioFile there is a NoMethodError on the title screen.
+        for profile in (ACE_PROFILE, VX_PROFILE):
+            for kind in ("bgm", "bgs", "me", "se"):
+                with self.subTest(engine=profile.key, kind=kind):
+                    self.assertEqual(profile.new_audio_file(kind).cls,
+                                     "RPG::" + kind.upper())
+                    self.assertIn("RPG::" + kind.upper(),
+                                  profile.class_fields)
+        self.assertEqual(VX_PROFILE.new_map().get("bgm").cls, "RPG::BGM")
+        self.assertEqual(VX_PROFILE.new_map().get("bgs").cls, "RPG::BGS")
 
     def test_unknown_audio_kind_is_refused(self):
         # Falling back to BGM would write an RPG::BGM into an ME or SE slot.
@@ -119,6 +166,332 @@ class TestEngineProfiles(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     map_filename(bad, ".rvdata2")
+
+
+class TestTheXPProfile(unittest.TestCase):
+    """RPG Maker XP (RGSS1), from its reference and its default scripts.
+
+    The class fields are the RGSS1 reference's; the command table is the
+    dispatch in XP's `Interpreter (part 2)`; the map facts are XP's
+    `Game_Map` and `Sprite_Character` and copies of XP editor data.
+    """
+
+    def test_capabilities(self):
+        self.assertEqual((XP_PROFILE.key, XP_PROFILE.extension,
+                          XP_PROFILE.project_file),
+                         ("xp", ".rxdata", "Game.rxproj"))
+        self.assertIs(PROFILES["xp"], XP_PROFILE)
+        self.assertTrue(XP_PROFILE.has_tileset_database)
+        self.assertFalse(XP_PROFILE.has_encounter_areas)
+        self.assertFalse(XP_PROFILE.has_region_layer)
+        self.assertFalse(XP_PROFILE.strings_carry_encoding)
+        self.assertEqual(XP_PROFILE.map_table_depth, 3)
+        # Its tilesets are not VX Ace's nine sheets and a flag word.
+        self.assertEqual(XP_PROFILE.tileset_layout, "xp")
+        self.assertEqual(ACE_PROFILE.tileset_layout, "ace")
+        self.assertIsNone(VX_PROFILE.tileset_layout)
+
+    def test_the_data_files_are_xp_s(self):
+        self.assertEqual(sorted(XP_PROFILE.data_files), sorted(
+            ["actors", "classes", "skills", "items", "weapons", "armors",
+             "enemies", "troops", "states", "animations", "tilesets",
+             "common_events", "system", "map_infos", "scripts"]))
+        self.assertIn("areas", XP_PROFILE.absence_hint("areas"))
+
+    def test_the_classes_are_rgss1_s(self):
+        fields = XP_PROFILE.class_fields
+        for cls, expected in {
+            "RPG::Tileset": {"tileset_name", "autotile_names", "passages",
+                             "priorities", "terrain_tags", "panorama_name",
+                             "fog_name", "battleback_name"},
+            "RPG::Actor": {"parameters", "exp_basis", "exp_inflation",
+                           "weapon_id", "armor4_fix", "battler_name"},
+            "RPG::Class::Learning": {"level", "skill_id"},
+            "RPG::System": {"words", "cursor_se", "windowskin_name",
+                            "magic_number", "battle_transition"},
+            "RPG::System::Words": {"gold", "sp", "pdef", "armor4"},
+            "RPG::Event::Page": {"always_on_top"},
+            "RPG::Event::Page::Graphic": {"character_hue", "opacity",
+                                          "blend_type"},
+            "RPG::AudioFile": {"name", "volume", "pitch"},
+            "RPG::Map": {"tileset_id"},
+        }.items():
+            with self.subTest(cls=cls):
+                self.assertLessEqual(expected, set(fields[cls]))
+        # What XP does not have.
+        self.assertNotIn("priority_type", fields["RPG::Event::Page"])
+        self.assertNotIn("character_index", fields["RPG::Event::Page::Graphic"])
+        self.assertNotIn("item_valid", fields["RPG::Event::Page::Condition"])
+        self.assertNotIn("wait", fields["RPG::MoveRoute"])
+        self.assertNotIn("parallax_name", fields["RPG::Map"])
+        self.assertNotIn("RPG::BGM", fields)
+
+    def test_a_new_map_is_xp_s(self):
+        game_map = XP_PROFILE.new_map(20, 15, 2)
+        self.assertEqual(sorted(game_map.fields()), sorted(
+            XP_PROFILE.class_fields["RPG::Map"]))
+        self.assertEqual(game_map.get("tileset_id"), 2)
+        self.assertEqual(game_map.get("data").zsize, 3)
+        self.assertEqual(game_map.get("bgm").cls, "RPG::AudioFile")
+        self.assertEqual(game_map.get("bgs").get("volume"), 80)
+
+    def test_a_new_page_is_xp_s(self):
+        page = XP_PROFILE.new_page()
+        self.assertEqual(sorted(page.fields()), sorted(
+            XP_PROFILE.class_fields["RPG::Event::Page"]))
+        for field, cls in (("condition", "RPG::Event::Page::Condition"),
+                           ("graphic", "RPG::Event::Page::Graphic"),
+                           ("move_route", "RPG::MoveRoute")):
+            with self.subTest(field=field):
+                self.assertEqual(sorted(page.get(field).fields()),
+                                 sorted(XP_PROFILE.class_fields[cls]))
+        # The reference's defaults.
+        self.assertEqual(page.get("graphic").get("opacity"), 255)
+        self.assertIs(page.get("always_on_top"), False)
+        event = XP_PROFILE.new_event(3, "Gate", 4, 5)
+        self.assertEqual(event.get("pages")[0].fields(), page.fields())
+        # And VX Ace's are unchanged.
+        self.assertEqual(ACE_PROFILE.new_page().fields(), new_page().fields())
+
+    def test_tile_ids_are_autotiles_then_the_tileset(self):
+        ranges = XP_PROFILE.tile_id_ranges
+        self.assertEqual(ranges["autotile 1"], (48, 95))
+        self.assertEqual(ranges["autotile 7"], (336, 383))
+        self.assertEqual(ranges["tileset"][0], 384)
+        self.assertIn("Advisory", XP_PROFILE.tile_id_ranges_note)
+        self.assertEqual(sorted(XP_PROFILE.map_layers), [0, 1, 2])
+        self.assertIn("priorit", XP_PROFILE.layer_note)
+
+
+class TestTheTileLayerModel(unittest.TestCase):
+    """What each layer of a map's tile table holds, as the engines read it.
+
+    The table this replaces called Ace's layer 2 a four-bit shadow mask and
+    layer 3 a bare region id. RGSS3's `Game_Map` says otherwise:
+    `layered_tiles` is `[2, 1, 0].collect {|z| tile_id(x, y, z) }` and
+    `region_id` is `@map.data[x, y, 3] >> 8`. So does a real project: the 39
+    maps of the author's game hold 4,932 non-zero cells on layer 2, every one a
+    B-E tile id, and layer 3 holds 337 cells of exactly 256 (region 1) and
+    556 below 16 (shadow only). RGSS2's `Game_Map#passable?` looks each of
+    `data[x, y, i]` for i in `[2, 1, 0]` up in the passage table, so VX's
+    layer 2 is a tile layer as well.
+    """
+
+    def test_ace_layers_0_to_2_hold_tile_ids(self):
+        for z in range(TILE_LAYER_COUNT):
+            with self.subTest(z=z):
+                self.assertIn("tile layer", ACE_MAP_LAYERS[z])
+                self.assertNotIn("shadow", ACE_MAP_LAYERS[z])
+                self.assertNotIn("region", ACE_MAP_LAYERS[z])
+        self.assertIn("B-E", ACE_MAP_LAYERS[2])
+
+    def test_ace_layer_3_packs_shadow_and_region(self):
+        self.assertEqual(META_LAYER, 3)
+        self.assertEqual(sorted(ACE_MAP_LAYERS), [0, 1, 2, 3])
+        self.assertIn("shadow", ACE_MAP_LAYERS[3])
+        self.assertIn("region", ACE_MAP_LAYERS[3])
+        self.assertIn("256", ACE_MAP_LAYERS[3])
+
+    def test_vx_layer_2_is_a_tile_layer_not_shadows(self):
+        self.assertEqual(sorted(VX_MAP_LAYERS), [0, 1, 2])
+        for z in range(TILE_LAYER_COUNT):
+            with self.subTest(z=z):
+                self.assertIn("tile layer", VX_MAP_LAYERS[z])
+                self.assertNotIn("shadow mask", VX_MAP_LAYERS[z])
+
+    def test_what_is_unconfirmed_about_vx_layers_says_so(self):
+        # No real VX project has been read: the passable? reading is the
+        # whole of the evidence, and the profile and the served reference
+        # say which part is advisory.
+        note = next(n for n in VX_PROFILE.notes if "passable?" in n)
+        self.assertIn("Advisory", note)
+        self.assertIn("no region layer", note)
+        with tempfile.TemporaryDirectory() as tmp:
+            build(Path(tmp) / "project", engine="vx")
+            reference = data_format_reference(Project(Path(tmp) / "project"))
+        self.assertIn(note, reference)
+
+    def test_the_region_is_the_byte_above_the_shadow_bits(self):
+        self.assertEqual(region_of(256), 1)
+        self.assertEqual(shadow_of(256), 0)
+        self.assertEqual(region_of(0x3F05), 63)
+        self.assertEqual(shadow_of(0x3F05), 5)
+        # A raw 1 is a shadow quarter, not region 1: the fixture stored it
+        # that way and real Ace draws it as a shadow.
+        self.assertEqual(region_of(1), 0)
+        self.assertEqual(shadow_of(1), 1)
+
+    def test_writing_one_part_keeps_the_other(self):
+        self.assertEqual(with_region(5, 3), 0x305)
+        self.assertEqual(with_region(0x3F05, 0), 5)
+        self.assertEqual(with_shadow(0x300, 15), 0x30F)
+        self.assertEqual(with_shadow(0x30F, 0), 0x300)
+
+    def test_the_ceilings_are_the_editor_s(self):
+        self.assertEqual(MAX_REGION_ID, 63)
+        self.assertEqual(MAX_SHADOW, 15)
+
+
+# Marshal hex of objects the VX Ace editor wrote, each copied from the author's
+# game; the comment names the file and the values. Marshal keeps instance
+# variables in the order it is given them, so a created object whose values
+# equal one of these must dump to exactly these bytes.
+REAL_BLANK_COMMAND = (  # CommonEvents.rvdata2: code 0, indent 0, []
+    "04086f3a165250473a3a4576656e74436f6d6d616e64083a0c40696e64656e7469003a0a"
+    "40636f646569003a1040706172616d65746572735b00")
+REAL_SE = (  # Animations.rvdata2: "Blow3", volume 95, pitch 100
+    "04086f3a0c5250473a3a5345083a0a406e616d6549220a426c6f7733063a0645543a0b40"
+    "706974636869693a0c40766f6c756d656964")
+REAL_ME = (  # System.rvdata2: "Victory1", volume 100, pitch 100
+    "04086f3a0c5250473a3a4d45083a0a406e616d6549220d566963746f727931063a064554"
+    "3a0b40706974636869693a0c40766f6c756d656969")
+REAL_DEFAULT_PAGE = (  # Map007.rvdata2: a page with every default value
+    "04086f3a155250473a3a4576656e743a3a50616765123a0f40636f6e646974696f6e6f3a"
+    "205250473a3a4576656e743a3a506167653a3a436f6e646974696f6e123a134073776974"
+    "6368315f76616c6964463a1340737769746368325f76616c6964463a1440766172696162"
+    "6c655f76616c6964463a174073656c665f7377697463685f76616c6964463a1040697465"
+    "6d5f76616c6964463a11406163746f725f76616c6964463a1040737769746368315f6964"
+    "69063a1040737769746368325f696469063a11407661726961626c655f696469063a1440"
+    "7661726961626c655f76616c756569003a144073656c665f7377697463685f6368492206"
+    "41063a0645543a0d406974656d5f696469063a0e406163746f725f696469063a0d406772"
+    "61706869636f3a1e5250473a3a4576656e743a3a506167653a3a477261706869630a3a0d"
+    "4074696c655f696469003a14406368617261637465725f6e616d65492200063b13543a15"
+    "406368617261637465725f696e64657869003a0f40646972656374696f6e69073a0d4070"
+    "61747465726e69003a0f406d6f76655f7479706569003a10406d6f76655f737065656469"
+    "083a14406d6f76655f6672657175656e637969083a10406d6f76655f726f7574656f3a13"
+    "5250473a3a4d6f7665526f757465093a0c40726570656174543a0f40736b69707061626c"
+    "65463a0a4077616974463a0a406c6973745b066f3a155250473a3a4d6f7665436f6d6d61"
+    "6e64073a0a40636f646569003a1040706172616d65746572735b003a104077616c6b5f61"
+    "6e696d65543a1040737465705f616e696d65463a1340646972656374696f6e5f66697846"
+    "3a0d407468726f756768463a13407072696f726974795f7479706569003a0d4074726967"
+    "67657269003b255b066f3a165250473a3a4576656e74436f6d6d616e64083a0c40696e64"
+    "656e7469003b2769003b285b00")
+
+# The editor's order for the classes no real object matches by value (every
+# real event has a page of its own, every map has tiles), read off every
+# instance in the author's game and in the RuralFarm sample game. The two agree,
+# and each holds exactly one order per class.
+REAL_IVAR_ORDERS = {
+    "RPG::Event": ["@id", "@name", "@x", "@y", "@pages"],
+    "RPG::MapInfo": ["@scroll_x", "@name", "@expanded", "@order", "@scroll_y",
+                     "@parent_id"],
+    "RPG::Map": [
+        "@parallax_name", "@height", "@events", "@parallax_sx", "@bgm",
+        "@tileset_id", "@encounter_step", "@width", "@data", "@bgs",
+        "@parallax_loop_y", "@autoplay_bgm", "@encounter_list",
+        "@autoplay_bgs", "@parallax_show", "@scroll_type", "@parallax_loop_x",
+        "@disable_dashing", "@parallax_sy", "@display_name",
+        "@specify_battleback", "@note", "@battleback1_name",
+        "@battleback2_name"],
+}
+
+
+ACE_STRINGS = TextCodec("utf-8", {"E": True})
+
+
+def ace_hex(value):
+    """A created object as the Ace editor would store it, in hex."""
+    return marshal_rb.dump(normalize_strings(value, ACE_STRINGS)).hex()
+
+
+class TestNewObjectsAreTheEditorsBytes(unittest.TestCase):
+    """What the server creates is what the editor writes, byte for byte.
+
+    Every one of the 13,900 event commands in the author's game and the RuralFarm
+    sample stores @indent before @code; `new_event_command` wrote @code
+    first. The file loaded, because Marshal reads ivars by name, but it was
+    not the file the editor writes.
+    """
+
+    def test_a_blank_command_is_the_editors_bytes(self):
+        self.assertEqual(ace_hex(new_event_command(0, 0, [])),
+                         REAL_BLANK_COMMAND)
+
+    def test_a_new_page_is_the_editors_bytes(self):
+        self.assertEqual(ace_hex(new_page()), REAL_DEFAULT_PAGE)
+
+    def test_me_and_se_are_the_editors_bytes(self):
+        self.assertEqual(ace_hex(ACE_PROFILE.new_audio_file(
+            "se", "Blow3", 95, 100)), REAL_SE)
+        self.assertEqual(ace_hex(ACE_PROFILE.new_audio_file(
+            "me", "Victory1", 100, 100)), REAL_ME)
+
+    def test_events_map_infos_and_maps_have_the_editors_order(self):
+        built = {"RPG::Event": new_event(1, "EV001", 2, 3),
+                 "RPG::MapInfo": new_map_info("MAP001", 0, 1),
+                 "RPG::Map": ACE_PROFILE.new_map(20, 15)}
+        for cls, value in built.items():
+            with self.subTest(cls=cls):
+                self.assertEqual(list(value.ivars), REAL_IVAR_ORDERS[cls])
+
+    def test_a_raw_object_parameter_is_put_in_the_editors_order(self):
+        # A caller's JSON object has whatever key order they typed.
+        command = compile_commands([{"raw": {"code": 250, "parameters": [
+            {"__class__": "RPG::SE", "volume": 95, "pitch": 100,
+             "name": "Blow3"}]}}], ACE_STRINGS, engine="vx_ace")[0]
+        self.assertEqual(
+            marshal_rb.dump(command.get("parameters")[0]).hex(), REAL_SE)
+
+
+@unittest.skipUnless(os.environ.get("RPGVXACE_TEST_PROJECT"),
+                     "set RPGVXACE_TEST_PROJECT to a VX Ace project")
+class TestNewObjectsMatchARealProject(unittest.TestCase):
+    """Every real object of a class the server builds, rebuilt and compared.
+
+    Opt-in and read-only. For each instance, the server's own constructor is
+    called and its fields are given the real object's values -- assigning to
+    an existing key keeps its place -- and the result must dump to the real
+    object's bytes. A difference left is a difference of order alone.
+    """
+
+    def templates(self):
+        return {
+            "RPG::EventCommand": lambda: new_event_command(),
+            "RPG::MoveCommand": lambda: new_move_command(),
+            "RPG::MoveRoute": new_move_route,
+            "RPG::Event::Page::Condition": new_condition,
+            "RPG::Event::Page::Graphic": new_graphic,
+            "RPG::Event::Page": new_page,
+            "RPG::Event": lambda: new_event(1),
+            "RPG::MapInfo": lambda: new_map_info(""),
+            "RPG::Map": lambda: ACE_PROFILE.new_map(),
+            **{"RPG::" + kind.upper(): (
+                lambda kind=kind: ACE_PROFILE.new_audio_file(kind))
+               for kind in ("bgm", "bgs", "me", "se")},
+        }
+
+    def test_every_constructed_class_rebuilds_to_the_real_bytes(self):
+        project = Project(os.environ["RPGVXACE_TEST_PROJECT"], read_only=True)
+        if project.engine != "vx_ace":
+            self.skipTest("the byte comparison is for VX Ace projects")
+        templates = self.templates()
+        compared = {cls: 0 for cls in templates}
+        values = [project.load_map(map_id)
+                  for map_id in project.map_ids_on_disk()]
+        values += [project.load_data(key) for key in
+                   ("map_infos", "common_events", "troops", "system",
+                    "animations")]
+        seen = set()
+        stack = list(values)
+        while stack:
+            value = stack.pop()
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+            stack.extend(ruby_children(value))
+            if not isinstance(value, RubyObject) or value.cls not in templates:
+                continue
+            built = templates[value.cls]()
+            if sorted(built.ivars) != sorted(value.ivars):
+                continue
+            for key, item in value.ivars.items():
+                built.ivars[key] = item
+            compared[value.cls] += 1
+            self.assertEqual(marshal_rb.dump(built).hex(),
+                             marshal_rb.dump(value).hex(), value.cls)
+        for cls, count in compared.items():
+            with self.subTest(cls=cls):
+                self.assertGreater(count, 0, "no real %s was compared" % cls)
 
 
 class TestSchemaObservation(unittest.TestCase):
@@ -207,18 +580,40 @@ class TestResponseTextSafety(unittest.TestCase):
 
 
 class TestUnmodelledEngine(unittest.TestCase):
-    """XP opens with a flag, described with the closest model available."""
+    """An unmodelled engine opens with a flag, described with the closest model.
+
+    This was XP until XP got a profile of its own. Every Marshal engine the
+    server detects is now modelled, so the engine here is one detection is
+    taught about for the test: the path it exercises is the one a future
+    RGSS engine would take, and the flag still guards it.
+    """
+
+    SIGNATURE = ("rgss_test", "Game.rtproj", ".rtdata")
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-xp-"))
+        from unittest import mock
+        from rpgvxace_mcp import project as project_module
+
+        patcher = mock.patch.object(
+            project_module, "ENGINE_SIGNATURES",
+            project_module.ENGINE_SIGNATURES + [self.SIGNATURE])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-unknown-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         (self.tmp / "Data").mkdir(parents=True)
-        (self.tmp / "Game.rxproj").write_text("xp", encoding="ascii")
-        (self.tmp / "Data" / "Actors.rxdata").write_bytes(marshal_rb.dump([None]))
-        (self.tmp / "Data" / "MapInfos.rxdata").write_bytes(
+        (self.tmp / "Game.rtproj").write_text("?", encoding="ascii")
+        (self.tmp / "Data" / "Actors.rtdata").write_bytes(marshal_rb.dump([None]))
+        (self.tmp / "Data" / "MapInfos.rtdata").write_bytes(
             marshal_rb.dump(RubyHash()))
         self.project = Project(self.tmp, allow_other_engines=True)
         self.ctx = Context(self.project)
+
+    def test_it_needs_the_flag_and_says_so(self):
+        with self.assertRaises(Exception) as caught:
+            Project(self.tmp)
+        self.assertIn("--allow-other-engines", str(caught.exception))
+        self.assertEqual(self.project.profile.key, "vx")
 
     def test_documents_say_which_model_is_being_used(self):
         for document in (data_format_reference(self.project),
@@ -242,10 +637,16 @@ class TestUnmodelledEngine(unittest.TestCase):
 
 
 class TestSchemaReportProvenance(unittest.TestCase):
+    # Built once for the class: nothing here writes, so the files are the
+    # same for every test, and a fresh `Project` over them is still made per
+    # test in `setUp`.
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-prov-"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
+        build(cls.tmp / "project")
+
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-prov-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        build(self.tmp / "project")
         self.ctx = Context(Project(self.tmp / "project"))
 
     def test_advisory_notes_travel_with_the_data(self):
@@ -268,11 +669,16 @@ class TestTheReferenceAgreesWithTheTables(unittest.TestCase):
     module it describes. Generated, they cannot.
     """
 
+    # Built once for the class, for the reason given on the class above:
+    # these only read, and each test still gets its own `Project` objects.
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="docs-test-"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
+        build(cls.tmp / "ace", "vx_ace")
+        build(cls.tmp / "vx", "vx")
+
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="docs-test-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        build(self.tmp / "ace", "vx_ace")
-        build(self.tmp / "vx", "vx")
         self.ace = Project(self.tmp / "ace")
         self.vx = Project(self.tmp / "vx")
 
@@ -289,8 +695,12 @@ class TestTheReferenceAgreesWithTheTables(unittest.TestCase):
     def test_every_variable_operation_is_named(self):
         from rpgvxace_mcp.commands import VARIABLE_OPERATIONS
         text = self.document(self.ace)
-        for code in VARIABLE_OPERATIONS:
-            self.assertIn(str(code), text)
+        for code, symbol in VARIABLE_OPERATIONS.items():
+            # The code beside its operator, as the document writes them
+            # ("2 -="). A bare "2" is in every document.
+            self.assertIn("%d %s" % (code, symbol), text,
+                          "variable operation %d (%s) is not documented"
+                          % (code, symbol))
 
     def test_every_comparison_is_named(self):
         from rpgvxace_mcp.commands import COMPARISONS
@@ -325,7 +735,12 @@ class TestTheReferenceAgreesWithTheTables(unittest.TestCase):
 
     def test_the_two_documents_differ(self):
         """An engine-keyed document whose sections are identical is not one."""
-        self.assertNotEqual(self.document(self.ace), self.document(self.vx))
+        ace, vx = self.document(self.ace), self.document(self.vx)
+        self.assertNotEqual(ace, vx)
+        # Different in the shared values, which is what the engines disagree
+        # about -- not merely in a header that names the engine.
+        marker = "Shared parameter values"
+        self.assertNotEqual(ace[ace.index(marker):], vx[vx.index(marker):])
 
     def test_a_condition_type_is_not_typed_out_twice(self):
         """The Conditional Branch types come from the COND_* constants."""
@@ -334,8 +749,13 @@ class TestTheReferenceAgreesWithTheTables(unittest.TestCase):
                  if name.startswith("COND_")}
         self.assertTrue(names, "no COND_ constants to generate from")
         text = self.document(self.ace)
-        for code in names:
-            self.assertIn(str(code), text)
+        for code, name in names.items():
+            # The code beside its type name ("3 timer"): a bare digit is in
+            # every document, so omitting a type left this green.
+            kind = name[len("COND_"):].lower().replace("_", " ")
+            self.assertIn("%d %s" % (code, kind), text,
+                          "conditional branch type %d (%s) is not documented"
+                          % (code, kind))
 
 
 class TestTheTablesKeyedOffOneListAgree(unittest.TestCase):
@@ -377,9 +797,13 @@ class TestTheTablesKeyedOffOneListAgree(unittest.TestCase):
     def test_every_regex_category_is_in_every_table(self):
         from rpgvxace_mcp.tools import pattern_safety
         names = sorted(pattern_safety._CATEGORIES)
-        self.assertEqual(len(names), 8, names)
+        # Not a count copied from the implementation: that the table is not
+        # empty, and that what refers to its names refers to names it has.
+        self.assertTrue(names, "no regex categories at all")
+        self.assertTrue(pattern_safety._CATEGORY_DISJOINT)
         for pair in pattern_safety._CATEGORY_DISJOINT:
             with self.subTest(pair=sorted(pair)):
+                self.assertEqual(len(pair), 2, "a pair is two categories")
                 self.assertEqual(sorted(set(pair) - set(names)), [],
                                  "this pair names a category no table has")
 

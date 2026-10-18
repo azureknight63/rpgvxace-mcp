@@ -7,7 +7,7 @@ from typing import Any, Callable, Iterator
 
 from ..convert import TextCodec, brief, decoded_text
 from ..project import Project
-from ..rubytypes import _bare_name as bare_name, named
+from ..rubytypes import MAX_NAMES_LISTED, _bare_name as bare_name, named
 
 # How much of a caller's own value is quoted back in an error. Without this, a
 # rejected multi-megabyte argument becomes a multi-megabyte error message.
@@ -124,6 +124,23 @@ def led_by_op(reply: Any, op: Any) -> Any:
             **{k: v for k, v in reply.items() if k not in ("dry_run", "op")}}
 
 
+class ImageReply:
+    """A reply that carries a picture beside its JSON.
+
+    Two tools return one: `live`'s screenshot and `map_render`. MCP lets a tool
+    result hold an image block next to the text, and a model can look at
+    that directly -- which a file path on a disk it may not share cannot
+    offer. The body is shaped like every other reply; `Tool.run` leads it
+    with the op, and the server puts the PNG in a second content block.
+    """
+
+    __slots__ = ("body", "png")
+
+    def __init__(self, body: dict[str, Any], png: bytes):
+        self.body = body
+        self.png = png
+
+
 class Tool:
     __slots__ = ("name", "title", "description", "schema", "handler", "writes")
 
@@ -152,7 +169,10 @@ class Tool:
         of seven" comes from.
         """
         check_args(self.schema, args)
-        return led_by_op(self.handler(ctx, args), args.get("op"))
+        reply = self.handler(ctx, args)
+        if isinstance(reply, ImageReply):
+            return ImageReply(led_by_op(reply.body, args.get("op")), reply.png)
+        return led_by_op(reply, args.get("op"))
 
     def definition(self) -> dict[str, Any]:
         return {
@@ -309,6 +329,11 @@ PREVIEW_NAMES = {
     "renamed_to": "would_rename_to",
     "code_characters": "would_write_characters",
     "after": "would_become",
+    # `map_paint`'s three counts: what it wrote, the neighbours it re-shaped
+    # to join them, and the cells whose shadow it set.
+    "painted": "would_paint",
+    "reshaped": "would_reshape",
+    "shaded": "would_shade",
 }
 
 
@@ -527,20 +552,31 @@ def known_fields(ctx: "Context", obj: Any, cls: str) -> "set[str]":
 
 
 def scopes_arg(args: dict[str, Any], key: str,
-                allowed: "tuple[str, ...] | list[str]") -> list[str]:
+                allowed: "tuple[str, ...] | list[str]",
+                default: "tuple[str, ...] | None" = None) -> list[str]:
     """The scopes a caller asked for, refusing names that do nothing.
 
     Dropping an unrecognised name and running everything instead is the
     opposite of what the rest of these tools do with a bad argument: the
     caller believes it narrowed the search and is handed the whole project.
+
+    Asking for none runs ``default``, which is every allowed scope unless a
+    tool keeps some opt-in -- `map_critique`'s full tables are.
     """
     asked = opt_list(args, key)
     unknown = [s for s in asked if s not in allowed]
     if unknown:
+        # A bounded list of them: a call naming fifty thousand got an error
+        # the size of the request.
+        shown = ", ".join(echo(u) for u in unknown[:MAX_NAMES_LISTED])
+        if len(unknown) > MAX_NAMES_LISTED:
+            shown += " and %d more" % (len(unknown) - MAX_NAMES_LISTED)
         raise ToolError("unknown %s %s; choose from %s"
-                        % (key, ", ".join(echo(u) for u in unknown),
-                           ", ".join(allowed)))
-    return [s for s in asked if s in allowed] or list(allowed)
+                        % (key, shown, ", ".join(allowed)))
+    # Once each, in the order first asked: the same scope named a million
+    # times ran a million times and was echoed back a million times.
+    wanted = list(dict.fromkeys(s for s in asked if s in allowed))
+    return wanted or list(allowed if default is None else default)
 
 
 def refuse_inert(args: dict[str, Any], names: "tuple[str, ...]",

@@ -90,8 +90,10 @@ MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 
 # Ruby's own rules for these names. Writing one Ruby rejects produces a file
 # the editor can no longer open, which is a corruption we can refuse up front.
-_IVAR_NAME = re.compile(r"^@[A-Za-z_][A-Za-z0-9_]*$")
-_CLASS_PATH = re.compile(r"^[A-Z][A-Za-z0-9_]*(::[A-Z][A-Za-z0-9_]*)*$")
+# `\Z`, not `$`: `$` also matches just before a final newline, so "a\n" was a
+# usable name and was written into the stream with the newline.
+_IVAR_NAME = re.compile(r"^@[A-Za-z_][A-Za-z0-9_]*\Z")
+_CLASS_PATH = re.compile(r"^[A-Z][A-Za-z0-9_]*(::[A-Z][A-Za-z0-9_]*)*\Z")
 
 
 def check_ivar_name(name: str) -> str:
@@ -271,6 +273,21 @@ def new_walk() -> "_Walk":
     return _Walk()
 
 
+# A node is one value however large it is, and a Marshal link returns the
+# same object for every reference: one 4 MB string linked 5,000 times is a few
+# megabytes on disk, and every reference built its own decoded copy -- 20 GB of
+# reply before anything refused it. So a value is also charged by its size, past
+# a kilobyte (a name or a line of dialogue costs nothing extra) at one node per
+# 32 bytes, which caps the text of one response near 8 MB and leaves ordinary
+# multibyte text, which is three bytes a character, well inside it.
+FREE_BYTES = 1024
+BYTES_PER_NODE = 32
+
+
+def _size_charge(size: int) -> int:
+    return max(0, size - FREE_BYTES) // BYTES_PER_NODE
+
+
 class _Walk:
     """Bookkeeping for one conversion: the path taken, and the work left.
 
@@ -347,6 +364,7 @@ def _to_json_value(value: Any, codec: TextCodec, tables: str, walk: _Walk) -> An
     if isinstance(value, (int, float)):
         return value
     if isinstance(value, RubySymbol):  # before RubyString/str checks
+        walk.spend(_size_charge(len(value)))
         return {"__symbol__": printable_text(str(value))}
     if isinstance(value, RubyString):
         return _string_to_json(value, codec, tables, walk)
@@ -387,6 +405,7 @@ def _to_json_value(value: Any, codec: TextCodec, tables: str, walk: _Walk) -> An
         return {"__data__": printable_text(value.cls),
                 "value": _to_json(value.value, codec, tables, walk)}
     if isinstance(value, RubyUserDef):
+        walk.spend(_size_charge(len(value.payload)))
         return {
             "__class__": printable_text(value.cls),
             "__payload_base64__": base64.b64encode(value.payload).decode("ascii"),
@@ -402,6 +421,7 @@ def _to_json_value(value: Any, codec: TextCodec, tables: str, walk: _Walk) -> An
     if isinstance(value, RubyClassRef):
         return {"__class_ref__": value.name, "kind": value.kind}
     if isinstance(value, RubyRegexp):
+        walk.spend(_size_charge(len(value.source)))
         return {"__regexp__": codec.decode(value.source), "options": value.options}
     if isinstance(value, RubyUClass):
         return {"__uclass__": printable_text(value.cls),
@@ -414,12 +434,20 @@ def _to_json_value(value: Any, codec: TextCodec, tables: str, walk: _Walk) -> An
 
 def _string_to_json(value: RubyString, codec: TextCodec, tables: str,
                     walk: "_Walk") -> Any:
+    walk.spend(_size_charge(len(value.data)))
     try:
         # One strict decode, rather than is_clean() decoding and throwing the
         # result away before decoding again. Strings are the commonest value in
         # a project, so this runs a great many times.
         text = value.data.decode(codec.name)
-    except UnicodeDecodeError:
+        # A decode that succeeds is not a trip that comes back: cp932 decodes
+        # both 0x8790 (NEC row 13) and 0x81E0 to U+2252 and writes only the
+        # second, so the other pair would be changed by any patch that carried
+        # the string. Such bytes go the base64 way below, which is exact. ASCII
+        # is skipped, which is nearly every string and cannot differ.
+        if not value.data.isascii() and text.encode(codec.name) != value.data:
+            text = None
+    except (UnicodeDecodeError, UnicodeEncodeError):
         text = None
     if text is not None:
         if codec.is_default_style(value):
@@ -480,6 +508,10 @@ def table_to_json(table: Table, mode: str = "summary",
         out["cells"] = list(table.data)
     else:
         out["cells_omitted"] = table.size
+        # Built by hand, and one of the two places in the project that is:
+        # `registry.partial` owns these suffixes and this module sits below
+        # `tools`, so reaching it would invert the layering.
+        # `TestOneVocabularyForAPartialAnswer` names both exceptions.
         out["cells_truncated"] = True
         out["cells_note"] = (
             "use map_tiles to read or write regions of this table"
@@ -494,19 +526,50 @@ def table_to_json(table: Table, mode: str = "summary",
 # ---------------------------------------------------------------------------
 
 
-def from_json(value: Any, codec: TextCodec) -> Any:
+def from_json(value: Any, codec: TextCodec, depth: int = 0) -> Any:
+    """A caller's JSON value as the Ruby value it stands for.
+
+    Bounded in depth, because the writer has no limit and the reader refuses
+    past `MAX_DEPTH` (192): a value nested a few hundred levels was written,
+    and the file could then not be opened through this server again.
+    """
+    if depth > MAX_JSON_DEPTH:
+        raise ConversionError(
+            "this value is nested more than %d levels deep, which the server "
+            "would write and then be unable to read back. Flatten it."
+            % MAX_JSON_DEPTH)
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
         return codec.make_string(value)
     if isinstance(value, list):
-        return [from_json(v, codec) for v in value]
+        return [from_json(v, codec, depth + 1) for v in value]
     if isinstance(value, dict):
-        return _dict_from_json(value, codec)
+        return _dict_from_json(value, codec, depth)
     raise ConversionError("cannot convert a %s into a Ruby value" % type(value).__name__)
 
 
-def _ivars_from_json(value: dict[str, Any], codec: TextCodec) -> dict[str, Any]:
+def _whole(value: Any, what: str) -> int:
+    """A whole number from a caller's JSON, and nothing else.
+
+    `int(...)` takes a float and cuts it (1.9 becomes 1), a bool, a numeric
+    string, and raises `OverflowError` on infinity, which `json.loads` accepts
+    and which is not in `server.py`'s caught list. A float that is a whole
+    number is accepted: JSON has no integer type of its own.
+    """
+    if isinstance(value, bool):
+        raise ConversionError("%s must be a whole number, not %s"
+                              % (what, "true" if value else "false"))
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    raise ConversionError("%s must be a whole number, got %s"
+                          % (what, brief(value)))
+
+
+def _ivars_from_json(value: dict[str, Any], codec: TextCodec,
+                     depth: int = 0) -> dict[str, Any]:
     """The ``__ivars__`` a wrapper carries, with every name checked.
 
     Three forms carry these -- the two string forms and the ivar wrapper -- and
@@ -515,33 +578,49 @@ def _ivars_from_json(value: dict[str, Any], codec: TextCodec) -> dict[str, Any]:
     docstring says an unchecked name "produces a file the editor cannot open",
     and these names are written into the Marshal stream exactly as given.
     """
-    return {check_ivar_name(name): from_json(item, codec)
+    return {check_ivar_name(name): from_json(item, codec, depth + 1)
             for name, item in (value.get("__ivars__") or {}).items()}
 
 
-def _dict_from_json(value: dict[str, Any], codec: TextCodec) -> Any:
+def _dict_from_json(value: dict[str, Any], codec: TextCodec,
+                    depth: int = 0) -> Any:
     if "__symbol__" in value:
+        if not isinstance(value["__symbol__"], str):
+            raise ConversionError("__symbol__ must be a string, got %s"
+                                  % brief(value["__symbol__"]))
         return RubySymbol(value["__symbol__"])
     if "__bytes_base64__" in value:
         # The string form travels with the bytes, so an undecodable string with
         # a non-default encoding record still round trips.
-        ivars = _ivars_from_json(value, codec)
+        ivars = _ivars_from_json(value, codec, depth)
         return RubyString(
             _payload_from_base64(value["__bytes_base64__"], "__bytes_base64__"),
             ivars or None)
     if "__string__" in value:
-        ivars = _ivars_from_json(value, codec)
-        return RubyString(codec.encode(value["__string__"]), ivars or None)
+        ivars = _ivars_from_json(value, codec, depth)
+        # Strict: this form is only ever produced from a strict decode, so
+        # text that does not encode is not something the server read.
+        return RubyString(codec.encode_strict(value["__string__"]),
+                          ivars or None)
     if "__hash__" in value:
-        pairs = [(from_json(k, codec), from_json(v, codec)) for k, v in value["__hash__"]]
-        default = from_json(value["__default__"], codec) if "__default__" in value else None
+        entries = value["__hash__"]
+        if not isinstance(entries, list) or any(
+                not isinstance(entry, list) or len(entry) != 2
+                for entry in entries):
+            raise ConversionError(
+                "__hash__ must be a list of [key, value] pairs, got %s"
+                % brief(entries))
+        pairs = [(from_json(k, codec, depth + 1), from_json(v, codec, depth + 1))
+                 for k, v in entries]
+        default = (from_json(value["__default__"], codec, depth + 1)
+                   if "__default__" in value else None)
         return RubyHash(pairs, default)
     if "__ivar_wrapper__" in value:
-        return RubyIvars(from_json(value["__ivar_wrapper__"], codec),
-                         _ivars_from_json(value, codec))
+        return RubyIvars(from_json(value["__ivar_wrapper__"], codec, depth + 1),
+                         _ivars_from_json(value, codec, depth))
     if "__data__" in value:
         return RubyData(check_class_name(value["__data__"]),
-                        from_json(value.get("value"), codec))
+                        from_json(value.get("value"), codec, depth + 1))
     if "__cycle__" in value:
         raise ConversionError(
             "this value was reported as a cycle when it was read, so it cannot "
@@ -551,22 +630,27 @@ def _dict_from_json(value: dict[str, Any], codec: TextCodec) -> Any:
         # A struct's members are named like ivars and are written as symbols,
         # so they go through the same check.
         return RubyStruct(check_class_name(value["__struct__"]),
-                          {check_ivar_name(name): from_json(item, codec)
+                          {check_ivar_name(name): from_json(item, codec, depth + 1)
                            for name, item in (value.get("members") or {}).items()})
     if "__class_ref__" in value:
         return RubyClassRef(check_class_name(value["__class_ref__"]),
                             value.get("kind", "class"))
     if "__regexp__" in value:
-        return RubyRegexp(codec.encode(value["__regexp__"]), int(value.get("options", 0)))
+        return RubyRegexp(codec.encode(value["__regexp__"]),
+                          _whole(value.get("options", 0), "options"))
     if "__uclass__" in value:
         return RubyUClass(check_class_name(value["__uclass__"]),
-                          from_json(value["inner"], codec))
+                          from_json(value["inner"], codec, depth + 1))
     if "__extended__" in value:
         # Module names, written as symbols in the stream, so the same shape
         # applies: `Comparable`, `RPG::Whatever`.
+        modules = value["__extended__"]
+        if not isinstance(modules, list):
+            raise ConversionError("__extended__ must be a list of module "
+                                  "names, got %s" % brief(modules))
         return RubyExtended(
-            [check_class_name(name) for name in value["__extended__"]],
-            from_json(value["inner"], codec))
+            [check_class_name(name) for name in modules],
+            from_json(value["inner"], codec, depth + 1))
 
     cls = value.get("__class__")
     if cls is None:
@@ -581,7 +665,8 @@ def _dict_from_json(value: dict[str, Any], codec: TextCodec) -> Any:
             _payload_from_base64(value["__payload_base64__"], "__payload_base64__"))
     if "__marshal_value__" in value:
         return RubyUserMarshal(check_class_name(cls),
-                               from_json(value["__marshal_value__"], codec))
+                               from_json(value["__marshal_value__"], codec,
+                                         depth + 1))
     if cls == "Table":
         return table_from_json(value)
     if cls == "Color":
@@ -593,14 +678,14 @@ def _dict_from_json(value: dict[str, Any], codec: TextCodec) -> Any:
     for key, item in value.items():
         if key.startswith("__"):
             continue
-        obj.set(check_ivar_name(key), from_json(item, codec))
+        obj.set(check_ivar_name(key), from_json(item, codec, depth + 1))
     return obj
 
 
 def table_from_json(value: dict[str, Any]) -> Table:
-    xsize = int(value.get("xsize", 0))
-    ysize = int(value.get("ysize", 1))
-    zsize = int(value.get("zsize", 1))
+    xsize = _whole(value.get("xsize", 0), "xsize")
+    ysize = _whole(value.get("ysize", 1), "ysize")
+    zsize = _whole(value.get("zsize", 1), "zsize")
     dim = value.get("dim")
     if dim is not None and (not isinstance(dim, int) or not 1 <= dim <= 3):
         raise ConversionError(
@@ -624,7 +709,7 @@ def table_from_json(value: dict[str, Any]) -> Table:
     # to 16 bits for the same reason.
     checked = []
     for index, cell in enumerate(cells):
-        number = int(cell)
+        number = _whole(cell, "cell %d" % index)
         if not 0 <= number <= CELL_MASK:
             raise ConversionError(
                 "cell %d is %d, outside the 0 to %d a Table holds"
@@ -780,6 +865,9 @@ def _refuse_invented_fields(target: RubyObject, patch: dict[str, Any],
            named(target.fields()) or "no fields at all"))
 
 
+_ABSENT = object()
+
+
 def refuse_invented_in_replacement(existing: Any, replacement: Any,
                                    path: str, depth: int = 0) -> None:
     """Refuse a field name in a replacement value that the thing it replaces lacks.
@@ -840,11 +928,13 @@ def refuse_invented_in_replacement(existing: Any, replacement: Any,
         # event -- so the value under a key is the thing the value under that
         # same key replaces. A key the existing hash lacks has no authority
         # behind it and is left alone, the same escape as everywhere else here.
-        old_values = dict(existing.items())
+        # Looked up through the hash, not a dict of its pairs: an Array is a
+        # legal key, and it is unhashable.
         for key, item in replacement.items():
-            if key in old_values:
+            old = existing.get(key, _ABSENT)
+            if old is not _ABSENT:
                 refuse_invented_in_replacement(
-                    old_values[key], item, "%s[%r]" % (path, key), depth + 1)
+                    old, item, "%s[%s]" % (path, brief(key)), depth + 1)
         return
     if isinstance(replacement, list) and isinstance(existing, list):
         # One pass over `existing` to find the first object of each class,
@@ -909,6 +999,11 @@ def decoded_text(codec: TextCodec, value: Any) -> str:
                     + "... (%d bytes)" % len(raw))
     elif value is None:
         return ""
+    elif isinstance(value, int) and not isinstance(value, bool) \
+            and value.bit_length() > MAX_TEXT_CHARS * 3:
+        # `str()` of an Integer past about 4300 digits raises on CPython 3.11,
+        # and a Bignum is a legal name in a file (see `brief`).
+        return "<Integer, %d bits>" % value.bit_length()
     elif isinstance(value, (str, int, float, bool)):
         text = str(value)
     else:
@@ -925,7 +1020,22 @@ def decoded_text(codec: TextCodec, value: Any) -> str:
 # message out of its own length. The per-container counts are generous
 # relative to MAX_TEXT_CHARS -- the slice below still decides the final
 # length -- and the point of each is only that the *building* stops.
-_BOUNDED_REPR = reprlib.Repr()
+class _BoundedRepr(reprlib.Repr):
+    """`reprlib.Repr` that also refuses an Integer it cannot turn into a string.
+
+    `brief` checks the size of a bare Integer before it reprs it, but a
+    container's elements go through `repr_int`, and CPython 3.11 refuses to
+    render an Integer past 4300 digits at all: one in a list raised
+    `ValueError` out of whatever was quoting the list.
+    """
+
+    def repr_int(self, x: int, level: int) -> str:
+        if x.bit_length() > self.maxstring * 3:
+            return "<Integer, %d bits>" % x.bit_length()
+        return super().repr_int(x, level)
+
+
+_BOUNDED_REPR = _BoundedRepr()
 _BOUNDED_REPR.maxlevel = 4
 _BOUNDED_REPR.maxstring = MAX_TEXT_CHARS
 _BOUNDED_REPR.maxother = MAX_TEXT_CHARS

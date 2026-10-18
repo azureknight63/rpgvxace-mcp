@@ -414,15 +414,16 @@ def _clipped_note(matcher: "_Matcher | None") -> str:
                "{:,}".format(MAX_SUBJECT_BYTES)))
 
 
-def _about(code: int) -> dict[str, Any]:
+def _about(code: int, engine: str) -> dict[str, Any]:
     """The two facts every command hit carries about its command."""
-    return {"code": code, "command": command_name(code)}
+    return {"code": code, "command": command_name(code, engine)}
 
 
 def _search_events(ctx: Context, found: _Hits,
                    code_filter: "int | None") -> None:
     """Every event command list on every map, plus common events and troops."""
     matcher = found.matcher
+    engine = ctx.project.engine
     # Claimed on the first list actually read, not on entry. `iter_maps` and
     # `_safe_entries` both swallow a file that will not load, so a project
     # whose maps, common events and troops are all unreadable yielded nothing
@@ -445,7 +446,8 @@ def _search_events(ctx: Context, found: _Hits,
             if code_filter is not None:
                 if code == code_filter:
                     found.add(location.at(index),
-                              summarize(command, ctx.codec), _about(code))
+                              summarize(command, ctx.codec, engine),
+                              _about(code, engine))
                 continue
             for text in _command_texts(ctx, command, matcher):
                 if matcher and matcher(text):
@@ -454,7 +456,7 @@ def _search_events(ctx: Context, found: _Hits,
                     # command walked -- fifty thousand allocations for the
                     # hundred that reach a reply. It also shadowed the
                     # `named` helper this module now imports.
-                    found.add(location.at(index), text, _about(code))
+                    found.add(location.at(index), text, _about(code, engine))
                     if found.done:
                         return
     if not read_something:
@@ -743,12 +745,20 @@ def _command_texts(ctx: Context, command: RubyObject,
     everything first, which is the same distinction `rendered`'s own
     docstring draws.
     """
+    # One budget for the command, counted across the lists too: the cap used
+    # to apply to the parameters and again to each inner list, so a command of
+    # 64 lists of 64 links to one big string was 4,096 decodes.
+    left = MAX_TEXTS_PER_COMMAND
     out = []
+    # Sliced as well as budgeted: the budget counts decodes, and a Marshal
+    # link lets one million-element list of integers be every command's
+    # parameters -- walked in full, for nothing, by each of them.
     for value in as_list(command.get("parameters"))[:MAX_TEXTS_PER_COMMAND]:
-        if isinstance(value, RubyString):
-            out.append(subject_text(ctx, value, matcher))
-        elif isinstance(value, list):
-            out.extend(subject_text(ctx, v, matcher)
-                       for v in value[:MAX_TEXTS_PER_COMMAND]
-                       if isinstance(v, RubyString))
+        for part in (value[:MAX_TEXTS_PER_COMMAND]
+                     if isinstance(value, list) else (value,)):
+            if left <= 0:
+                return [t for t in out if t]
+            if isinstance(part, RubyString):
+                out.append(subject_text(ctx, part, matcher))
+                left -= 1
     return [t for t in out if t]

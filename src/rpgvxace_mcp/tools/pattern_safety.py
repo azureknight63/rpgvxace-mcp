@@ -472,6 +472,17 @@ def _children(name: str, av: Any) -> "list[Any]":
         return [av]
     if name == "BRANCH":
         return list(av[1])
+    if name in ("ASSERT", "ASSERT_NOT"):
+        # `(flags, body)`. `_flatten` refuses a lookaround before it walks
+        # in, so nothing depended on this -- but "a kind with no
+        # sub-patterns gets an empty list" was answered for three kinds
+        # that have one, which makes the next caller's walk silently
+        # partial. `_subjects` is that caller: it now builds subjects out
+        # of the characters inside a lookaround too.
+        return [av[1]]
+    if name == "GROUPREF_EXISTS":
+        # `(group, yes, no)`, and `no` is None when there is no else.
+        return [branch for branch in av[1:] if branch is not None]
     return []
 
 
@@ -512,9 +523,16 @@ def _alphabet(parsed: Any, depth: int = 0) -> "set[str]":
         name = str(op)
         if name == "LITERAL" and 0 < av < 0x110000:
             found.add(chr(av))
-        elif name in ("ANY", "NOT_LITERAL"):
+        elif name == "ANY":
             found.add("a")
+        elif name == "NOT_LITERAL":
+            # A character the atom *matches*. It used to add "a" whatever
+            # the atom excluded, so `[^a]+[^a]+b` was judged on runs of `a`
+            # (which fail at once) and of `b` (which match at once), and
+            # on 3,000 Japanese characters it ran for minutes.
+            found |= _matched_by(lambda c: c != chr(av))
         elif name == "IN":
+            negated = any(str(op_) == "NEGATE" for op_, _ in av)
             for inner_op, inner_av in av:
                 inner = str(inner_op)
                 if inner == "LITERAL" and 0 < inner_av < 0x110000:
@@ -522,17 +540,53 @@ def _alphabet(parsed: Any, depth: int = 0) -> "set[str]":
                 elif inner == "RANGE":
                     low, high = inner_av
                     found.update(chr(c) for c in (low, high) if 0 < c < 0x110000)
+                    # And inside it: a run of a letter between the ends is
+                    # as long as any other, and `[a-z]+[a-z]+[az]` has only
+                    # the ends to be told apart from.
+                    if high - low > 1:
+                        found.update(chr(c) for c in (low + 1, (low + high) // 2)
+                                     if 0 < c < 0x110000)
                 elif inner == "CATEGORY":
                     known = _CATEGORIES.get(str(inner_av))
                     found.add(known[1] if known else "a")
-                elif inner == "NEGATE":
-                    found.add("\x00")
+            if negated:
+                found |= _matched_by(lambda c: not _in_class_matches(av, c))
         else:
             # Every kind that holds sub-patterns, through the one function
             # that knows where each keeps them.
             for child in _children(name, av):
                 found |= _alphabet(child, depth + 1)
     return found
+
+
+_REPRESENTATIVES = ("a", "b", "1", " ", "!", "\u3042", "\x7f", "\x00")
+
+
+def _matched_by(accepts: Any) -> "set[str]":
+    """The stand-in characters an atom accepts, or "a" if it accepts none."""
+    chosen = {c for c in _REPRESENTATIVES if accepts(c)}
+    return chosen or {"a"}
+
+
+def _in_class_matches(items: Any, char: str) -> bool:
+    """Whether a character is matched by the *listed* items of a class.
+
+    Ignores NEGATE itself: the caller asks what the items name, and inverts.
+    Case-insensitively, because the measurement can run with IGNORECASE and a
+    class that excludes `a` then excludes `A` as well.
+    """
+    point = ord(char)
+    for op, arg in items:
+        kind = str(op)
+        if kind == "LITERAL" and chr(arg).lower() == char.lower():
+            return True
+        if kind == "RANGE" and arg[0] <= point <= arg[1]:
+            return True
+        if kind == "CATEGORY":
+            known = _CATEGORIES.get(str(arg))
+            if known is None or known[0](char):
+                return True
+    return False
 
 
 def _quantified(parsed: Any, depth: int = 0) -> "set[str]":
@@ -569,6 +623,12 @@ def _quantified(parsed: Any, depth: int = 0) -> "set[str]":
             found |= (_alphabet(child, depth + 1) if name in _REPEATS
                       else _quantified(child, depth + 1))
     return found
+
+
+# More repeated characters than this and an alternation of all of them is no
+# longer a body anyone wrote: a body of this many characters is already a
+# long literal.
+_ALTERNATING_LIMIT = 8
 
 
 def _subjects(pattern: str) -> "list[str]":
@@ -639,6 +699,17 @@ def _subjects(pattern: str) -> "list[str]":
     every = "".join(char * run for char in ordered)
     subjects.append(every[:PREFLIGHT_SUBJECT_CHARS])
     subjects.append(("a1 " * PREFLIGHT_SUBJECT_CHARS)[:PREFLIGHT_SUBJECT_CHARS])
+    # And the characters a repeat can match, taken in turn, over and over --
+    # in both orders. A repeated body of more than one character
+    # (`(?:ab)+(?:ab)+!`) only runs long on a subject that alternates its
+    # characters, and every subject above is either one character at a time
+    # or built from the whole alphabet, where a literal outside the repeat
+    # (`!`) sits between the two that matter.
+    if 2 <= len(quantified) <= _ALTERNATING_LIMIT:
+        turn = "".join(sorted(quantified))
+        for order in (turn, turn[::-1]):
+            subjects.append(
+                (order * PREFLIGHT_SUBJECT_CHARS)[:PREFLIGHT_SUBJECT_CHARS])
     return subjects
 
 
@@ -724,12 +795,17 @@ def measure_cost(pattern: str) -> None:
             # caching an unmeasured pattern as a measured pass for the life of
             # the process. Measured, not theorised. The child now says which
             # case it is, because only the child knows.
+            # Named, where there is a name for it: "exited abnormally
+            # (code 18)" is an internal number on the one message a caller
+            # is supposed to act on.
+            why = ("could not read the pattern and subjects it was sent"
+                   if done.returncode == PROTOCOL_BROKEN_EXIT
+                   else "exited abnormally (code %d)" % done.returncode)
             verdict = (
-                "this server's safety check on that pattern exited abnormally "
-                "(code %d), so it will not run the pattern either -- a match "
-                "that cannot be interrupted is not something to risk on a "
-                "check that did not complete: %s."
-                % (done.returncode, PLAIN_SEARCH_ADVICE))
+                "this server's safety check on that pattern %s, so it will "
+                "not run the pattern either -- a match that cannot be "
+                "interrupted is not something to risk on a check that did "
+                "not complete: %s." % (why, PLAIN_SEARCH_ADVICE))
     except subprocess.TimeoutExpired:
         verdict = (
             "that pattern did not finish matching in %.1f seconds against "

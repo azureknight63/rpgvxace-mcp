@@ -15,6 +15,7 @@ is preserved as-is, and decoding is deferred to the presentation layer.
 from __future__ import annotations
 
 import struct
+import unicodedata
 from array import array
 from typing import Any, Iterable, Literal
 
@@ -37,6 +38,9 @@ CELL_MASK = 0xFFFF
 # produced a fifty-nine-kilobyte error message, and `_tool_error` does not
 # truncate.
 MAX_NAMES_LISTED = 40
+# What a debugging `repr` of a value out of a file shows of it: `%s` on a
+# command parameter reaches these, and a megabyte string is one link away.
+MAX_REPR_CHARS = 200
 
 
 def named(names: "Any", limit: int = MAX_NAMES_LISTED,
@@ -112,7 +116,11 @@ def printable_text(text: str) -> str:
         return text
     # A question mark rather than a deletion, so the length still says
     # something about what was there.
+    # A space is text too: `isprintable()` is False for every space but
+    # U+0020, which turned the ideographic space (U+3000) in a Japanese name
+    # into a question mark.
     return "".join(char if char.isprintable() or char in KEPT_CONTROLS
+                   or unicodedata.category(char) == "Zs"
                    else "?" for char in text)
 
 
@@ -144,7 +152,10 @@ class RubySymbol(str):
         return self
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return ":" + str(self)
+        name = str(self)
+        if len(name) > MAX_REPR_CHARS:
+            return ":%s... (%d characters)" % (name[:MAX_REPR_CHARS], len(name))
+        return ":" + name
 
 
 class RubyString:
@@ -171,6 +182,9 @@ class RubyString:
         return hash(self.data)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        if len(self.data) > MAX_REPR_CHARS:
+            return "RubyString(%r... (%d bytes))" % (
+                self.data[:MAX_REPR_CHARS], len(self.data))
         return "RubyString(%r)" % (self.data,)
 
 
@@ -278,7 +292,8 @@ class RubyIvars:
         self.ivars = dict(ivars or {})
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return "RubyIvars(%r, %s)" % (self.inner, list(self.ivars))
+        return "RubyIvars(<%s>, %s)" % (type(self.inner).__name__,
+                                         list(self.ivars))
 
 
 class RubyStruct:
@@ -372,45 +387,157 @@ class RubyFloat(float):
         return self
 
 
+# Key types whose equality and hash agree with each other and cannot change
+# after insertion, so a dict can stand in for the scan. Exact types, not
+# isinstance: a subclass may override ``__eq__`` and the index would not know.
+# Absent on purpose: ``RubyString`` and ``RubyObject`` (``==`` by value, but
+# mutable -- a key edited after insertion must still be found under its new
+# value, which only a scan sees), lists, and anything else.
+_INDEXABLE_KEYS = frozenset({int, bool, float, str, bytes, type(None),
+                             RubySymbol, RubyFloat})
+
+
+# CPython hashes an int modulo 2**61 - 1, so a Bignum key from a file can be
+# made to share a bucket with any number of others, and the first lookup then
+# costs their count squared. Below the modulus an int is its own hash and
+# collides with nothing; a float is only kept when it is such a whole number.
+_HASH_MODULUS = 2 ** 61 - 1
+
+
+def _indexable(key: Any) -> bool:
+    if type(key) not in _INDEXABLE_KEYS:
+        return False
+    if isinstance(key, bool):
+        return True
+    if isinstance(key, int):
+        return -_HASH_MODULUS < key < _HASH_MODULUS
+    if isinstance(key, float):
+        # NaN fails the first test, an infinity the second.
+        return key == key and abs(key) < _HASH_MODULUS and key == int(key)
+    return True  # str, bytes, None and the symbol types hash by a seeded hash
+
+
+def _dropping_cache(name: str):
+    base = getattr(list, name)
+
+    def method(self, *args, **kwargs):
+        self.cache = None
+        return base(self, *args, **kwargs)
+    method.__name__ = name
+    return method
+
+
+class _Pairs(list):
+    """The pair list of a ``RubyHash``, carrying the key index with it.
+
+    ``RubyHash.pairs`` is public and the codec appends to it directly, so the
+    index cannot live behind ``set`` alone: every mutating method here drops
+    the cache, and the next lookup rebuilds it in one pass. ``RubyHash`` itself
+    edits through ``list.*`` (not these overrides) and keeps the cache current.
+
+    ``cache`` is ``(index, loose)``: ``index`` maps each indexable key to the
+    position of its *first* occurrence, ``loose`` lists the positions of the
+    entries that are not indexable, ascending.
+    """
+
+    cache: Any = None
+
+    for _name in ("append", "extend", "insert", "remove", "pop", "clear",
+                  "sort", "reverse", "__setitem__", "__delitem__",
+                  "__iadd__", "__imul__"):
+        locals()[_name] = _dropping_cache(_name)
+    del _name
+
+
 class RubyHash:
     """A Ruby ``Hash``, stored as ordered pairs so non-hashable keys survive.
 
-    Lookups are a linear scan, which is the right trade at the sizes RPG Maker
-    reaches (a map's events, a project's MapInfos -- hundreds of entries, not
-    millions) and is what lets duplicate or unhashable keys round trip. A caller
-    doing repeated lookups in a loop should hoist ``dict(hash.items())`` out of
-    it rather than paying the scan each time.
+    The pairs are a list, which is what lets duplicate, unhashable and mutable
+    keys round trip. Lookups go through an index built over the keys that can
+    safely be indexed (numbers, ``None``, Symbols, plain strings, bytes); any
+    other key is found by a scan, which is the old behaviour and stays correct
+    for keys that compare by value but can change afterwards. The first
+    matching pair wins either way.
+
+    ``pairs`` may still be edited directly (the codec does): that drops the
+    index and the next lookup rebuilds it. Assigning to ``pairs`` copies the
+    given sequence.
     """
 
-    __slots__ = ("pairs", "default")
+    __slots__ = ("_pairs", "default")
 
     def __init__(self, pairs: Iterable[tuple[Any, Any]] | None = None, default: Any = None):
-        self.pairs: list[tuple[Any, Any]] = list(pairs or [])
+        self._pairs: _Pairs = _Pairs(pairs or [])
         self.default = default
 
+    @property
+    def pairs(self) -> list[tuple[Any, Any]]:
+        return self._pairs
+
+    @pairs.setter
+    def pairs(self, value: Iterable[tuple[Any, Any]]) -> None:
+        self._pairs = _Pairs(value)
+
     # -- mapping-ish helpers, keyed by value equality -------------------------
+    def _cache(self) -> tuple[dict, list[int]]:
+        pairs = self._pairs
+        cache = pairs.cache
+        if cache is None:
+            index: dict = {}
+            loose: list[int] = []
+            for position, (key, _) in enumerate(pairs):
+                if _indexable(key):
+                    index.setdefault(key, position)
+                else:
+                    loose.append(position)
+            cache = pairs.cache = (index, loose)
+        return cache
+
     def _find(self, key: Any) -> int | None:
-        for index, (candidate, _) in enumerate(self.pairs):
-            if candidate == key:
-                return index
-        return None
+        pairs = self._pairs
+        if not _indexable(key):
+            for position, (candidate, _) in enumerate(pairs):
+                if candidate == key:
+                    return position
+            return None
+        index, loose = self._cache()
+        found = index.get(key)
+        # An entry that cannot be indexed may still equal this key, and it
+        # wins if it comes first.
+        for position in loose:
+            if found is not None and position >= found:
+                break
+            if pairs[position][0] == key:
+                return position
+        return found
 
     def get(self, key: Any, default: Any = None) -> Any:
         index = self._find(key)
-        return self.pairs[index][1] if index is not None else default
+        return self._pairs[index][1] if index is not None else default
 
     def set(self, key: Any, value: Any) -> None:
+        pairs = self._pairs
         index = self._find(key)
         if index is None:
-            self.pairs.append((key, value))
+            list.append(pairs, (key, value))
+            cache = pairs.cache
+            if cache is not None:
+                if _indexable(key):
+                    cache[0].setdefault(key, len(pairs) - 1)
+                else:
+                    cache[1].append(len(pairs) - 1)
         else:
-            self.pairs[index] = (key, value)
+            if _indexable(pairs[index][0]) != _indexable(key):
+                pairs.cache = None
+            list.__setitem__(pairs, index, (key, value))
 
     def delete(self, key: Any) -> bool:
         index = self._find(key)
         if index is None:
             return False
-        del self.pairs[index]
+        pairs = self._pairs
+        list.__delitem__(pairs, index)
+        pairs.cache = None
         return True
 
     def keys(self) -> list[Any]:

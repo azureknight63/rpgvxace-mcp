@@ -17,6 +17,7 @@ and the event command table; see :mod:`rpgvxace_mcp.schema` for the profiles.
 
 from __future__ import annotations
 
+import atexit
 import configparser
 import functools
 import hashlib
@@ -40,6 +41,7 @@ from .paths import (  # noqa: F401
     CHANGE_LOG,
     DEFAULT_BACKUP_KEEP,
     ProjectError,
+    RENDER_DIR,
     ReadOnlyError,
     StaleFileError,
     TMP_SUFFIX,
@@ -48,6 +50,7 @@ from .paths import (  # noqa: F401
     safe_component,
 )
 from .convert import TextCodec, decoded_text, detect_encoding
+from .rgss_archive import RgssArchive, find_archive
 from .rubytypes import RubyHash, RubyObject, RubyString, ruby_children
 from .schema import (
     ARRAY,
@@ -87,17 +90,23 @@ MAX_DATA_FILE_BYTES = 128 * 1024 * 1024
 # because nothing legitimate comes near it.
 MAX_GAME_INI_BYTES = 1024 * 1024
 
+# An RTP name is a short word (RPGVXAce). Longer is clipped, because the name
+# is quoted into findings and the file is untrusted.
+_RTP_NAME_CLIP = 64
+
 # A script slot inflates into memory, so a crafted Scripts file must not be
 # able to ask for an unbounded amount of it.
 MAX_SCRIPT_BYTES = 16 * 1024 * 1024
 
-# Project files that identify an engine, most specific first. The modelled
-# engines come from their own profiles so this cannot drift; XP has no profile,
-# and MV/MZ are recognised only to say what they are.
+# Project files that identify an engine, most specific first. They come from
+# the profiles so this cannot drift. XP was listed here by hand, without a
+# profile, until it had one; MV/MZ are recognised only to say what they are.
+# An engine detected here without a profile would open only with
+# --allow-other-engines, described with the closest model.
 ENGINE_SIGNATURES = [
     (profile.key, profile.project_file, profile.extension)
     for profile in PROFILES.values()
-] + [("xp", "Game.rxproj", ".rxdata")]
+]
 
 # The engines whose data classes and command codes this server models.
 MODELLED_ENGINES = tuple(PROFILES)
@@ -198,9 +207,21 @@ class Project(BackupStore):
     def __init__(self, root: str | os.PathLike[str], encoding: str = "auto",
                  read_only: bool = False, backup_keep: int = DEFAULT_BACKUP_KEEP,
                  allow_other_engines: bool = False,
-                 rtp_paths: list[str] | None = None):
+                 rtp_paths: list[str] | None = None,
+                 render_dir: str | os.PathLike[str] | None = None,
+                 allow_live_eval: bool = False):
         self.root = Path(root).resolve()
         self.read_only = read_only
+        # The operator's half of the gate on `live`'s `eval`, which runs
+        # arbitrary Ruby in a game process on the user's desktop. Set only
+        # from --allow-live-eval; a session's own `allow_eval` is the other
+        # half, and both are needed.
+        self.allow_live_eval = allow_live_eval
+        # Where `map_render` leaves its pictures. Not a project edit, so
+        # --read-only does not stop it; the operator can still point it
+        # somewhere other than the project with --render-dir.
+        self.render_dir_override = (Path(render_dir).expanduser().resolve()
+                                    if render_dir else None)
         self.backup_keep = backup_keep
         # Insertion-ordered, and read order is maintained by `_touch`, so
         # eviction can take the least recently used.
@@ -211,10 +232,14 @@ class Project(BackupStore):
         # was on disk and report the edit as applied.
         self._pinned: set[str] = set()
         self._assets: dict[str, frozenset[str]] = {}
+        self._asset_paths: dict[str, dict[str, Path]] = {}
         self._backed_up: set[str] = set()
         self._map_ids: list[int] | None = None
         self._map_ids_set: frozenset[int] = frozenset()
         self.rtp_override = False
+        # Set only for a project opened from Game.rgss3a / Game.rgss2a.
+        self.archive: RgssArchive | None = None
+        self._archive_cache: Path | None = None
         self._session = datetime.now().strftime(BACKUP_STAMP_FORMAT)
 
         if not self.root.is_dir():
@@ -226,20 +251,21 @@ class Project(BackupStore):
             # Not a question of schema: MV and MZ store JSON, which this
             # server's Marshal codec cannot read at all.
             raise ProjectError(
-                "%s This server works on the Marshal-based engines (VX Ace and "
-                "VX). MV and MZ store their data as JSON, which it cannot read, "
-                "so use an MV/MZ server for this project." % self.engine_note
+                "%s This server works on the Marshal-based engines (VX Ace, VX "
+                "and XP). MV and MZ store their data as JSON, which it cannot "
+                "read, so use an MV/MZ server for this project." % self.engine_note
             )
         if self.engine not in MODELLED_ENGINES and not allow_other_engines:
             raise ProjectError(
-                "%s This server models RPG Maker VX Ace (.rvdata2) and RPG Maker "
-                "VX (.rvdata). The Marshal codec reads XP files too, but XP's "
-                "data classes and event command codes are not modelled here, so "
-                "edits could produce files the editor rejects. Pass "
-                "--allow-other-engines to proceed anyway." % self.engine_note
+                "%s This server models RPG Maker VX Ace (.rvdata2), VX "
+                "(.rvdata) and XP (.rxdata). This engine's data classes and "
+                "event command codes are not modelled here, so edits could "
+                "produce files the editor rejects. Pass --allow-other-engines "
+                "to proceed anyway." % self.engine_note
             )
-        # XP, when explicitly allowed, is described with the VX profile: it is
-        # the closest model available, and every report says so.
+        # An engine without a profile, when explicitly allowed, is described
+        # with the VX profile: the closest model available, and every report
+        # says so.
         self.profile: EngineProfile = PROFILES.get(self.engine, VX_PROFILE)
         self.codec, self.encoding_reason = self._resolve_encoding(encoding)
         self.rtp_names = self._declared_rtp_names()
@@ -251,11 +277,47 @@ class Project(BackupStore):
             candidate = self.root / name
             if candidate.is_dir():
                 return candidate
+        packed = find_archive(self.root)
+        if packed is not None:
+            return self._open_archive(packed)
         raise ProjectError(
             "%s has no Data directory, so it is not an RPG Maker project root. "
-            "Point --project at the folder containing Game.rvproj2 (VX Ace) or "
-            "Game.rvproj (VX)." % self.root
+            "Point --project at the folder containing Game.rvproj2 (VX Ace), "
+            "Game.rvproj (VX) or Game.rxproj (XP)." % self.root
         )
+
+    def _open_archive(self, packed: Path) -> Path:
+        """Extract an archive's ``Data`` folder to a temporary cache.
+
+        Only ``Data`` is written out; the other folders stay in the archive
+        and are consulted by name for the asset checks. The project becomes
+        read-only for good: the game would load the archive, not edits made
+        to a copy of it.
+        """
+        self.archive = RgssArchive.open(packed)
+        self.read_only = True
+        cache = Path(tempfile.mkdtemp(prefix="rpgvxace-rgss-"))
+        self._archive_cache = cache
+        atexit.register(self.close)
+        try:
+            self.archive.extract(cache, only="Data")
+        except BaseException:
+            self.close()
+            raise
+        for name in ("Data", "data"):
+            if (cache / name).is_dir():
+                return cache / name
+        self.close()
+        raise ProjectError(
+            "%s has no Data folder inside it, so it is not an RPG Maker project "
+            "archive." % packed.name)
+
+    def close(self) -> None:
+        """Remove the extracted archive cache, if any. Safe to call twice."""
+        cache, self._archive_cache = self._archive_cache, None
+        if cache is not None:
+            atexit.unregister(self.close)
+            shutil.rmtree(cache, ignore_errors=True)
 
     def _detect_engine(self) -> tuple[str, str, str]:
         for engine, project_file, extension in ENGINE_SIGNATURES:
@@ -359,6 +421,10 @@ class Project(BackupStore):
         for section in parser.sections():
             for key in ("rtp", "rtp1", "rtp2", "rtp3"):
                 value = parser[section].get(key, "").strip()
+                # Clipped: this name is quoted into every finding that cannot
+                # be checked against it, and no real RTP name is long.
+                if len(value) > _RTP_NAME_CLIP:
+                    value = value[:_RTP_NAME_CLIP]
                 if value and value not in names:
                     names.append(value)
         return names
@@ -409,17 +475,20 @@ class Project(BackupStore):
 
     @property
     def command_layouts_modelled(self) -> bool:
-        """Whether this project's event command parameter layouts are known.
+        """Whether the VX family's command parameter layouts are this project's.
 
-        Not a profile capability, because it cannot be one: an engine opened
-        with --allow-other-engines is *described* with the closest profile
-        available, so the profile says yes while the engine's real layouts
-        differ. XP's Show Text keeps the message where Ace keeps the face
-        graphic, which is the difference that matters. So this is one named
-        fact about the open project, asked in the three places that care,
-        rather than an engine-string comparison spelled out at each of them.
+        Those are the layouts `validate`'s parameter rules and the asset
+        checks read. Not a profile capability alone, because it cannot be
+        one: an engine opened with --allow-other-engines is *described* with
+        the closest profile available, so the profile says yes while the
+        engine's real layouts differ. And XP, which has a profile, numbers
+        and lays out its commands its own way -- its Show Text keeps the
+        message where VX keeps the face graphic -- so its profile says no.
+        One named fact about the open project, asked in the places that
+        care, rather than an engine-string comparison spelled out at each.
         """
-        return self.engine in MODELLED_ENGINES
+        return (self.engine == self.profile.key
+                and self.profile.vx_command_layouts)
 
     @property
     def assets_complete(self) -> bool:
@@ -455,6 +524,13 @@ class Project(BackupStore):
 
     def _assert_writable(self, what: str) -> None:
         """Refuse a change when the server was started read-only."""
+        if self.archive is not None:
+            raise ReadOnlyError(
+                "this project was opened from the encrypted archive %s, which "
+                "is read-only: the game would load the archive, not edits made "
+                "here, so %s did not happen. Unpack the archive into a Data "
+                "folder to edit it." % (self.archive.path.name, what)
+            )
         if self.read_only:
             raise ReadOnlyError(
                 "this server is running read-only, so %s did not happen. "
@@ -463,6 +539,10 @@ class Project(BackupStore):
 
     def work_dir(self) -> Path:
         return self.root / WORK_DIR
+
+    def render_dir(self) -> Path:
+        """The folder rendered maps are written to."""
+        return self.render_dir_override or self.work_dir() / RENDER_DIR
 
     # -- loading --------------------------------------------------------------
     def load_file(self, filename: str, refresh: bool = False) -> Any:
@@ -630,6 +710,10 @@ class Project(BackupStore):
         value = self.load_data(key)
         kind = self.container_kind(key, value)
         if kind == ARRAY:
+            # `value[-1] = entry` would replace the last entry.
+            if entry_id < 0:
+                raise ProjectError("an entry id cannot be negative, got %d"
+                                   % entry_id)
             while len(value) <= entry_id:
                 value.append(None)
             value[entry_id] = entry
@@ -640,14 +724,15 @@ class Project(BackupStore):
 
     # -- scripts --------------------------------------------------------------
     def load_scripts(self, with_code: bool = True,
-                     indices: set[int] | None = None) -> list[dict[str, Any]]:
+                     indices: set[int] | None = None,
+                     refresh: bool = False) -> list[dict[str, Any]]:
         """The script editor slots.
 
         ``with_code`` false skips the inflate and decode, which is what a caller
         that only wants the names and sizes should ask for -- a project carrying
         script packs is megabytes of Ruby.
         """
-        raw = self.load_data("scripts")
+        raw = self.load_data("scripts", refresh)
         if not isinstance(raw, list):
             raise ProjectError("Scripts data is not an Array")
         scripts = []
@@ -695,7 +780,7 @@ class Project(BackupStore):
         Mutates the cache only; call :meth:`save_file` to persist it.
         """
         raw = self.load_data("scripts")
-        if not raw:
+        if not isinstance(raw, list) or not raw:
             raise ProjectError("this project's Scripts data holds no slots")
         if not 0 <= index < len(raw):
             raise ProjectError("script index %d is outside 0..%d"
@@ -738,9 +823,13 @@ class Project(BackupStore):
 
         # A unique temp name, opened exclusively: a predictable one in a
         # directory someone else can write is a way to redirect this write.
-        handle, temp_name = tempfile.mkstemp(dir=str(path.parent),
-                                             prefix=path.name + ".",
-                                             suffix=TMP_SUFFIX)
+        try:
+            handle, temp_name = tempfile.mkstemp(dir=str(path.parent),
+                                                 prefix=path.name + ".",
+                                                 suffix=TMP_SUFFIX)
+        except OSError as exc:
+            # A folder that refuses a new file: a message, not a traceback.
+            raise ProjectError("could not write %s: %s" % (filename, exc)) from exc
         temp_path = Path(temp_name)
         try:
             with os.fdopen(handle, "wb") as stream:
@@ -850,7 +939,10 @@ class Project(BackupStore):
         if cached is not None:
             self._assert_not_stale(filename, path, cached)
         backup = self.backup_file(filename)
-        path.unlink()
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise ProjectError("could not delete %s: %s" % (filename, exc)) from exc
         self._cache.pop(filename, None)
         self._forget_map_ids()
         # Deleting is the most destructive thing here, so it is logged like
@@ -879,6 +971,8 @@ class Project(BackupStore):
         if relative is None:
             raise ProjectError("unknown asset kind %r" % kind)
         names: set[str] = set()
+        if self.archive is not None:
+            names |= self.archive.stems_in(relative)
         for base in [self.root, *self.rtp_dirs]:
             directory = base / relative
             try:
@@ -897,6 +991,48 @@ class Project(BackupStore):
         frozen = frozenset(names)
         self._assets[kind] = frozen
         return frozen
+
+    def asset_file(self, kind: str, name: str) -> Path | None:
+        """The file one asset name refers to, or None if there is none.
+
+        The project's own copy wins over any RTP's, as the engine resolves it,
+        and the name is matched without regard to case, as Windows does -- the
+        data stores ``Actor1`` and the file may be ``actor1.PNG``. Several
+        formats share a name, so a ``.png`` is preferred when there is a
+        choice.
+
+        ``name`` comes out of the project's own data, so it is not trusted as a
+        path -- and is never made into one. It is only looked up among the
+        names the folders actually hold, so a name with separators in it is
+        not found rather than refused, which is also what the engine would
+        make of it. Listed once per kind and remembered;
+        :meth:`forget_assets` drops it.
+        """
+        if not isinstance(name, str):
+            return None
+        listing = self._asset_paths.get(kind)
+        if listing is None:
+            relative = ASSET_DIRS.get(kind)
+            if relative is None:
+                raise ProjectError("unknown asset kind %r" % kind)
+            listing = {}
+            for base in [self.root, *self.rtp_dirs]:
+                try:
+                    with os.scandir(base / relative) as entries:
+                        # A .png first, so it is the one that claims a name
+                        # that several formats share.
+                        found = sorted((e for e in entries if e.is_file()),
+                                       key=lambda e: (not e.name.lower()
+                                                      .endswith(".png"),
+                                                      e.name))
+                except OSError:
+                    continue
+                for entry in found:
+                    listing.setdefault(
+                        os.path.splitext(entry.name)[0].lower(),
+                        Path(entry.path))
+            self._asset_paths[kind] = listing
+        return listing.get(name.lower())
 
     def pin(self, *filenames: str) -> None:
         """Hold these files in the cache for the length of a staged write."""
@@ -918,6 +1054,12 @@ class Project(BackupStore):
         everything does nothing, and the entry just loaded is the one the
         caller is about to use.
         """
+        # Summed here rather than kept as a running total. This does
+        # run on every load, and the sum is over the *number of cached
+        # files* -- a few dozen at MAX_CACHED_BYTES -- not over their
+        # bytes. A running total would be a second copy of a fact the
+        # cache already holds, and every defect this module's comments
+        # record is a second copy of something going stale.
         held = sum(entry.size for entry in self._cache.values())
         if held <= MAX_CACHED_BYTES:
             return
@@ -931,6 +1073,7 @@ class Project(BackupStore):
     def forget_assets(self) -> None:
         """Drop the remembered asset listings, so the next check re-reads them."""
         self._assets.clear()
+        self._asset_paths.clear()
 
     def forget_cached(self) -> None:
         """Drop the decoded files, so the next read comes from disk.
@@ -971,6 +1114,15 @@ class Project(BackupStore):
             "encoding": self.codec.name,
             "encoding_detection": self.encoding_reason,
             "read_only": self.read_only,
+            "live_eval_allowed": self.allow_live_eval,
+            "archive": None if self.archive is None else {
+                "file": self.archive.path.name,
+                "version": self.archive.version,
+                "entries": len(self.archive.entries),
+                "note": "Opened from the encrypted archive, so this project is "
+                        "read-only: the game would load the archive, not edits "
+                        "made here. Unpack it into a Data folder to edit.",
+            },
             "rtp": {
                 "declared": self.rtp_names,
                 "resolved": [str(p) for p in self.rtp_dirs],
@@ -1073,7 +1225,7 @@ def _engine_label(engine: str) -> str:
     profile = PROFILES.get(engine)
     if profile is not None:
         return profile.label
-    return {"xp": "RPG Maker XP", "mv": "RPG Maker MV/MZ"}.get(engine, engine)
+    return {"mv": "RPG Maker MV/MZ"}.get(engine, engine)
 
 
 def collect_strings(value: Any, out: list[bytes], limit: int = 200,

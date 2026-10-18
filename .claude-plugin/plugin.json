@@ -1,0 +1,19 @@
+{
+  "name": "rpgvxace-mcp",
+  "displayName": "RPG Maker VX Ace MCP",
+  "version": "0.1.0",
+  "description": "Work on an RPG Maker VX Ace or VX project: read and edit the database, maps, events and scripts, and check for broken references. No Ruby needed.",
+  "author": { "name": "azureknight63", "email": "azureknight63@hotmail.com" },
+  "homepage": "https://github.com/azureknight63/rpgvxace-mcp",
+  "repository": "https://github.com/azureknight63/rpgvxace-mcp",
+  "license": "MIT",
+  "keywords": ["rpg-maker", "vx-ace", "rgss3", "mcp"],
+  "userConfig": {
+    "project_path": {
+      "type": "directory",
+      "title": "RPG Maker project folder",
+      "description": "The folder holding Game.rvproj2 (VX Ace) or Game.rvproj (VX).",
+      "required": true
+    }
+  }
+}

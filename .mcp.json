@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "rpgvxace": {
+      "command": "uvx",
+      "args": ["rpgvxace-mcp", "${user_config.project_path}"]
+    }
+  }
+}

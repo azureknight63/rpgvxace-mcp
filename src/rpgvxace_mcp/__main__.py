@@ -40,14 +40,27 @@ def build_parser() -> argparse.ArgumentParser:
              "pruning)." % DEFAULT_BACKUP_KEEP)
     parser.add_argument(
         "--allow-other-engines", action="store_true",
-        help="Open an XP project anyway. The Marshal codec handles it, but XP's "
-             "data classes and command codes are not modelled, so edits may "
-             "produce files the editor rejects.")
+        help="Open a Marshal project whose engine this server does not model, "
+             "described with the closest model. VX Ace, VX and XP are modelled "
+             "and need no flag; for anything else, edits may produce files "
+             "the editor rejects.")
     parser.add_argument(
         "--rtp", action="append", metavar="PATH", default=[],
         help="Folder of an RTP (Run Time Package) this project uses. Normally "
              "found automatically from Game.ini and the registry; pass this when "
              "the RTP lives somewhere unusual, or on a non-Windows host.")
+    parser.add_argument(
+        "--render-dir", metavar="PATH", default=None,
+        help="Where map_render writes its PNGs. Defaults to "
+             ".rpgvxace-mcp/renders inside the project. A render is a cache "
+             "file, not a project edit, so it is written even with "
+             "--read-only; point this elsewhere to keep the project untouched.")
+    parser.add_argument(
+        "--allow-live-eval", action="store_true",
+        help="Let the live tool's eval op run Ruby inside the game. Off by "
+             "default: eval is arbitrary code in a process on your desktop. "
+             "Even with this set, a session must also be started with "
+             "allow_eval: true.")
     parser.add_argument(
         "--verbose", action="store_true",
         help="Log tracebacks to stderr.")
@@ -71,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
             backup_keep=args.backup_keep,
             allow_other_engines=args.allow_other_engines,
             rtp_paths=args.rtp,
+            render_dir=args.render_dir,
+            allow_live_eval=args.allow_live_eval,
         )
     except (ProjectError, ValueError, OSError) as exc:
         # ValueError covers an unknown --encoding (ConversionError), a bad

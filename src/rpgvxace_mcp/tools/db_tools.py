@@ -15,7 +15,15 @@ from ..analysis import (
 from ..convert import TABLE_MODES, apply_patch, new_walk, to_json
 from ..project import ProjectError
 from ..rubytypes import RubyObject, RubyString
-from ..schema import ALL_DATABASE_TABLES, ALL_TABLE_KEYS, ARRAY, HASH, SCRIPTS, SINGLE
+from ..schema import (
+    ALL_DATABASE_TABLES,
+    ALL_TABLE_KEYS,
+    ARRAY,
+    HASH,
+    SCRIPTS,
+    SINGLE,
+    ordered_like,
+)
 from .registry import (
     ARR,
     Context,
@@ -565,7 +573,7 @@ class _DbRequest:
         # `container_kind` call and a `sorted_items()` sort -- and a create
         # asks it twice. Neither answer can change inside one call, and
         # `MAX_OPS` is 200 of them.
-        self._siblings: "set[str] | None" = None
+        self._siblings: "list[str] | None" = None
 
     def entry_id(self, raw_op: dict[str, Any], op: str,
                  existing: bool) -> int:
@@ -591,11 +599,20 @@ class _DbRequest:
         nothing here adds a field to an existing sibling -- and asking again
         re-sorts the whole table.
         """
+        return set(self.sibling_order())
+
+    def sibling_order(self) -> list[str]:
+        """A sibling's fields in its own order: the editor's, for a blank.
+
+        A blank entry's fields arrive in the patch's key order with @id set
+        last, and Marshal keeps that order -- a file that loads but is not
+        the one the editor writes.
+        """
         if self._siblings is None:
-            self._siblings = set()
+            self._siblings = []
             for _, row in self.ctx.project.entries(self.table):
                 if isinstance(row, RubyObject):
-                    self._siblings = set(row.fields())
+                    self._siblings = row.fields()
                     break
         return self._siblings
 
@@ -685,6 +702,8 @@ def _op_create(request: _DbRequest, raw_op: dict[str, Any],
         # break the invariant the engine subscripts these arrays on.
         request.refuse_id_patch(patch, entry_id)
         entry.set("id", entry_id)
+    if clone_from is None and isinstance(entry, RubyObject):
+        entry.ivars = ordered_like(entry.ivars, request.sibling_order())
 
     ctx.project.set_entry(table, entry_id, entry)
     return {"op": "create", "id": entry_id, "cloned_from": clone_from,

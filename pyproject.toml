@@ -1,22 +1,31 @@
 [build-system]
-requires = ["setuptools>=68"]
+# setuptools>=77 is needed for the SPDX `license` string and `license-files`.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "rpgvxace-mcp"
-version = "0.1.0"
-description = "MCP server for RPG Maker VX Ace and VX projects: reads and writes Data/*.rvdata2 directly, with no Ruby needed"
+dynamic = ["version"]
+description = "MCP server for RPG Maker VX Ace, VX and XP projects: reads and writes Data/*.rvdata2 and .rxdata directly, with no Ruby needed"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "azureknight63", email = "azureknight63@hotmail.com" }]
+maintainers = [{ name = "azureknight63", email = "azureknight63@hotmail.com" }]
 keywords = ["mcp", "model-context-protocol", "rpg-maker", "rpg-maker-vx-ace",
             "rpg-maker-vx", "rgss3", "rgss2", "ruby-marshal"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Games/Entertainment",
     "Topic :: Software Development :: Libraries",
 ]
@@ -24,11 +33,27 @@ classifiers = [
 # project needs nothing beyond Python to work on.
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/azureknight63/rpgvxace-mcp"
+Repository = "https://github.com/azureknight63/rpgvxace-mcp"
+Issues = "https://github.com/azureknight63/rpgvxace-mcp/issues"
+
+[project.optional-dependencies]
+# Development only; the server stays stdlib-only. scripts/prove_guards.py runs
+# each guard's tests through pytest.
+dev = ["pytest>=7"]
+
 [project.scripts]
 rpgvxace-mcp = "rpgvxace_mcp.__main__:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
+
+[tool.setuptools.dynamic]
+# Single source of truth for the version: src/rpgvxace_mcp/__init__.py.
+# server.json and .claude-plugin/plugin.json repeat it; the release workflow
+# refuses to publish if they disagree with the tag.
+version = { attr = "rpgvxace_mcp.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -12,8 +12,13 @@ The test runner is injected, so these drive every verdict in milliseconds
 rather than copying the tree and running pytest four times.
 """
 
+import ast
+import os
+import subprocess
 import sys
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -40,12 +45,20 @@ class Ran:
 class Runner:
     """A fake test runner: one result per call, in order."""
 
-    def __init__(self, *results):
+    def __init__(self, *results, watch=None):
         self.results = list(results)
         self.calls = 0
+        # What the watched file held in the tree each call was handed: the
+        # runner used to ignore `tree`, so a prover that never reverted
+        # anything returned the same scripted verdicts.
+        self.watch = watch
+        self.seen = []
 
     def __call__(self, tree, tests):
         self.calls += 1
+        if self.watch is not None:
+            self.seen.append((Path(tree) / self.watch).read_text(
+                encoding="utf-8"))
         if not self.results:
             raise AssertionError("prove() ran the tests more times than "
                                  "this runner was given results for")
@@ -67,12 +80,21 @@ class ProveTest(unittest.TestCase):
 
     def test_a_guard_whose_tests_fail_only_when_reverted_is_proven(self):
         # Reverted: fail. Baseline: pass.
-        runner = Runner(Ran(1, "E   AssertionError: boom"), Ran(0))
+        runner = Runner(Ran(1, "E   AssertionError: boom"), Ran(0),
+                        watch=self.guard.file)
         proven, detail = prove(self.guard, run=runner)
         self.assertTrue(proven, detail)
         self.assertEqual(runner.calls, 2,
                          "the baseline was not checked, so a broken test "
                          "would read as a proven guard")
+        # The first run saw the guard reverted and the second saw it back:
+        # a prover that skipped the write, or never reverted, fails here.
+        first, second = runner.seen
+        self.assertIn("MAX_FINDINGS = 1", first)
+        self.assertNotIn("MAX_FINDINGS = 5000", first)
+        self.assertIn("MAX_FINDINGS = 5000", second)
+        # And the verdict carries the failure it saw.
+        self.assertIn("boom", detail)
 
     def test_a_guard_whose_tests_pass_when_reverted_is_vacuous(self):
         runner = Runner(Ran(0))
@@ -128,6 +150,91 @@ class ProveTest(unittest.TestCase):
         self.assertIn("BROKEN", detail)
 
 
+    def test_a_revert_that_is_not_valid_python_is_not_proven(self):
+        """A mutant that cannot be imported fails every test for the wrong reason.
+
+        The tests fail, the restored baseline passes, and the old verdict was
+        PROVEN -- for a guard whose "revert" was a syntax error and which
+        therefore showed nothing about the code it names. Found in the guard
+        table itself: an anchor ended one quote short of its source line, so
+        the revert spliced a stray `""` onto the end of the replacement.
+        """
+        broken = Guard("a syntax-error fixture", guard_table.LINT_FINDINGS,
+                       "MAX_FINDINGS = 5000", "MAX_FINDINGS = = 1",
+                       ["tests/test_guards_findings.py::Nothing"], "nothing")
+        runner = Runner()
+        proven, detail = prove(broken, run=runner)
+        self.assertFalse(proven, "a revert that is not valid Python was "
+                                 "reported as a proven guard")
+        self.assertIn("INVALID", detail)
+        self.assertEqual(runner.calls, 0, "tests ran against a file that "
+                                          "cannot be imported")
+
+    def test_an_anchor_that_matches_twice_is_named_as_ambiguous(self):
+        """The docstring says so; the check only existed in `--check`."""
+        twice = Guard("an ambiguous fixture", guard_table.LINT_FINDINGS,
+                      "def ", "def  ",
+                      ["tests/test_guards_findings.py::Nothing"], "nothing")
+        runner = Runner()
+        proven, detail = prove(twice, run=runner)
+        self.assertFalse(proven)
+        self.assertIn("AMBIGUOUS", detail)
+        self.assertEqual(runner.calls, 0, "an ambiguous guard ran tests "
+                                          "against whichever match came first")
+
+    def test_an_earlier_revert_that_removes_a_later_anchor_is_not_proven(self):
+        """Two anchors, each unique, the second inside the first.
+
+        Applied in order, the first revert deletes the text the second one
+        is looking for, and `str.replace` then does nothing without saying
+        so: the guard is reverted half way and the verdict is about an edit
+        nobody wrote.
+        """
+        source = (guard_table.ROOT / guard_table.LINT_FINDINGS).read_text(
+            encoding="utf-8")
+        lines = source.split("\n")
+        first, second = next(
+            (first, second) for first, second in zip(lines, lines[1:])
+            if first.strip() and second.strip()
+            and source.count(first + "\n" + second) == 1
+            and source.count(second) == 1)
+        nested = Guard("a nested-anchor fixture", guard_table.LINT_FINDINGS,
+                       [first + "\n" + second, second],
+                       ["# reverted", "# reverted too"],
+                       ["tests/test_guards_findings.py::Nothing"], "nothing")
+        runner = Runner()
+        proven, detail = prove(nested, run=runner)
+        self.assertFalse(proven)
+        self.assertIn("OVERLAP", detail)
+        self.assertEqual(runner.calls, 0)
+
+
+class TheRealRunnerReadsAnyOutput(unittest.TestCase):
+    """pytest writes UTF-8; Windows decodes a pipe in its ANSI code page.
+
+    A failing test whose message held a character cp1252 cannot decode
+    left `stdout` as None -- the reader thread died on the decode -- and
+    the prover crashed quoting the failure, after reverting a guard, with
+    every verdict after it lost. Found on a full run after the live merge.
+    """
+
+    def test_a_failure_message_outside_the_code_page_is_read(self):
+        import tempfile
+        from prove_guards import _first_failure, run_tests
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            (tree / "src").mkdir()
+            (tree / "test_odd.py").write_text(
+                "def test_odd():\n"
+                "    assert False, '\\u2192 \\u0394 \\u2713 \\u3042'\n",
+                encoding="utf-8")
+            result = run_tests(tree, ["test_odd.py"])
+        self.assertIsNotNone(result)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsInstance(result.stdout, str)
+        self.assertIn("\u3042", _first_failure(result))
+
+
 class GuardTableTest(unittest.TestCase):
     """Properties of the registered guards that do not need a test run."""
 
@@ -149,6 +256,26 @@ class GuardTableTest(unittest.TestCase):
         self.assertEqual(duplicates, [],
                          "--only matches by name, so duplicates cannot be "
                          "proven separately")
+
+    def test_every_anchor_matches_its_file_exactly_once(self):
+        """`--check`, run by the suite rather than remembered.
+
+        A stale anchor reverts nothing and so proves nothing, and nothing in
+        the suite looked: a merge added `offset` to the arguments a common
+        event read refuses, the guard on that line went stale, and 1366 tests
+        passed around it. This is the same count `check_anchors` makes.
+        """
+        problems = []
+        for guard in GUARDS:
+            source = (guard_table.ROOT / guard.file).read_text(encoding="utf-8")
+            for present, _ in guard.anchors:
+                found = source.count(present)
+                if found != 1:
+                    problems.append("%r matches %d times in %s"
+                                    % (guard.name, found, guard.file))
+        self.assertEqual(problems, [],
+                         "re-anchor these to the code as it now reads, then "
+                         "prove them")
 
     def test_no_two_guards_watch_the_same_line(self):
         """`check_anchors` cannot see this one.
@@ -181,7 +308,6 @@ class GuardTableTest(unittest.TestCase):
         result of two module-level aliases sharing a name, so the second
         assignment silently redirected the first's guards.
         """
-        import ast
 
         root = Path(__file__).resolve().parent.parent
         methods: dict[str, set[str]] = {}
@@ -333,6 +459,70 @@ class MultipleAnchorTest(unittest.TestCase):
             self.guard(["a", "c"], ["b"])
 
 
+class _ReverseRun:
+    """The suite run again in another order, started once and collected once.
+
+    It shares nothing with `SuiteFilesRunAloneTest`'s processes -- its own
+    interpreter, its own temp directories -- and it took forty-odd seconds
+    on its own after the ninety that one takes, so the two ran back to back
+    for no reason but that they are two tests. `SuiteFilesRunAloneTest` starts
+    this before it fans out and `ProcessStateIsRestoredTest` waits for the
+    answer; run alone, that test starts it itself. The command and the
+    assertion on its result are unchanged.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._process = None
+
+    def start(self):
+        with self._lock:
+            if self._process is not None:
+                return
+            root = Path(__file__).resolve().parent.parent
+            env = dict(os.environ)
+            env["PYTHONPATH"] = os.pathsep.join(
+                [str(root / "src"), str(root / "tests" / "fixtures")])
+            # The suite this starts includes this file, whose two subprocess
+            # classes would start it again: with pytest-reverse installed
+            # that was a process fan-out stopped only by the timeouts.
+            env[CHILD_MARKER] = "1"
+            # `-p no:randomly` is not needed -- this asks for one specific
+            # order, the reverse of collection, which is the cheapest way to
+            # find a test that only passes after another one.
+            command = (
+                [sys.executable, "-m", "pytest", str(root / "tests"), "-q",
+                 "--no-header", "-p", "no:cacheprovider", "--reverse"]
+                if _has_reverse() else
+                # Without the plugin, the files in reverse order: a real
+                # change of order, where the same three in the order they sort
+                # asked nothing and passed.
+                [sys.executable, "-m", "pytest",
+                 str(root / "tests" / "test_tools.py"),
+                 str(root / "tests" / "test_guards_replies.py"),
+                 str(root / "tests" / "test_guards_patterns.py"), "-q",
+                 "--no-header", "-p", "no:cacheprovider"])
+            self._process = subprocess.Popen(
+                command, cwd=str(root), env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def finish(self):
+        """(returncode, stdout) of the run, started now if it was not."""
+        self.start()
+        try:
+            stdout, _ = self._process.communicate(timeout=900)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            raise
+        return self._process.returncode, stdout
+
+
+REVERSE_RUN = _ReverseRun()
+
+# Set in every process this file starts, so none of them starts another.
+CHILD_MARKER = "PROVE_GUARDS_CHILD"
+
+
 class SuiteFilesRunAloneTest(unittest.TestCase):
     """Every test file passes when it is the only one collected.
 
@@ -359,25 +549,42 @@ class SuiteFilesRunAloneTest(unittest.TestCase):
                       if path.name != Path(__file__).name)
 
     def test_every_suite_file_passes_alone(self):
-        import os
-        import subprocess
-
+        if os.environ.get(CHILD_MARKER):
+            self.skipTest("started by this file's own subprocess run")
         root = Path(__file__).resolve().parent.parent
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(
             [str(root / "src"), str(root / "tests" / "fixtures")])
-        failed = []
-        for path in self.suite_files():
+        env[CHILD_MARKER] = "1"
+
+        def run_alone(path):
             done = subprocess.run(
                 [sys.executable, "-m", "pytest", str(path), "-q",
                  "--no-header", "-p", "no:cacheprovider"],
                 cwd=str(root), capture_output=True, text=True, env=env,
                 timeout=600)
-            if done.returncode != 0:
-                tail = [line for line in done.stdout.split("\n")
-                        if "failed" in line or "error" in line]
-                failed.append("%s: %s" % (path.name,
-                                          tail[-1] if tail else "no detail"))
+            if done.returncode == 0:
+                return None
+            tail = [line for line in done.stdout.splitlines()
+                    if "failed" in line or "error" in line]
+            return "%s: %s" % (path.name, tail[-1] if tail else "no detail")
+
+        # A few files at a time rather than one after another: each file is
+        # its own process, so they share nothing, and the serial loop was
+        # the sum of every file's wall time. A quarter of the cores, never
+        # fewer than three or more than six -- some suites assert a
+        # wall-clock bound, and a saturated machine is how a bound that
+        # holds gets reported as one that does not. (Three was right for a
+        # suite of a dozen files; with twenty-seven, on twelve cores, it
+        # left most of the machine idle for a minute and a half.) `map`
+        # keeps the failures in file order.
+        files = self.suite_files()
+        workers = max(3, min(6, (os.cpu_count() or 4) // 4))
+        # The reverse-order run does not depend on this one, so it starts now
+        # and `ProcessStateIsRestoredTest` collects it afterwards.
+        REVERSE_RUN.start()
+        with ThreadPoolExecutor(max_workers=min(workers, len(files) or 1)) as pool:
+            failed = [line for line in pool.map(run_alone, files) if line]
         self.assertEqual(failed, [],
                          "these files do not pass on their own, so every "
                          "guard naming them would report BROKEN: "
@@ -404,33 +611,15 @@ class ProcessStateIsRestoredTest(unittest.TestCase):
     """
 
     def test_the_suite_passes_in_reverse_order(self):
-        import os
-        import subprocess
-
-        root = Path(__file__).resolve().parent.parent
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(
-            [str(root / "src"), str(root / "tests" / "fixtures")])
-        # `-p no:randomly` is not needed -- this asks for one specific
-        # order, the reverse of collection, which is the cheapest way to
-        # find a test that only passes after another one.
-        done = subprocess.run(
-            [sys.executable, "-m", "pytest", str(root / "tests"), "-q",
-             "--no-header", "-p", "no:cacheprovider", "--reverse"]
-            if _has_reverse() else
-            [sys.executable, "-m", "pytest",
-             str(root / "tests" / "test_guards_patterns.py"),
-             str(root / "tests" / "test_guards_replies.py"),
-             str(root / "tests" / "test_tools.py"), "-q", "--no-header",
-             "-p", "no:cacheprovider"],
-            cwd=str(root), capture_output=True, text=True, env=env,
-            timeout=900)
-        tail = [line for line in done.stdout.splitlines()
+        if os.environ.get(CHILD_MARKER):
+            self.skipTest("started by this file's own subprocess run")
+        returncode, stdout = REVERSE_RUN.finish()
+        tail = [line for line in stdout.splitlines()
                 if "passed" in line or "failed" in line]
-        self.assertEqual(done.returncode, 0,
+        self.assertEqual(returncode, 0,
                          "the suite does not pass in this order, so some "
                          "test depends on another having run: %s"
-                         % (tail[-1] if tail else done.stdout[-400:]))
+                         % (tail[-1] if tail else stdout[-400:]))
 
 
 def _has_reverse() -> bool:

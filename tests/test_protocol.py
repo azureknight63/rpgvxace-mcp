@@ -1,5 +1,6 @@
 """MCP protocol tests, driving the server as a real subprocess over stdio."""
 
+import atexit
 import json
 import os
 import shutil
@@ -78,13 +79,94 @@ class ServerProcess:
         return self.process.returncode, stderr
 
 
+class ServerPool:
+    """Servers started ahead of the tests that will claim them.
+
+    A server costs ~1.4 s to start (almost all of it importing the package)
+    and every test here wants its own, with its own freshly built project,
+    because most of them edit it. Started one at a time inside `setUp` that
+    is 2.5 s a test, none of it spent on anything a test asserts.
+
+    So `take` hands out a server that was already launched, and tops the
+    queue back up -- `Popen` returns at once, so the next few start while
+    this test runs, and on several cores they start in parallel. Nothing is
+    shared: every test still gets a server nobody else has spoken to, over a
+    project nobody else has touched. Only the *start* has moved earlier.
+
+    `expected` says how many tests will claim each configuration, so the
+    pool never starts a server nothing will use. Anything still waiting at
+    exit is killed.
+    """
+
+    LOOKAHEAD = max(1, min(4, (os.cpu_count() or 2) - 1))
+
+    def __init__(self):
+        self.ready: dict[tuple, list] = {}
+        self.expected: dict[tuple, int] = {}
+        self.dirs: list[Path] = []
+        self.primed = False
+        atexit.register(self.shutdown)
+
+    @staticmethod
+    def key(engine: str, extra_args) -> tuple:
+        return (engine, tuple(extra_args or ()))
+
+    def _launch(self, key: tuple):
+        engine, extra_args = key
+        tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-proto-"))
+        self.dirs.append(tmp)
+        project = tmp / "project"
+        build(project, engine)
+        return tmp, project, ServerProcess(project, list(extra_args))
+
+    def take(self, engine: str = "vx_ace", extra_args=None):
+        """(tmp, project, server) for one test, and start the next few."""
+        key = self.key(engine, extra_args)
+        if not self.primed:
+            # Every other configuration gets one server now, so the first
+            # test of each starts against a warm one rather than a cold one.
+            self.primed = True
+            for other, count in self.expected.items():
+                if other != key and count > 0:
+                    self.ready.setdefault(other, []).append(
+                        self._launch(other))
+        queue = self.ready.setdefault(key, [])
+        claimed = queue.pop(0) if queue else self._launch(key)
+        remaining = self.expected.get(key, 1) - 1
+        self.expected[key] = remaining
+        while len(queue) < min(self.LOOKAHEAD, remaining):
+            queue.append(self._launch(key))
+        return claimed
+
+    def shutdown(self):
+        for queue in self.ready.values():
+            for _, _, server in queue:
+                try:
+                    server.process.kill()
+                    server.process.wait(timeout=5)
+                    for stream in (server.process.stdin, server.process.stdout,
+                                   server.process.stderr):
+                        stream.close()
+                except (OSError, ValueError, subprocess.TimeoutExpired):
+                    pass
+            queue.clear()
+        for directory in self.dirs:
+            shutil.rmtree(directory, ignore_errors=True)
+
+
+POOL = ServerPool()
+
+
+def _expect(engine: str, extra_args, tests: int) -> None:
+    """Declare how many tests will claim servers of one configuration."""
+    key = ServerPool.key(engine, extra_args)
+    POOL.expected[key] = POOL.expected.get(key, 0) + tests
+
+
 class ProtocolTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-proto-"))
+        self.tmp, self.project, self.server = POOL.take()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.project = self.tmp / "project"
-        build(self.project)
-        self.server = ServerProcess(self.project)
         self.addCleanup(self._shutdown)
         self.initialize()
 
@@ -141,14 +223,18 @@ class TestHandshake(ProtocolTest):
         # A notification must not produce output, so the next request's reply is
         # the very next line on stdout.
         self.server.notify("notifications/cancelled", {"requestId": 99})
-        self.assertEqual(self.server.request("ping")["result"], {})
+        reply = self.server.request("ping")
+        self.assertEqual(reply["result"], {})
+        # Whose answer it is: a stray reply to the notification would be the
+        # line read here, and `{}` is also what it would carry.
+        self.assertEqual(reply["id"], self.server._next_id)
 
 
 class TestToolsOverProtocol(ProtocolTest):
     def test_list_advertises_every_tool_with_a_schema(self):
         tools = self.server.request("tools/list")["result"]["tools"]
         names = {t["name"] for t in tools}
-        self.assertEqual(len(tools), 16)
+        self.assertEqual(len(tools), 20)
         self.assertIn("project_info", names)
         self.assertIn("event_edit", names)
         for tool in tools:
@@ -256,10 +342,8 @@ class TestResourcesForVX(unittest.TestCase):
     """The documents are generated for the engine that is actually open."""
 
     def setUp(self):
-        tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-vxdocs-"))
+        tmp, _, self.server = POOL.take("vx")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        build(tmp / "project", "vx")
-        self.server = ServerProcess(tmp / "project")
         self.addCleanup(self.server.close)
         self.server.request("initialize", {"protocolVersion": PROTOCOL_VERSION,
                                            "capabilities": {}})
@@ -286,6 +370,33 @@ class TestResourcesForVX(unittest.TestCase):
     def test_read_unknown_resource(self):
         response = self.server.request("resources/read", {"uri": "rpgvxace://nope"})
         self.assertEqual(response["error"]["code"], -32602)
+
+
+class TestResourcesForXP(TestResourcesForVX):
+    """An XP project starts the server with no flag, and is described as XP."""
+
+    def setUp(self):
+        tmp, _, self.server = POOL.take("xp")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.addCleanup(self.server.close)
+        self.server.request("initialize", {"protocolVersion": PROTOCOL_VERSION,
+                                           "capabilities": {}})
+        self.server.notify("notifications/initialized")
+
+    def test_data_format_describes_vx(self):
+        text = self.read("rpgvxace://reference/data-format")
+        self.assertIn("RPG Maker XP data format", text)
+        self.assertIn("`Tilesets.rxdata`", text)
+        self.assertIn("autotile_names", text)
+        self.assertIn("width x height x 3", text)
+        self.assertNotIn("Areas.rxdata", text)
+
+    def test_command_reference_omits_ace_additions(self):
+        text = self.read("rpgvxace://reference/event-commands")
+        self.assertIn("| 106 | Wait |", text)
+        self.assertIn("| 209 | Set Move Route |", text)
+        self.assertNotIn("| 285 |", text)
+        self.assertNotIn("| 230 |", text)
 
 
 class TestTransport(ProtocolTest):
@@ -322,10 +433,8 @@ class TestTransport(ProtocolTest):
 
 class TestReadOnlyServer(unittest.TestCase):
     def test_read_only_flag_refuses_writes(self):
-        tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-ro-"))
+        tmp, _, server = POOL.take("vx_ace", ["--read-only"])
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        build(tmp / "project")
-        server = ServerProcess(tmp / "project", ["--read-only"])
         self.addCleanup(server.close)
         server.request("initialize", {"protocolVersion": PROTOCOL_VERSION,
                                       "capabilities": {}})
@@ -340,13 +449,36 @@ class TestReadOnlyServer(unittest.TestCase):
 
 
 class TestStartupFailures(unittest.TestCase):
-    def run_server(self, *args: str) -> subprocess.CompletedProcess:
+    # Both servers are launched together in `setUpClass`, because each costs
+    # a full interpreter start and neither depends on the other.
+    ARGS = {"missing": (), "nonexistent": (str(HERE / "no-such-project"),)}
+
+    @classmethod
+    def setUpClass(cls):
         env = dict(os.environ)
         env["PYTHONPATH"] = str(HERE.parent / "src")
-        return subprocess.run(
-            [sys.executable, "-m", "rpgvxace_mcp", *args],
-            capture_output=True, text=True, env=env, timeout=60, input="",
-        )
+        cls.running = {
+            name: subprocess.Popen(
+                [sys.executable, "-m", "rpgvxace_mcp", *args],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=env, text=True)
+            for name, args in cls.ARGS.items()}
+        cls.finished = {}
+
+    @classmethod
+    def tearDownClass(cls):
+        for process in cls.running.values():
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
+
+    def run_server(self, *args: str) -> subprocess.CompletedProcess:
+        name = next(n for n, a in self.ARGS.items() if a == args)
+        if name not in self.finished:
+            out, err = self.running[name].communicate(input="", timeout=60)
+            self.finished[name] = subprocess.CompletedProcess(
+                args, self.running[name].returncode, out, err)
+        return self.finished[name]
 
     def test_missing_project_argument(self):
         result = self.run_server()
@@ -367,11 +499,8 @@ class TestTransportHardening(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-hard-"))
+        self.tmp, self.project, self.server = POOL.take()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.project = self.tmp / "project"
-        build(self.project)
-        self.server = ServerProcess(self.project)
         self.addCleanup(self._shutdown)
 
     def _shutdown(self):
@@ -478,6 +607,18 @@ class TestTransportHardening(unittest.TestCase):
              "params": list(range(5000))}))
         # 160, for the reason the sibling above records.
         self.assertLess(len(response["error"]["message"]), 160)
+
+# Counted from the classes rather than typed, so a new test is expected too.
+_loader = unittest.TestLoader()
+_expect("vx_ace", None, sum(
+    len(_loader.getTestCaseNames(cls))
+    for cls in (TestHandshake, TestToolsOverProtocol, TestResources,
+                TestTransport, TestTransportHardening)))
+_expect("vx", None, len(_loader.getTestCaseNames(TestResourcesForVX)))
+_expect("xp", None, len(_loader.getTestCaseNames(TestResourcesForXP)))
+_expect("vx_ace", ["--read-only"],
+        len(_loader.getTestCaseNames(TestReadOnlyServer)))
+
 
 if __name__ == "__main__":
     unittest.main()

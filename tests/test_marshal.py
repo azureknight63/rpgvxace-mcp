@@ -9,16 +9,22 @@ the separate symbol and object link tables, and Ruby 1.8's bare strings.
 
 import math
 import struct
+import sys
 import unittest
+from pathlib import Path
 
-from rpgvxace_mcp.marshal_rb import (
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "src"))
+
+from rpgvxace_mcp.marshal_rb import (  # noqa: E402
     MarshalError,
     MarshalReader,
     dump,
     load,
     load_with_warnings,
 )
-from rpgvxace_mcp.rubytypes import (
+from rpgvxace_mcp.rubytypes import (  # noqa: E402
     Color,
     RubyClassRef,
     RubyFloat,
@@ -109,6 +115,43 @@ class TestLinkTables(unittest.TestCase):
         loaded = load(dump(value))
         self.assertEqual(loaded[0], RubySymbol("k"))
         self.assertIs(loaded[1], loaded[3])
+
+    # The three below pin literal bytes, derived by hand from the Marshal 4.8
+    # format. The round trips above agree with themselves: a bug that is the
+    # same in the writer and the reader (a float taking no link slot, symbols
+    # and objects sharing one table) passes them and corrupts every file a
+    # real editor reads back.
+
+    def test_a_float_takes_an_object_slot_in_the_bytes(self):
+        # [1.0, "s", "s"]: the array is slot 0, the float slot 1, the string
+        # slot 2, so the second "s" is `@` + 2 (written 2 + 5 = 7).
+        shared = RubyString(b"s")
+        literal = b'\x04\x08[\x08f\x061"\x06s@\x07'
+        self.assertEqual(dump([RubyFloat(1.0), shared, shared]), literal)
+        loaded = load(literal)
+        self.assertIs(loaded[1], loaded[2])
+
+    def test_symbols_and_objects_keep_separate_tables_in_the_bytes(self):
+        # [:k, "v", :k, "v"]: the second :k is a symbol link to symbol 0
+        # (`;\x00`); the second "v" is an object link to object 1 -- the
+        # array is object 0 and symbols are not objects (`@\x06`).
+        shared = RubyString(b"v")
+        literal = b'\x04\x08[\t:\x06k"\x06v;\x00@\x06'
+        self.assertEqual(
+            dump([RubySymbol("k"), shared, RubySymbol("k"), shared]), literal)
+        loaded = load(literal)
+        self.assertEqual(loaded[2], RubySymbol("k"))
+        self.assertIs(loaded[1], loaded[3])
+
+    def test_bignums_are_little_endian_with_a_sign(self):
+        # 2**30 is the first integer Marshal writes as a bignum:
+        # `l`, `+`, two 16-bit words (`\x07`), then 00 00 00 40.
+        self.assertEqual(dump(2 ** 30), b"\x04\x08l+\x07\x00\x00\x00@")
+        self.assertEqual(dump(-(2 ** 30) - 1),
+                         b"\x04\x08l-\x07\x01\x00\x00@")
+        self.assertEqual(load(b"\x04\x08l+\x07\x00\x00\x00@"), 2 ** 30)
+        self.assertEqual(load(b"\x04\x08l-\x07\x01\x00\x00@"),
+                         -(2 ** 30) - 1)
 
 
 class TestStrings(unittest.TestCase):

@@ -35,8 +35,14 @@ def check_tilesets(project: Project, map_ids: list[int], tables: _Tables,
                    budget: "WalkBudget | None" = None,
                    collected: "_Findings | None" = None,
                    checker: "_AssetChecker | None" = None) -> list[Finding]:
-    """VX Ace only: every map names a tileset, and tilesets name graphics."""
-    if not project.profile.has_tileset_database:
+    """VX Ace only: every map names a tileset, and tilesets name graphics.
+
+    By what a tileset row holds rather than whether the table exists: XP has
+    a Tilesets table too, of one graphic and seven autotiles, which this
+    sheet walk does not read. XP's maps still have their tileset_id checked
+    in `check_maps`.
+    """
+    if project.profile.tileset_layout != "ace":
         return []
     findings = _Findings.given(collected)
     tileset_ids = tables.ids("tilesets")

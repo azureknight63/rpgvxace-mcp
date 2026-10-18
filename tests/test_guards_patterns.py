@@ -15,6 +15,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+sys.path.insert(0, str(HERE))  # tool_case: bare-name import must work from the repo root
 
 
 from rpgvxace_mcp.tools.search_tools import (  # noqa: E402
@@ -40,6 +41,40 @@ from rpgvxace_mcp.tools.registry import (  # noqa: E402
 from tool_case import (  # noqa: E402
     ToolTest,
 )
+
+
+def _verdicts(patterns):
+    """What `check_pattern` says about each pattern: the exception, or None.
+
+    The measurement is a child process per pattern that clears the shape
+    gate, and it is waiting on that child, not computing, that costs the
+    time -- so the children are started together instead of one after
+    another. Only the *asking* is shared: each test still asserts on every
+    verdict itself, and an exception that is not a refusal is raised by the
+    test that reads it rather than swallowed here.
+    """
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+
+    def ask(pattern):
+        try:
+            check_pattern(pattern)
+        except Exception as exc:  # judged by the caller
+            return exc
+        return None
+
+    patterns = list(patterns)
+    workers = max(1, min(6, os.cpu_count() or 1))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return dict(zip(patterns, pool.map(ask, patterns)))
+
+
+def _refused(verdict):
+    """The verdict as `assertRaises((PatternTooCostly, ToolError))` took it."""
+    if verdict is not None and not isinstance(
+            verdict, (PatternTooCostly, ToolError)):
+        raise verdict
+    return verdict
 
 
 class TestSearchRefusesTheHangingPattern(ToolTest):
@@ -198,11 +233,23 @@ class TestSearchPatternsStayFast(ToolTest):
     # ten-plus seconds every refused pattern above was measured at.
     BUDGET_SECONDS = 2.0
 
+    # Asked once for the whole class: two tests read the same forty
+    # measurements, and each child that clears the shape gate is a process.
+    _attack_verdicts = None
+
+    @classmethod
+    def attack_verdicts(cls):
+        if cls._attack_verdicts is None:
+            cls._attack_verdicts = _verdicts(a[0] for a in cls.ATTACKS)
+        return cls._attack_verdicts
+
     def test_every_costly_pattern_is_refused(self):
+        verdicts = self.attack_verdicts()
         for pattern, _subject, why in self.ATTACKS:
             with self.subTest(shape=why, pattern=pattern[:28]):
-                with self.assertRaises((PatternTooCostly, ToolError)):
-                    check_pattern(pattern)
+                self.assertIsNotNone(
+                    _refused(verdicts[pattern]),
+                    "check_pattern allowed a pattern that must be refused")
 
     # The attacks whose shape arithmetic alone can see: a nullable atom
     # does not separate its neighbours, because it can match empty and the
@@ -244,13 +291,16 @@ class TestSearchPatternsStayFast(ToolTest):
         refusal added without the sentence.
         """
         figure = "{:,}".format(MAX_SUBJECT_BYTES)
+        verdicts = self.attack_verdicts()
         for pattern, _subject, why in self.ATTACKS:
             with self.subTest(shape=why):
-                with self.assertRaises((PatternTooCostly, ToolError)) as bad:
-                    check_pattern(pattern)
-                self.assertIn(figure, str(bad.exception),
+                bad = _refused(verdicts[pattern])
+                self.assertIsNotNone(
+                    bad, "check_pattern allowed a pattern that must be "
+                         "refused")
+                self.assertIn(figure, str(bad),
                               "this refusal does not say how much a plain "
-                              "search reads: " + str(bad.exception))
+                              "search reads: " + str(bad))
 
     def test_nothing_claims_a_search_reads_a_whole_string(self):
         """The phrase itself, gone from the source rather than corrected.
@@ -273,16 +323,23 @@ class TestSearchPatternsStayFast(ToolTest):
     def test_the_tool_refuses_them_too(self):
         """Through `search`, so the refusal reaches the caller as a ToolError."""
         for pattern, _subject, why in self.ATTACKS[:6]:
-            with self.subTest(shape=why):
-                with self.assertRaises(ToolError):
+            with self.subTest(shape=why, pattern=pattern[:28]):
+                with self.assertRaises(ToolError) as caught:
                     self.call("search", query=pattern, regex=True)
+                # The gate, and not a bad argument or a pattern that does
+                # not compile.
+                self.assertIn("cannot be interrupted", str(caught.exception))
 
     def test_every_allowed_pattern_finishes_quickly(self):
         import re
         import time
+        # Asked together; the timing below stays one at a time, because it
+        # is a measurement of this process and contention would be noise.
+        verdicts = _verdicts(self.ORDINARY)
         for pattern in self.ORDINARY:
             with self.subTest(pattern=pattern):
-                check_pattern(pattern)         # must not refuse a real pattern
+                if verdicts[pattern] is not None:
+                    raise verdicts[pattern]    # must not refuse a real pattern
                 compiled = re.compile(pattern, re.IGNORECASE)
                 start = time.perf_counter()
                 for subject in self.SUBJECTS:
@@ -607,6 +664,7 @@ class TestTheMeasurementReachesItsChild(unittest.TestCase):
         def spy(command, **kwargs):
             seen["command"] = command
             seen["input"] = kwargs.get("input")
+            seen["cwd"] = kwargs.get("cwd")
             return real_run(command, **kwargs)
 
         self.safety.subprocess.run = spy
@@ -657,16 +715,19 @@ class TestTheMeasurementReachesItsChild(unittest.TestCase):
                       "server's working directory is on its sys.path")
 
     def test_the_child_runs_somewhere_neutral(self):
-        """So the answer does not depend on how the client launched us."""
-        import subprocess as sp
-        import sys as _sys
+        """So the answer does not depend on how the client launched us.
+
+        Observed on what `measure_cost` spawns. This used to run its own
+        subprocess and check CPython's `-I`, so it passed whatever the server
+        did.
+        """
+        import os
         import tempfile
-        done = sp.run([_sys.executable, "-I", "-c",
-                       "import sys; print(sys.path[0])"],
-                      capture_output=True, text=True,
-                      cwd=tempfile.gettempdir())
-        self.assertNotEqual(done.stdout.strip(), tempfile.gettempdir(),
-                            "the working directory is still on sys.path")
+        seen = self.command_for("Gold[0-9]+")
+        self.assertIsNotNone(seen["cwd"], "the child inherits the server's "
+                                          "working directory")
+        self.assertEqual(os.path.realpath(seen["cwd"]),
+                         os.path.realpath(tempfile.gettempdir()))
 
     def test_the_subjects_travel_on_stdin(self):
         seen = self.command_for("Gold[0-9]+")
@@ -699,7 +760,9 @@ class TestTheChildRefusesAStdinItCannotParse(unittest.TestCase):
     def test_an_empty_pattern_is_refused_and_not_remembered(self):
         with self.assertRaises(self.safety.PatternTooCostly) as caught:
             self.safety.measure_cost("")
-        self.assertIn("%d" % self.safety.PROTOCOL_BROKEN_EXIT,
+        # Said in words, not as the exit code: "code 18" is an internal
+        # number on the one message a caller is supposed to act on.
+        self.assertIn("could not read the pattern",
                       str(caught.exception))
         self.assertNotIn("", self.safety._PASSED,
                          "an unmeasured pattern was cached as a pass")
@@ -1038,11 +1101,14 @@ class TestTheAlphabetFailsClosed(unittest.TestCase):
     pass for the life of the process, and the single-threaded server had no
     way out but being killed.
 
-    Nine levels because `_alphabet`'s depth cap is 8 and CPython emits a
-    SUBPATTERN node for `(?:...)` as well as for `(...)`.
+    One level under `MAX_ALPHABET_DEPTH`, the deepest the alphabet reads;
+    CPython emits a SUBPATTERN node for `(?:...)` as well as for `(...)`.
+    The cap was 8 when the defect was found and nine levels went past it;
+    built from the constant, the pattern follows the cap.
     """
 
-    NESTED = "(" * 9 + "[0-9]+[0-9]+!" + ")" * 9
+    NESTED = ("(" * (MAX_ALPHABET_DEPTH - 1) + "[0-9]+[0-9]+!"
+              + ")" * (MAX_ALPHABET_DEPTH - 1))
 
     def test_the_alphabet_sees_the_pattern_or_nothing_does(self):
         """The one assertion that is the regression test for this."""
@@ -1060,8 +1126,10 @@ class TestTheAlphabetFailsClosed(unittest.TestCase):
         to say which characters the pattern mentions.
         """
         too_deep = MAX_ALPHABET_DEPTH + 10
-        with self.assertRaises(PatternTooCostly):
+        with self.assertRaises(PatternTooCostly) as caught:
             check_pattern("(" * too_deep + "a" + ")" * too_deep)
+        # The depth cap, and not a shape rule or the length cap.
+        self.assertIn(str(MAX_ALPHABET_DEPTH), str(caught.exception))
 
     def test_a_pattern_at_the_cap_is_still_read(self):
         """The cap is a refusal, so it has to sit above what callers write."""
@@ -1069,16 +1137,19 @@ class TestTheAlphabetFailsClosed(unittest.TestCase):
         self.assertIn("P", _alphabet(list(_sre_parse.parse(deep))))
 
     def test_the_nested_pattern_does_not_reach_the_matcher(self):
-        """End to end: `search` refuses it rather than running it."""
-        with self.assertRaises((PatternTooCostly, ToolError)):
+        """The gate refuses it rather than letting it run."""
+        with self.assertRaises(PatternTooCostly):
             check_pattern(self.NESTED)
 
     def test_an_ordinary_nested_pattern_still_works(self):
         """Failing closed must not mean refusing what callers really write."""
-        for pattern in (r"(Potion|Elixir)", r"((Fire))", r"(a(b(c)))",
-                        r"^(Chapter \d+): (.*)$"):
+        patterns = (r"(Potion|Elixir)", r"((Fire))", r"(a(b(c)))",
+                    r"^(Chapter \d+): (.*)$")
+        verdicts = _verdicts(patterns)
+        for pattern in patterns:
             with self.subTest(pattern=pattern):
-                check_pattern(pattern)
+                if verdicts[pattern] is not None:
+                    raise verdicts[pattern]
 
     def test_the_alphabet_of_a_deep_pattern_reaches_its_characters(self):
         """Nine levels down, the digits and the bang are still found."""

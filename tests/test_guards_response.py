@@ -19,6 +19,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+sys.path.insert(0, str(HERE))  # tool_case: bare-name import must work from the repo root
 
 
 from rpgvxace_mcp import (  # noqa: E402
@@ -33,6 +34,7 @@ from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyHash,
     RubyObject,
     RubyString,
+    RubySymbol,
 )
 from rpgvxace_mcp.tools.registry import (  # noqa: E402
     REGISTRY,
@@ -44,9 +46,109 @@ from rpgvxace_mcp.tools.search_tools import (  # noqa: E402
 )
 from tool_case import (  # noqa: E402
     SharedObjectMap,
-    ToolTest,
-    ValidateTest,
+    ToolTest as _ToolTest,
+    ValidateTest as _ValidateTest,
 )
+
+
+class _BuildOnFirstUse:
+    """Defer the demo-project build until a test first touches the project.
+
+    `ToolTest.setUp` builds and opens a whole project for every method, and
+    a good many methods here only parse `src` or compare two tables and never
+    read it. `tmp`, `project` and `ctx` are what `setUp` creates, so each is a
+    property that runs the real `setUp` on first read or write -- a test that
+    uses the project gets exactly the fixture it always got, and one that does
+    not no longer pays for it. Writes build first too, so an early assignment
+    cannot be overwritten by a later build.
+
+    A class may also set `shared_fixture = True` when none of its tests
+    writes: it then gets one project for the class instead of one per
+    method. That is only safe while the claim is true, so it is enforced
+    rather than trusted -- every file's size and mtime is recorded when
+    the project is built and compared after each test, and a test that
+    changed anything fails by name.
+    """
+
+    _built = False
+    shared_fixture = False
+
+    @staticmethod
+    def _signature(root):
+        return sorted((str(path.relative_to(root)), path.stat().st_size,
+                       path.stat().st_mtime_ns)
+                      for path in root.rglob("*") if path.is_file())
+
+    @classmethod
+    def _shared(cls):
+        """The class's one project, built by the real `setUp` on first use."""
+        if "_shared_fixture" not in cls.__dict__:
+            holder = _ToolTest("setUp")
+            holder.engine, holder.read_only = cls.engine, cls.read_only
+            holder.setUp()
+            cls.addClassCleanup(holder.doCleanups)
+            cls._shared_fixture = (
+                holder, cls._signature(holder.tmp / "project"))
+        return cls._shared_fixture
+
+    def _assert_unchanged(self, holder, before):
+        self.assertEqual(
+            self._signature(holder.tmp / "project"), before,
+            "%s sets shared_fixture and a test wrote to the project it "
+            "shares" % type(self).__name__)
+
+    def setUp(self):
+        self._built = False
+
+    def _ensure_built(self):
+        if self._built:
+            return
+        self._built = True
+        if not self.shared_fixture:
+            super().setUp()
+            return
+        holder, before = self._shared()
+        self.addCleanup(self._assert_unchanged, holder, before)
+        self.__dict__.update(_tmp=holder.tmp, _project=holder.project,
+                             _ctx=holder.ctx)
+
+    @property
+    def tmp(self):
+        self._ensure_built()
+        return self.__dict__["_tmp"]
+
+    @tmp.setter
+    def tmp(self, value):
+        self._ensure_built()
+        self.__dict__["_tmp"] = value
+
+    @property
+    def project(self):
+        self._ensure_built()
+        return self.__dict__["_project"]
+
+    @project.setter
+    def project(self, value):
+        self._ensure_built()
+        self.__dict__["_project"] = value
+
+    @property
+    def ctx(self):
+        self._ensure_built()
+        return self.__dict__["_ctx"]
+
+    @ctx.setter
+    def ctx(self, value):
+        self._ensure_built()
+        self.__dict__["_ctx"] = value
+
+
+class ToolTest(_BuildOnFirstUse, _ToolTest):
+    pass
+
+
+class ValidateTest(_BuildOnFirstUse, _ValidateTest):
+    pass
 
 
 class TestScriptInflateLimit(ToolTest):
@@ -128,6 +230,8 @@ class TestMapGetBoundsItsEventSummary(SharedObjectMap, ToolTest):
         out = self.assert_bounded("map_get", map_id=1, include_events=True)
         rows = sum(len(event["pages"]) for event in out["events"])
         self.assertLessEqual(rows, map_read_tools.MAX_EVENT_SUMMARY_ROWS)
+        # And not nothing: "at most" is also what an empty summary satisfies.
+        self.assertGreater(rows, 0, "the crafted map produced no rows")
 
     def test_a_stopped_summary_says_so(self):
         self.craft_shared_map()
@@ -203,6 +307,9 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
         "MAX_DATA_FILE_BYTES": "how large a data file may be to read",
         "MAX_SCRIPT_BYTES": "how large the script pack may be to read",
         "MAX_GAME_INI_BYTES": "how large Game.ini may be to read",
+        "MAX_CHANGE_LINE_BYTES": "how long one line of this server's "
+                                 "own change log may be before it is "
+                                 "skipped as unreadable",
         "MAX_TABLE_CELLS": "cells in one RGSS Table being read",
         "MAX_PAYLOAD_BYTES": "a base64 payload in a write, named in its own "
                              "refusal along with the size that was sent",
@@ -214,6 +321,17 @@ class TestEveryCallerFacingCeilingIsDeclared(unittest.TestCase):
         # truncation, nothing in a reply. A caller cannot detect it and has
         # nothing to do about it, which is the test for "internal" here.
         "MAX_CACHED_BYTES": "how much decoded file the cache keeps",
+        # The same test for decoded tileset sheets: past it a sheet is
+        # decoded again, which costs time and shows nowhere in a reply.
+        "MAX_CACHED_SHEETS": "how many decoded sheets map_render keeps",
+        # The live bridge's wire. The bridge itself caps every string at
+        # MAX_BRIDGE_TEXT and every list at MAX_STATE_ENTRIES, both
+        # advertised, so a reply that reaches these was not written by it;
+        # they bound what this server will parse, and nothing a caller can
+        # ask for changes whether they are reached.
+        "MAX_WIRE_BYTES": "one message file read from the live bridge",
+        "MAX_WIRE_DEPTH": "how deep a live bridge reply may nest",
+        "MAX_WIRE_TEXT": "one string in a live bridge reply",
     }
 
     CEILING = re.compile(
@@ -499,9 +617,19 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
                         "%s rendered %d characters" % (what, len(line)))
 
     def test_one_long_string_parameter_is_capped(self):
-        """Code 401 is a text line: the whole parameter is the message."""
+        """Code 401 is a text line: the whole parameter is the message.
+
+        Short is not enough: the line has to be the *decoded* text, cut. A
+        `RubyString` has a bounded `repr` of its own now, so a renderer that
+        skipped the codec and printed the object would also be short -- and
+        wrong, which is how this test's guard came to read VACUOUS.
+        """
         huge = self.project.codec.make_string("A" * self.LONG)
-        self.assert_short(self.line_for(401, [huge]), "a text line")
+        line = self.line_for(401, [huge])
+        self.assert_short(line, "a text line")
+        self.assertIn("AAAA", line)
+        self.assertNotIn("RubyString(", line,
+                         "the text was printed as an object, not decoded")
 
     def test_a_long_choice_list_is_capped(self):
         """Show Choices renders every choice, and the list comes from a file."""
@@ -524,6 +652,8 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
             return str(value)
 
         rendered(list(range(self.FANOUT)), counting)
+        # Rendered at all: "at most" is also true of a renderer never called.
+        self.assertGreater(len(calls), 0, "nothing was rendered")
         self.assertLessEqual(
             len(calls), MAX_NAMES_LISTED,
             "%d of %d entries were rendered to produce a result that keeps "
@@ -537,8 +667,11 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
     def test_a_long_string_in_a_specced_field_is_capped(self):
         """The `field=value` branch renders each declared field with `_text`."""
         huge = self.project.codec.make_string("A" * self.LONG)
-        self.assert_short(self.line_for(101, [huge, 0, 0, 2]),
-                          "a Show Text face field")
+        line = self.line_for(101, [huge, 0, 0, 2])
+        self.assert_short(line, "a Show Text face field")
+        self.assertIn("AAAA", line)
+        self.assertNotIn("RubyString(", line,
+                         "the field was printed as an object, not decoded")
 
     def test_an_unknown_condition_kind_is_capped(self):
         """The last line of `describe_condition` renders the rest of the list.
@@ -587,6 +720,127 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
         self.assertIn("variable", self.line_for(301, [1, 5, False, False]))
         self.assertIn("troop 5", self.line_for(301, [0, 5, False, False]))
         self.assertIn("random", self.line_for(301, [2, 0, False, False]))
+
+    # One parameter slot out of the file can hold anything Marshal can write.
+    # Both values are small on disk and are the two that `%s` and `dict.get`
+    # mishandle: an Array is unhashable, and its `repr` is as long as it is
+    # wide; an Integer past 4300 digits raises on conversion to a string, and
+    # `%d` of an infinity or a NaN raises where `%s` of one does not.
+    BAD_VALUES = {
+        "an array": [1] * 50_000,
+        "a huge integer": 10 ** 5000,
+        "an infinity": float("inf"),
+        "a NaN": float("nan"),
+        "an array holding a huge integer": [10 ** 5000],
+        "a megabyte string": RubyString(b"A" * 1_000_000),
+        "a megabyte symbol": RubySymbol("S" * 1_000_000),
+    }
+    # A line is a few hundred characters plus, at most, twenty of what the
+    # file holds, each bounded: well under this, and far under a megabyte.
+    LINE_CEILING = 8_000
+    ENGINES = ("vx_ace", "vx", "xp")
+
+    def test_no_parameter_slot_of_any_command_can_stop_the_line(self):
+        """Every code the engine names, every slot, both bad values.
+
+        The population is the engine's own command table, not the list of
+        sites someone found: `summarize` looked codes up in a dict at six
+        places with a raw file value for the key (a Conditional Branch kind,
+        a switch operation, a comparison, a variable operation, a goods
+        kind), so an Array there raised `unhashable type` and one command
+        made `event_get`, `search` and `validate` fail for the whole map,
+        while an Integer past 4300 digits raised at the `%s` that formatted
+        it. A listed site is a site that got fixed; this finds the next.
+        """
+        codec = self.project.codec
+        slots = 8
+        tried = 0
+        failures = []
+        for engine in self.ENGINES:
+            for code in sorted(command_module.command_table(engine)):
+                for slot in range(slots):
+                    for what, bad in self.BAD_VALUES.items():
+                        params = [0] * slots
+                        params[slot] = bad
+                        command = new_event_command(code, 0, params)
+                        tried += 1
+                        try:
+                            line = command_module.summarize(
+                                command, codec, engine)
+                        except Exception as exc:  # noqa: BLE001
+                            failures.append("%s code %d slot %d (%s): %s: %s"
+                                            % (engine, code, slot, what,
+                                               type(exc).__name__,
+                                               str(exc)[:50]))
+                            continue
+                        if len(line) > self.LINE_CEILING:
+                            failures.append("%s code %d slot %d (%s): %d "
+                                            "characters" % (engine, code,
+                                                            slot, what,
+                                                            len(line)))
+        # A scan that tried nothing approves of everything.
+        self.assertGreater(tried, 5000, "the table walk found no commands")
+        self.assertEqual(failures, [],
+                         "%d of %d slot values stopped or bloated a line:\n  %s"
+                         % (len(failures), tried, "\n  ".join(failures[:25])))
+
+    def test_a_command_code_that_is_a_huge_integer_is_named_not_formatted(self):
+        """`@code` goes through `as_int`, which accepts any Integer at all."""
+        line = command_module.summarize(
+            new_event_command(10 ** 5000, 0, []), self.project.codec)
+        self.assertIn("bits", line)
+
+    def test_a_shared_huge_array_is_not_copied_for_every_command(self):
+        """One Array linked into the slot of every command is a few bytes each.
+
+        Copying it per command made each line cost the length of the Array
+        where `rendered` had only ever touched twenty entries of it: the
+        wrapper holds a short prefix and says how long the whole was.
+        """
+        big = list(range(1_000_000))
+        wrapped = command_module._display_safe(big)
+        self.assertEqual(len(wrapped), 1_000_000, "the true length is lost")
+        self.assertLessEqual(list.__len__(wrapped), 1_000,
+                             "the wrapper holds %d entries of a shared Array"
+                             % list.__len__(wrapped))
+        line = command_module.summarize(
+            new_event_command(102, 0, [big, 0]), self.project.codec)
+        self.assertIn("more", line, "a clipped list does not say it is longer")
+
+    def test_a_wrapped_list_renders_exactly_as_the_files_own_would(self):
+        """The wrapper is for what crashes; for what does not it must be silent.
+
+        A list in a text slot is `<list>` to `decoded_text`, which names the
+        type, and `brief` dispatches on the type's name too: a wrapper that is
+        called something else leaks its own name into the line and truncates
+        a long list a second time with a different marker.
+        """
+        codec = self.project.codec
+        line = command_module.summarize(
+            new_event_command(401, 0, [[1, 2]]), codec)
+        self.assertIn("<list>", line)
+        self.assertNotIn("_BoundedList", line)
+        from rpgvxace_mcp.convert import brief
+        plain = list(range(1000))
+        wrapped = command_module._display_safe(list(plain))
+        self.assertIsInstance(wrapped, list)
+        self.assertEqual(brief(wrapped), brief(plain))
+        self.assertEqual(str(wrapped), brief(plain))
+
+    def test_two_different_huge_integers_stay_different(self):
+        """Clamped for printing and lookup, not for telling one from another.
+
+        `_id_range` collapses `start == end` into one id: with both clamped
+        to the same number, 2**70..2**80 read as a single switch.
+        """
+        codec = self.project.codec
+        line = command_module.summarize(
+            new_event_command(121, 0, [2 ** 70, 2 ** 80, 0]), codec)
+        self.assertIn("71 bits", line)
+        self.assertIn("81 bits", line)
+        same = command_module.summarize(
+            new_event_command(121, 0, [2 ** 70, 2 ** 70, 0]), codec)
+        self.assertNotIn("81 bits", same)
 
     def test_a_command_code_that_is_not_a_number_is_rendered_anyway(self):
         """`@code` is read from the file, and every other reader coerces it.
@@ -644,6 +898,8 @@ class TestARawPathCannotBeUnboundedlyLong(ToolTest):
     know about one.
     """
 
+    shared_fixture = True
+
     def test_a_path_with_too_many_segments_is_refused(self):
         long_path = "/".join(["events"] + ["1"] * 5000)
         with self.assertRaises(ToolError) as caught:
@@ -655,7 +911,9 @@ class TestARawPathCannotBeUnboundedlyLong(ToolTest):
         long_path = "/".join(["events"] + ["1"] * 5000)
         with self.assertRaises(ToolError) as caught:
             self.call("raw_data", op="get", map_id=1, path=long_path)
-        self.assertIn(str(MAX_PATH_SEGMENTS), str(caught.exception))
+        # The clause that states the ceiling, not the digits (which "5001"
+        # also holds).
+        self.assertIn("at most %d" % MAX_PATH_SEGMENTS, str(caught.exception))
 
     def test_an_ordinary_path_still_resolves(self):
         out = self.call("raw_data", op="get", map_id=1, path="events/1/name")
@@ -764,12 +1022,21 @@ class TestTheTileRectangleUsesTheBuffer(ToolTest):
                                  % (x, y))
 
     def test_a_write_round_trips_through_the_file(self):
-        """The mask `Table.set` used to apply has to still be applied."""
+        """The mask `Table.set` used to apply has to still be applied.
+
+        The edges of the cell: 1 to 4 are untouched by any mask or sign
+        handling, so they could not show one. 0 and 0xFFFF are where a wrong
+        mask or typecode changes the value, and one past it is refused.
+        """
+        edge = [[0, 65535], [2816, 1]]
         self.call("map_tiles", op="write", map_id=1, x=0, y=0, z=0,
-                  width=2, height=2, rows=[[1, 2], [3, 4]])
+                  width=2, height=2, rows=edge)
         out = self.call("map_tiles", op="read", map_id=1, x=0, y=0, width=2,
                         height=2, z=0)
-        self.assertEqual(out["rows"], [[1, 2], [3, 4]])
+        self.assertEqual(out["rows"], edge)
+        with self.assertRaises(ToolError):
+            self.call("map_tiles", op="write", map_id=1, x=0, y=0, z=0,
+                      width=1, height=1, rows=[[65536]])
 
 
 class TestAListingBuildsOnlyItsWindow(ToolTest):
@@ -781,6 +1048,8 @@ class TestAListingBuildsOnlyItsWindow(ToolTest):
     says it "bounds the response and not the work or the memory".
     """
 
+    shared_fixture = True
+
     def test_db_list_builds_only_the_window(self):
         out = self.call("db_list", table="items", limit=1)
         self.assertEqual(len(out["entries"]), 1)
@@ -788,9 +1057,15 @@ class TestAListingBuildsOnlyItsWindow(ToolTest):
                            "the count must still say how many matched")
 
     def test_map_list_takes_a_window(self):
-        out = self.call("map_list", limit=1)
+        from unittest import mock
+        with mock.patch.object(self.ctx.project, "map_file",
+                               wraps=self.ctx.project.map_file) as built:
+            out = self.call("map_list", limit=1)
         self.assertEqual(len(out["maps"]), 1)
         self.assertGreater(out["matching_maps"], 1)
+        # A row's file name is asked for as the row is built: one row built,
+        # one asked. Slicing after building all of them asks for each.
+        self.assertEqual(built.call_count, 1)
 
     def test_map_list_pages(self):
         first = self.call("map_list", limit=1)["maps"][0]["id"]
@@ -815,9 +1090,11 @@ class TestAPathCannotOutscanItsFile(ToolTest):
 
     def craft_self_referencing_hash(self, pairs):
         game_map = self.project.load_map(1)
-        events = RubyHash()
-        for key in range(pairs):
-            events.set(key, key)
+        # Built from the pair list in one call. `set` is O(1) for an
+        # indexable key now (it was a linear scan per insert, which made
+        # 20,000 of them ~25s of this test), so a loop of `set` would build
+        # the same hash; the pair list is just the shorter way to say it.
+        events = RubyHash([(key, key) for key in range(pairs)])
         events.set(9999, events)          # legal Marshal: a hash in itself
         game_map.set("events", events)
         self.project.path_for(self.project.map_file(1)).write_bytes(

@@ -7,6 +7,7 @@ changed underneath us; containment keeps every path inside the project; and
 `write_reply` makes a preview and its act one sentence.
 """
 
+import ast
 import shutil
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+sys.path.insert(0, str(HERE))  # tool_case: bare-name import must work from the repo root
 
 from build_project import build  # noqa: E402
 
@@ -419,12 +421,51 @@ class TestMapWritesStayConsistent(ToolTest):
         self.assertIn("values run 0 to", str(caught.exception))
 
     def test_a_region_id_beyond_the_layer_is_refused(self):
+        """The editor numbers regions 0 to 63. Layer 3 stores one as 256
+        times its number, so 2816 -- which this used to send raw and expect
+        refused -- is region 11 and legal; the region view's ceiling is
+        where 63 is enforced now."""
         if not self.ace:
             self.skipTest("layer 3 holds region ids on VX Ace only")
         with self.assertRaises(ToolError) as caught:
             self.call("map_tiles", map_id=1, op="fill", x=0, y=0, width=1,
-                      height=1, z=3, tile_id=2816)
+                      height=1, view="region", tile_id=64)
         self.assertIn("0 to 63", str(caught.exception))
+
+    def test_a_shadow_mask_beyond_four_bits_is_refused(self):
+        if not self.ace:
+            self.skipTest("layer 3 holds shadow bits on VX Ace only")
+        with self.assertRaises(ToolError) as caught:
+            self.call("map_tiles", map_id=1, op="fill", x=0, y=0, width=1,
+                      height=1, view="shadow", tile_id=16)
+        self.assertIn("0 to 15", str(caught.exception))
+
+    def test_painting_a_region_keeps_the_shadow_and_back(self):
+        """A region and the shadow under it share one word of layer 3."""
+        if not self.ace:
+            self.skipTest("layer 3 is the packed layer on VX Ace only")
+        window = dict(map_id=1, x=0, y=0, width=2, height=1)
+        self.call("map_tiles", op="write", z=3, rows=[[5, 15]], **window)
+        self.call("map_tiles", op="fill", view="region", tile_id=7, **window)
+        self.assertEqual(self.call("map_tiles", z=3, **window)["rows"],
+                         [[(7 << 8) | 5, (7 << 8) | 15]])
+        self.call("map_tiles", op="fill", view="shadow", tile_id=0, **window)
+        self.assertEqual(self.call("map_tiles", z=3, **window)["rows"],
+                         [[7 << 8, 7 << 8]])
+
+    def test_a_raw_word_with_bits_no_field_holds_is_refused(self):
+        """Layer 3 holds region * 256 + shadow and nothing else: bits 4-7
+        and 14-15 are read by nothing in RGSS3 and no real map sets them, so
+        a raw value using them is a mistake (a tile id sent to the wrong
+        layer, say) rather than something to store."""
+        if not self.ace:
+            self.skipTest("layer 3 is the packed layer on VX Ace only")
+        for bad in (16, 0x80, 64 << 8, 0xFFFF):
+            with self.subTest(value=bad):
+                with self.assertRaises(ToolError) as caught:
+                    self.call("map_tiles", map_id=1, op="fill", x=0, y=0,
+                              width=1, height=1, z=3, tile_id=bad)
+                self.assertIn("region * 256 + shadow", str(caught.exception))
 
     def test_a_bad_row_writes_none_of_the_rows(self):
         before = [self.project.load_map(1).get("data").get(x, 0, 0)
@@ -553,9 +594,22 @@ class TestAMapPatchCannotMoveAnEvent(ToolTest):
         self.assertEqual(event.get("x"), 5)
 
     def test_both_guards_read_the_same_list(self):
-        """The two lists had drifted, which is what opened the hole."""
-        self.assertEqual(tuple(raw_tools.STRUCTURAL_MAP_FIELDS),
-                         tuple(STRUCTURAL_MAP_FIELDS))
+        """The two lists had drifted, which is what opened the hole.
+
+        Every guard reads the schema's own tuple: the same object, not an equal
+        one, so a module that gained a shorter local copy of its own fails.
+        (Comparing `raw_tools`' name with the schema's was a tautology -- it is
+        an import of it -- and never looked at `map_edit_tools`, the other
+        guard.)
+        """
+        from rpgvxace_mcp.tools import map_edit_tools
+        self.assertIs(raw_tools.STRUCTURAL_MAP_FIELDS, STRUCTURAL_MAP_FIELDS)
+        self.assertIs(map_edit_tools.STRUCTURAL_MAP_FIELDS,
+                      STRUCTURAL_MAP_FIELDS)
+        # And what is in it, from outside the code: the four fields a map's
+        # other fields have to agree with.
+        self.assertEqual(set(STRUCTURAL_MAP_FIELDS),
+                         {"width", "height", "data", "events"})
 
 
 class TestDiscardedTileCountIsRight(ToolTest):
@@ -737,6 +791,21 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
         "raw_data op=get": "reads one value by path",
         "scripts op=list": "lists the script slots",
         "scripts op=get": "reads one slot's code",
+        # `live` changes a running scratch copy of the game, never a project
+        # file, so there is no write to preview. Each op still needs its own
+        # line: an excuse names one op, so a new op is not excused by these.
+        "live op=start": "copies the project to a scratch folder and runs it",
+        "live op=stop": "ends the scratch game and deletes the copy",
+        "live op=status": "reports on the scratch game",
+        "live op=state": "reads the running game's state",
+        "live op=input": "presses keys in the scratch game",
+        "live op=step": "runs the scratch game for some frames",
+        "live op=pause": "pauses the scratch game",
+        "live op=resume": "lets the scratch game run",
+        "live op=set": "changes the running game's switches and variables",
+        "live op=teleport": "moves the player in the running game",
+        "live op=screenshot": "captures the scratch game's window",
+        "live op=eval": "runs Ruby in the scratch game",
     }
 
     def setUp(self):
@@ -810,6 +879,27 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
             ("map_tiles op=write", "map_tiles",
              dict(op="write", map_id=1, x=0, y=0, z=0, width=2, height=2,
                   rows=[[0, 0], [0, 0]], dry_run=True)),
+            ("map_paint op=fill", "map_paint",
+             dict(op="fill", map_id=1, kind="A2:1", x=0, y=0, width=2,
+                  height=2, dry_run=True)),
+            ("map_paint op=paint", "map_paint",
+             dict(op="paint", map_id=1, kind="A2:1", cells=[[1, 1]],
+                  dry_run=True)),
+            ("map_paint op=border", "map_paint",
+             dict(op="border", map_id=1, kind="A2:1", x=0, y=0, width=3,
+                  height=3, dry_run=True)),
+            ("map_paint op=region", "map_paint",
+             dict(op="region", map_id=1, region=3, x=0, y=0, width=2,
+                  height=2, dry_run=True)),
+            ("map_paint op=room", "map_paint",
+             dict(op="room", map_id=2, floor="A2:0", wall="A4:8", x=3, y=4,
+                  width=4, height=3, dry_run=True)),
+            ("map_paint op=corridor", "map_paint",
+             dict(op="corridor", map_id=2, floor="A2:0", wall="A4:8", x=1,
+                  y=6, to_x=9, to_y=6, dry_run=True)),
+            ("map_paint op=dungeon", "map_paint",
+             dict(op="dungeon", map_id=2, floor="A2:0", wall="A4:8",
+                  room_min=2, room_max=3, rooms=2, dry_run=True)),
             ("scripts op=set", "scripts",
              dict(op="set", index=self.slot, name="Renamed", dry_run=True)),
             ("raw_data op=set", "raw_data",
@@ -999,11 +1089,30 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
 
     def test_nothing_reached_the_disk(self):
         """The claim the whole shape exists to make."""
+        import hashlib
+
+        def disk_state():
+            # Every file under the project, and the folders' listing: a dry
+            # run that wrote Map001, Scripts, a snapshot or the change log
+            # was invisible to a comparison of Items alone.
+            root = self.project.root
+            return {str(path.relative_to(root)): (
+                        hashlib.sha1(path.read_bytes()).hexdigest()
+                        if path.is_file() else "dir")
+                    for path in sorted(root.rglob("*"))}
+
+        seen = 0
         for label, name, arguments in self.previews():
             with self.subTest(op=label):
-                before = self.data_bytes("Items")
+                before = disk_state()
                 self.call(name, **arguments)
-                self.assertEqual(self.data_bytes("Items"), before)
+                after = disk_state()
+                self.assertEqual(
+                    after, before,
+                    "%s wrote to the project on a dry run: %s" % (
+                        label, sorted(set(after.items()) ^ set(before.items()))))
+                seen += 1
+        self.assertGreater(seen, 3, "almost no previews were compared")
 
     def test_a_real_write_still_reads_as_done(self):
         out = self.call("db_edit", table="items",
@@ -1151,8 +1260,13 @@ class TestAForeignBackupDirectoryIsSkipped(ToolTest):
         self.project.snapshot(label="one")
         self.project.snapshot(label="two")
         link, _ = self.plant_junction()
+        stale = self.stale_snapshot("20250101-000000-old")
         would = self.project.prune_backups(dry_run=True)
         self.assertNotIn(link.name, would)
+        # What it would remove is listed, and nothing was: "not the foreign
+        # one" is also what a dry run that lists nothing says.
+        self.assertIn(stale.name, would)
+        self.assertTrue(stale.exists())
 
 
 class TestOneRuleForBeingOnTheMap(ToolTest):
@@ -1211,36 +1325,66 @@ class TestOneRuleForBeingOnTheMap(ToolTest):
                         height=15, dry_run=True)
         self.assertNotIn("outside the map", str(out))
 
+    @staticmethod
+    def by_hand(source):
+        """The comparisons in `source` that write the rule out by hand.
+
+        A bare coordinate (`x`, `y`, or an attribute of that name) ordered
+        against a bare size (`width`, `height`) in any position, so the usual
+        `0 <= x < width` is seen as well as `x < width`. Precise on purpose:
+        three expressions in this tree mention a size and are not this rule --
+        the unusable-size refusal (`width < 1 or height < 1`), a resize
+        shortcut (`width >= data.xsize`), and a rectangle against a table
+        (`self.x + self.width > data.xsize`) -- and an approximate scan
+        flagged all three. None of them has a bare coordinate among its
+        operands.
+        """
+        found = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Compare):
+                continue
+            if not any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
+                       for op in node.ops):
+                continue
+            operands = [node.left, *node.comparators]
+            coordinate = any(
+                (isinstance(o, ast.Name) and o.id in ("x", "y"))
+                or (isinstance(o, ast.Attribute) and o.attr in ("x", "y"))
+                for o in operands)
+            size = any(isinstance(o, ast.Name)
+                       and o.id in ("width", "height") for o in operands)
+            if coordinate and size:
+                found.append(ast.unparse(node))
+        return found
+
+    def test_the_by_hand_scan_can_tell_the_forms_apart(self):
+        """The instrument, fed what it must flag and what it must not."""
+        for source in ("x < width", "0 <= x < width", "y >= height",
+                       "0 <= y < height", "event.x >= width"):
+            with self.subTest(flagged=source):
+                self.assertTrue(self.by_hand(source), source)
+        for source in ("width < 1 or height < 1", "width >= data.xsize",
+                       "self.x + self.width > data.xsize", "x == 3"):
+            with self.subTest(allowed=source):
+                self.assertEqual(self.by_hand(source), [], source)
+
     def test_no_module_writes_the_rule_out_by_hand(self):
         """The rule, not one copy of it: no bare coordinate comparison left."""
-        import ast
         root = Path(__file__).resolve().parent.parent / "src" / "rpgvxace_mcp"
         offenders = []
+        scanned = users = 0
         for path in sorted(root.rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
             if path.name == "schema.py":
                 continue        # where `on_map` lives
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if not isinstance(node, ast.Compare):
-                    continue
-                # A bare coordinate ordered against a bare size: `x < width`,
-                # `y >= height`. Precise on purpose. Three expressions in
-                # this tree mention both a width and a height and are not
-                # this rule -- the unusable-size refusal (`width < 1 or
-                # height < 1`), a resize shortcut (`width >= data.xsize`),
-                # and a rectangle against a table (`self.x + self.width >
-                # data.xsize`) -- and an approximate scan flagged all three.
-                if not (isinstance(node.left, ast.Name)
-                        and node.left.id in ("x", "y")):
-                    continue
-                if not any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
-                           for op in node.ops):
-                    continue
-                sizes = [c.id for c in node.comparators
-                         if isinstance(c, ast.Name)
-                         and c.id in ("width", "height")]
-                if sizes:
-                    offenders.append("%s: %s" % (path.name,
-                                                 ast.unparse(node)))
+            scanned += 1
+            users += "on_map(" in source
+            offenders += ["%s: %s" % (path.name, text)
+                          for text in self.by_hand(source)]
+        # The scan read the tree and the tree uses the rule it points to: a
+        # wrong `root`, or a rename of the variables, left this empty and green.
+        self.assertGreater(scanned, 20, "the scan read almost nothing")
+        self.assertGreater(users, 1, "no module outside schema.py asks on_map")
         self.assertEqual(offenders, [],
                          "these compare a coordinate against a map size "
                          "instead of asking on_map")

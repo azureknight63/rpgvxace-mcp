@@ -74,6 +74,8 @@ def check_event_pages(project: Project, map_ids: list[int],
     # `_AssetChecker.check` returns on its first line. Held by
     # `TestAFullAssetCheckerDoesNotStopThePageRules`, because this has been
     # proposed as a fix twice and a comment is not a thing that fails.
+    releasing = (_XP_PAGE_RELEASES_CONTROL if project.engine == "xp"
+                 else PAGE_RELEASES_CONTROL)
     for map_id, game_map in iter_maps(project, map_ids):
         if checker is not None:
             map_assets(checker, map_id, game_map)
@@ -81,6 +83,8 @@ def check_event_pages(project: Project, map_ids: list[int],
         if not isinstance(events, RubyHash):
             continue
         for event_id, event in events.sorted_items():
+            if _int(event_id) is None:
+                continue  # a key that is not an id would be quoted into findings
             # Two findings per event at most, and the event count comes out of
             # the file: a crafted map that shares one event object across
             # forty thousand slots produced forty thousand findings here.
@@ -102,7 +106,7 @@ def check_event_pages(project: Project, map_ids: list[int],
             findings.extend(_check_shadowing(map_id, event_id, name,
                                              pages))
             findings.extend(_check_autorun(map_id, event_id, name, pages,
-                                           budget))
+                                           budget, releasing))
             if checker is not None:
                 for index, page in enumerate(pages):
                     page_graphic(checker, map_id, event_id, name,
@@ -155,14 +159,30 @@ CONTROL_RELEASING_CODES = frozenset({CODE_TRANSFER_PLAYER, CODE_ERASE_EVENT,
 
 # Commands that might release control somewhere this file cannot follow: a
 # common event that transfers, or a script calling reserve_transfer or goto. A
-# page containing one of these is left alone rather than reported.
+# page containing one of these is left alone rather than reported: suppressing
+# a real finding now and then costs less than sending an agent to edit a
+# cutscene that works.
 OPAQUE_ESCAPE_CODES = frozenset({CODE_CALL_COMMON_EVENT, CODE_SCRIPT,
                                  CODE_SCRIPT_MORE})
 
 
+# Either kind ends the rule's interest in the page, so one scan answers for
+# both: `_has_code` does not short-circuit across two calls, and this list's
+# length is what the charge above pays for.
+PAGE_RELEASES_CONTROL = OPAQUE_ESCAPE_CODES | CONTROL_RELEASING_CODES
+
+# XP's: its Erase Event is 116, and its 214 is not a command at all. The
+# other five codes are XP's too (command_201, 353, 354, 117 and 355).
+_XP_ERASE_EVENT = 116
+_XP_PAGE_RELEASES_CONTROL = ((PAGE_RELEASES_CONTROL - {CODE_ERASE_EVENT})
+                             | {_XP_ERASE_EVENT})
+
+
 def _check_autorun(map_id: int, event_id: int, name: str,
                    pages: list[Any],
-                   budget: "WalkBudget | None" = None) -> list[Finding]:
+                   budget: "WalkBudget | None" = None,
+                   releasing: AbstractSet[int] = PAGE_RELEASES_CONTROL
+                   ) -> list[Finding]:
     """Report a last page that is Autorun and never gives control back.
 
     Only the last page, because that is the one whose conditions win. A
@@ -180,21 +200,19 @@ def _check_autorun(map_id: int, event_id: int, name: str,
     if last.get("trigger") != TRIGGER_AUTORUN:
         return []
     commands = _seq(last.get("list"))
-    # Charged before the two scans, not after. `_has_code` walks the whole
-    # list twice and neither pass short-circuits on the codes a crafted file
-    # simply omits, so a 2.5 MB map -- one command, a @list of a million
-    # links to it, one unconditional Autorun page, an events hash of
-    # 100,000 links to one event -- put two unbudgeted million-step scans
-    # behind a per-event charge of two.
+    # Charged before the scan, not after. `_has_code` does not
+    # short-circuit on the codes a crafted file simply omits, so a 2.5 MB
+    # map -- one command, a @list of a million links to it, one
+    # unconditional Autorun page, an events hash of 100,000 links to one
+    # event -- put an unbudgeted million-step scan behind a per-event
+    # charge of two. It was two such scans until the two sets were
+    # merged.
     if budget is not None and not budget.spend(len(commands)):
         return []
-    if _has_code(commands, OPAQUE_ESCAPE_CODES):
-        # A common event or a script could transfer the player, erase the event
-        # or change scene, and this file cannot see through either. Suppressing
-        # the finding costs a real one now and then; reporting it would send an
-        # agent editing a cutscene that works.
-        return []
-    if _has_code(commands, CONTROL_RELEASING_CODES):
+    # One scan for both sets. `_has_code` walked the list twice for two
+    # branches that both return [], and the charge above is per command --
+    # the reason each of the two sets has is on its own definition.
+    if _has_code(commands, releasing):
         return []
     return [Finding(
         WARNING, "unstoppable_autorun",

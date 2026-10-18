@@ -11,7 +11,22 @@ from typing import Any
 
 from ..project import MAX_MAP_ID
 from ..rubytypes import CELL_MASK, Table
-from .map_common import MAX_CELLS_PER_READ, _check_budget, _check_tile
+from ..schema import (
+    MAX_REGION_ID,
+    MAX_SHADOW,
+    META_LAYER,
+    TILE_LAYER_COUNT,
+    region_of,
+    shadow_of,
+    with_region,
+    with_shadow,
+)
+from .map_common import (
+    MAX_CELLS_PER_READ,
+    TILE_VIEWS,
+    _check_budget,
+    _check_tile,
+)
 from .registry import (
     ARR,
     Context,
@@ -38,11 +53,19 @@ from .registry import (
 # used to accept the other's argument and ignore it -- a fill carrying rows
 # reported "filled ..." and never looked at them.
 TILE_OP_ARGS = {
-    "read": {"op", "map_id", "x", "y", "width", "height", "z"},
-    "fill": {"op", "map_id", "x", "y", "width", "height", "z", "tile_id",
-             "dry_run"},
-    "write": {"op", "map_id", "x", "y", "width", "height", "z", "rows",
-              "dry_run"},
+    "read": {"op", "map_id", "x", "y", "width", "height", "z", "view"},
+    "fill": {"op", "map_id", "x", "y", "width", "height", "z", "view",
+             "tile_id", "dry_run"},
+    "write": {"op", "map_id", "x", "y", "width", "height", "z", "view",
+              "rows", "dry_run"},
+}
+
+
+# Each view of a layer-3 word: how to read the part, and how to put a new
+# value for it into the word without disturbing the other part.
+_VIEW_CODECS = {
+    "region": (region_of, with_region),
+    "shadow": (shadow_of, with_shadow),
 }
 
 
@@ -54,12 +77,23 @@ class _Rect:
     here rather than in a body that then branches three ways.
     """
 
-    __slots__ = ("data", "map_id", "x", "y", "width", "height", "z")
+    __slots__ = ("data", "map_id", "x", "y", "width", "height", "z", "view")
 
     def __init__(self, ctx: Context, args: dict[str, Any], map_id: int,
                  data: Table):
         self.data = data
         self.map_id = map_id
+        # Resolved first, because it decides which layer z defaults to.
+        self.view = one_of(args, "view", list(TILE_VIEWS), TILE_VIEWS[0])
+        if self.view != "raw" and not ctx.project.profile.has_region_layer:
+            raise ToolError(
+                "view=%s reads the shadow and region layer of a VX Ace map. "
+                "This is an %s project: its maps have %d tile layers and no "
+                "region layer (%s)."
+                % (self.view, ctx.project.profile.label, TILE_LAYER_COUNT,
+                   "encounter areas are in the areas table"
+                   if ctx.project.profile.has_encounter_areas else
+                   "each map lists the troops it can meet in encounter_list"))
         if data.xsize < 1 or data.ysize < 1:
             # Named here, because every bound below is derived from these two:
             # an empty table used to be reported as "the default for x must be
@@ -75,7 +109,14 @@ class _Rect:
         # could not act on.
         self.x = opt_int_default(args, "x", 0, minimum=0, maximum=data.xsize - 1)
         self.y = opt_int_default(args, "y", 0, minimum=0, maximum=data.ysize - 1)
-        self.z = opt_int_default(args, "z", 0, minimum=0)
+        self.z = opt_int_default(args, "z",
+                                 0 if self.view == "raw" else META_LAYER,
+                                 minimum=0)
+        if self.view != "raw" and self.z != META_LAYER:
+            raise ToolError(
+                "view=%s is part of layer %d, the shadow and region layer; "
+                "layer %d holds tile ids. Leave z out, or send z=%d."
+                % (self.view, META_LAYER, self.z, META_LAYER))
         if self.z >= data.zsize:
             # Named rather than bounded generically, so the message says which
             # layers this map actually has.
@@ -101,6 +142,7 @@ class _Rect:
     def describe(self, ctx: Context) -> dict[str, Any]:
         return {"map_id": self.map_id, "x": self.x, "y": self.y,
                 "width": self.width, "height": self.height, "z": self.z,
+                "view": self.view,
                 "layer": ctx.project.profile.map_layers.get(
                     self.z, "layer %d (not used by this engine)" % self.z)}
 
@@ -123,9 +165,14 @@ class _Rect:
         per-cell bounds test rather than merely faster.
         """
         buffer = self.data.data
-        return [list(buffer[self._row_start(dy):
-                            self._row_start(dy) + self.width])
-                for dy in range(self.height)]
+        # `_row_start` recomputes the layer plane, so it is called once per
+        # row rather than twice.
+        starts = [self._row_start(dy) for dy in range(self.height)]
+        rows = [list(buffer[start:start + self.width]) for start in starts]
+        if self.view == "raw":
+            return rows
+        part = _VIEW_CODECS[self.view][0]
+        return [[part(word) for word in row] for row in rows]
 
     def paint(self, cells: "list[int]") -> None:
         """Write one value per cell, left to right and top to bottom.
@@ -133,11 +180,19 @@ class _Rect:
         One slice assignment per row, for the reason `read` gives. The mask
         is applied here because `Table.set` is what used to apply it, and a
         cell that does not fit two bytes would otherwise be written whole.
+
+        Under a region or shadow view each value is one part of the stored
+        word, and the other part is read back and kept: painting a region
+        over a shadowed wall must not erase the shadow.
         """
         buffer = self.data.data
+        merge = (None if self.view == "raw" else _VIEW_CODECS[self.view][1])
         for dy in range(self.height):
             row = cells[dy * self.width:(dy + 1) * self.width]
             start = self._row_start(dy)
+            if merge is not None:
+                row = [merge(old, value) for old, value
+                       in zip(buffer[start:start + len(row)], row)]
             buffer[start:start + len(row)] = array(
                 buffer.typecode, (value & CELL_MASK for value in row))
 
@@ -148,11 +203,12 @@ def _cells_to_fill(ctx: Context, args: dict[str, Any],
     tile_id = opt_int(args, "tile_id")
     if tile_id is None:
         raise ToolError("fill needs a tile_id")
-    _check_tile(ctx, tile_id, rect.z, "tile_id")
+    _check_tile(ctx, tile_id, rect.z, "tile_id", rect.view)
     _check_budget(rect.cells, "fill")
     return ([tile_id] * rect.cells,
-            "filled %dx%d at (%d, %d) layer %d with tile %d"
-            % (rect.width, rect.height, rect.x, rect.y, rect.z, tile_id))
+            "filled %dx%d at (%d, %d) layer %d with %s %d"
+            % (rect.width, rect.height, rect.x, rect.y, rect.z,
+               "tile" if rect.view == "raw" else rect.view, tile_id))
 
 
 def _cells_from_rows(ctx: Context, args: dict[str, Any],
@@ -176,22 +232,35 @@ def _cells_from_rows(ctx: Context, args: dict[str, Any],
                 "row %d has %s cells but the rectangle is %d wide"
                 % (dy, len(row) if isinstance(row, list) else "?", rect.width))
         for dx, value in enumerate(row):
+            # Built eagerly, unlike `_AssetChecker.check`'s location and
+            # `check_commands`' `Location.at`: those two build an object
+            # with twenty-six named attribute operations, and this is a
+            # nine-character format that `as_int` and `_check_tile` both
+            # take as a `str`. Deferring it would mean a closure per cell,
+            # which allocates what it saves.
             where = "rows[%d][%d]" % (dy, dx)
             tile_id = as_int(value, where)
-            _check_tile(ctx, tile_id, rect.z, where)
+            _check_tile(ctx, tile_id, rect.z, where, rect.view)
             cells.append(tile_id)
-    return (cells, "wrote %dx%d tiles at (%d, %d) layer %d"
-            % (rect.width, rect.height, rect.x, rect.y, rect.z))
+    return (cells, "wrote %dx%d %s at (%d, %d) layer %d"
+            % (rect.width, rect.height,
+               "tiles" if rect.view == "raw" else rect.view + " values",
+               rect.x, rect.y, rect.z))
 
 
 @tool(
     "map_tiles",
     "Read or write map tile data",
     "Read a rectangle of tile ids, write one back, or flood a rectangle with a "
-    "single tile. Tiles are addressed x, y (from the top-left) on layer z: "
-    "0 is the ground, 1 sits above it, 2 is the shadow layer, and on VX Ace 3 "
-    "holds region ids. map_get reports the layers a given map actually has. "
-    "Rows come back as arrays of tile ids, top row first.",
+    "single tile. Tiles are addressed x, y (from the top-left) on layer z. "
+    "Layers 0, 1 and 2 hold tile ids on both engines: 0 the ground, 1 tiles "
+    "drawn over it, 2 the upper (B-E) tiles. VX Ace has a fourth layer, 3, "
+    "that holds no tiles: each cell is one word, region * 256 + shadow, with "
+    "a region id 0-%d above four shadow-quarter bits 0-%d. view=region or "
+    "view=shadow reads and writes just that part of layer 3 and keeps the "
+    "other (z defaults to 3 with a view); the default view=raw is the stored "
+    "value. map_get reports the layers a given map actually has. Rows come "
+    "back as arrays of values, top row first." % (MAX_REGION_ID, MAX_SHADOW),
     schema({
         "map_id": prop(INT, "Which map.", minimum=1, maximum=MAX_MAP_ID),
         "op": prop(STR, "read (default), write, or fill.",
@@ -203,19 +272,29 @@ def _cells_from_rows(ctx: Context, args: dict[str, Any],
                            "call." % MAX_CELLS_PER_READ, minimum=1),
         "height": prop(INT, "Rectangle height (default: to the map's bottom edge).",
                        minimum=1),
-        "z": prop(INT, "Layer: 0 ground, 1 above ground, 2 shadow mask (values "
-                       "0-15), and on VX Ace 3 region ids (0-63). Default 0. "
+        "z": prop(INT, "Layer: 0, 1 and 2 are tile layers (ground, over the "
+                       "ground, upper B-E tiles); on VX Ace 3 is the shadow "
+                       "and region layer. Default 0, or 3 with a view. "
                        "map_get reports the layers a given map has.",
                   minimum=0),
-        "rows": prop(ARR, "For write: rows of tile ids, top row first. "
+        "view": prop(STR, "raw (default): the stored value. region or shadow "
+                          "(VX Ace layer 3 only): just the region id (0-%d) "
+                          "or the shadow bits (0-%d) of each cell; a write "
+                          "keeps the other part." % (MAX_REGION_ID, MAX_SHADOW),
+                     enum=list(TILE_VIEWS)),
+        "rows": prop(ARR, "For write: rows of values in the chosen view, top "
+                          "row first. "
                           "width and height are NOT inferred from it -- "
                           "they default to the rest of the map, so send "
                           "both alongside rows: len(rows) must equal "
                           "height, and every row must be width long.",
                      items={"type": ARR, "items": {"type": INT}}),
-        "tile_id": prop(INT, "For fill: the tile id to write into every cell. "
-                             "Layers 0 and 1 take 0-65535, layer 2 takes 0-15, "
-                             "and layer 3 takes 0-63.", minimum=0),
+        "tile_id": prop(INT, "For fill: the value to write into every cell. "
+                             "Tile layers take 0-65535. Raw layer 3 takes "
+                             "region * 256 + shadow; view=region takes 0-%d "
+                             "and view=shadow 0-%d (1 top-left, 2 top-right, "
+                             "4 bottom-left, 8 bottom-right quarter)."
+                             % (MAX_REGION_ID, MAX_SHADOW), minimum=0),
         "dry_run": DRY_RUN,
     }, ["map_id"]),
     writes=True,

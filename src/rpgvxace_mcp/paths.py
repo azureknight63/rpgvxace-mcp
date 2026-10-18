@@ -29,6 +29,9 @@ BACKUP_DIR = "backups"
 CHANGE_LOG = "changes.jsonl"
 
 
+RENDER_DIR = "renders"
+
+
 BACKUP_STAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 
@@ -41,7 +44,9 @@ DEFAULT_BACKUP_KEEP = 10
 # A single path component that cannot lead anywhere but where it is joined.
 # Everything this server opens is named either by its own registry or by a
 # caller, and a caller's string reaches the filesystem, so it is checked here.
-_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+# `\Z`, not `$`: `$` also matches before a final newline, which let
+# "Map001.rvdata2\n" through as a file name.
+_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
 
 
 # Names Windows resolves to devices rather than files, whatever the extension.

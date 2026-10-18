@@ -24,8 +24,9 @@ from ...schema import on_map
 from ..references import (
     MAP_TARGET,
     TABLE_NOUNS,
-    _REFERENCE_CODES,
+    _RuleIndex,
     _referenced_ids,
+    rule_index,
 )
 from ..walk import (
     Location,
@@ -78,7 +79,14 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
     # same answers and a narrow run stays narrow.
     map_sizes = _MapSizes(project)
     on_disk = project.map_ids_present()
-    check_parameters = project.command_layouts_modelled
+    # Two questions now, where there was one. The reference and label rules
+    # need the open engine's own layouts, which every profile has -- XP's
+    # reference table is its own. The asset rules read the VX family's
+    # layouts only (XP's Show Text has no face to check), so they also need
+    # the engine to be one of those.
+    check_parameters = project.engine == project.profile.key
+    check_assets = project.command_layouts_modelled
+    references = rule_index(project.engine)
 
     for location, commands in iter_command_lists(project, map_ids, budget):
         if findings.full:
@@ -120,11 +128,11 @@ def check_commands(project: Project, map_ids: list[int], tables: _Tables,
             # went into `find_references_for` last round and not into this
             # walk, which reads the same commands.
             code_int = _int(code)
-            if code_int in _REFERENCE_CODES:
+            if code_int in references.codes:
                 findings.extend(_check_references(
-                    code, params, tables, on_disk, map_sizes, location,
-                    index))
-            if checker is not None:
+                    project, code, params, tables, on_disk, map_sizes,
+                    location, index, references))
+            if checker is not None and check_assets:
                 command_assets(checker, code_int, code, params,
                                location, index)
             if code == CODE_JUMP_TO_LABEL and params:
@@ -161,9 +169,10 @@ def _check_indent(index: int, previous: int,
         "editor." % (index, previous, indent), location.at(index))]
 
 
-def _check_references(code: Any, params: list[Any], tables: _Tables,
-                      on_disk: AbstractSet[int], map_sizes: "_MapSizes",
-                      location: Location, index: int) -> list[Finding]:
+def _check_references(project: Project, code: Any, params: list[Any],
+                      tables: _Tables, on_disk: AbstractSet[int],
+                      map_sizes: "_MapSizes", location: Location, index: int,
+                      references: _RuleIndex) -> list[Finding]:
     """One rule: every id a command names is an id that exists.
 
     `_Tables.ids` answers None for a table that could not be read, so that
@@ -173,7 +182,7 @@ def _check_references(code: Any, params: list[Any], tables: _Tables,
     replaced.
     """
     findings = []
-    for table, value in _referenced_ids(code, params):
+    for table, value in _referenced_ids(code, params, references):
         if table == MAP_TARGET:
             findings += _check_transfer(value, params, on_disk, map_sizes,
                                         location, index)
@@ -193,7 +202,8 @@ def _check_references(code: Any, params: list[Any], tables: _Tables,
             noun = TABLE_NOUNS[table]
             findings.append(_missing(
                 "missing_%s" % noun.replace(" ", "_"),
-                "%s refers to %s id %s" % (command_name(code), noun, value),
+                "%s refers to %s id %s" % (command_name(code, project.engine),
+                                           noun, value),
                 "Point it at an existing entry, or add that entry to the "
                 "database.", location.at(index),
                 "command parameters against the %s table" % table))

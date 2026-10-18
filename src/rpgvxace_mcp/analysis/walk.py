@@ -125,7 +125,21 @@ def _event_at(map_id: int, event_id: int, event_name: str, page: int) -> Locatio
 # and `or []` is not the same rule. Aliased rather than renamed at 40 call
 # sites, because the short names read better inside a walk.
 _seq = as_list
-_int = as_int
+
+
+# A game id, a size or a coordinate is a small number. The Marshal reader lets
+# a Bignum of any width through, and past 4,300 digits `str()` of one raises --
+# which, formatted into a finding, ended the whole validate run. So the walk
+# reads such a number as absent, the same answer it gives a value that is not
+# a number at all. (`brief` already says the same about a MapInfos key.)
+_ID_BOUND = 2 ** 62
+
+
+def _int(value: Any) -> "int | None":
+    number = as_int(value)
+    if number is not None and not -_ID_BOUND <= number <= _ID_BOUND:
+        return None
+    return number
 
 
 def _text(project: Project, value: Any) -> str:
@@ -250,6 +264,8 @@ def iter_command_lists(project: Project, map_ids: list[int] | None = None,
         if not isinstance(events, RubyHash):
             continue
         for event_id, event in events.sorted_items():
+            if _int(event_id) is None:
+                continue  # a key that is not an id would be quoted into findings
             # One step for the event, and one for every page slot, before
             # anything about them is read. This is where the product is
             # bought: charging only for commands meant a map of empty pages

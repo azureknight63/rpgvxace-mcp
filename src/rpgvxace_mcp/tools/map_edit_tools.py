@@ -409,13 +409,25 @@ def _new_tileset_id(ctx: Context, args: dict[str, Any]) -> int:
     return tileset_id
 
 
+def _tree_order(value: Any) -> int:
+    """A MapInfos `order` as a position: 0 for anything the editor would not
+    have written (text, nil, negative, or past a Fixnum), so a hostile tree
+    cannot make the next order a Bignum written back into the file."""
+    number = _int(value)
+    return number if number is not None and 0 <= number < 2 ** 30 else 0
+
+
 def _new_tree_info(ctx: Context, args: dict[str, Any], name: str) -> Any:
     """The MapInfos entry for a new map: its name, parent and tree position."""
     # Asked for once. `Project.entries` is not memoized -- only the loaded
     # file is -- so each call sorts the hash and builds a fresh list of
     # tuples, and this wanted the same list twice.
     infos = ctx.project.entries("map_infos")
-    order = max([info.get("order") or 0 for _, info in infos] or [0]) + 1
+    # Only objects, and only an `order` that is a sane whole number: a damaged
+    # entry (nil, or a String `@order`) crashed this, and a Bignum was added
+    # to and written back.
+    order = max([_tree_order(info.get("order")) for _, info in infos
+                 if isinstance(info, RubyObject)] or [0]) + 1
     parent_id = opt_int_default(args, "parent_id", 0, minimum=0)
     if parent_id and parent_id not in {i for i, _ in infos}:
         raise ToolError(
@@ -561,6 +573,12 @@ def _delete_map(ctx: Context, map_id: int, dry_run: bool) -> dict[str, Any]:
     # the divergence _create_map's comment and Project.snapshot's docstring
     # both call worse than no preview.
     has_file = ctx.project.exists(filename)
+    if not has_file and not (isinstance(infos, RubyHash)
+                             and infos.get(map_id) is not None):
+        # Neither half exists: there is nothing to delete, and the act would
+        # have re-saved MapInfos and backed it up to say so.
+        raise ToolError("map %d does not exist: it has no entry in the map "
+                        "tree and no %s" % (map_id, filename))
     if dry_run:
         # `reply`, not `preview`: `preview` above is the ReferencePreview, and
         # rebinding the name here left one local holding two unrelated types

@@ -15,17 +15,20 @@ which is why this was the split to do first.
 """
 
 import ast
+import functools
 import re
 import sys
 import unittest
 from pathlib import Path
 
-from rpgvxace_mcp.rubytypes import RubyHash  # noqa: E402
-
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+sys.path.insert(0, str(HERE))  # tool_case: bare-name import must work from the repo root
+
+from rpgvxace_mcp.rubytypes import RubyHash  # noqa: E402
+
 
 # The four directories every class here reads, derived once.
 # `Path(__file__).resolve().parent` was written out eleven more times
@@ -35,6 +38,18 @@ ROOT = HERE.parent
 SRC = ROOT / "src"
 PACKAGE = SRC / "rpgvxace_mcp"
 TOOLS = PACKAGE / "tools"
+
+
+@functools.lru_cache(maxsize=None)
+def _parse(source):
+    """`ast.parse`, once per distinct source text.
+
+    Nearly every class here walks the same ~100 source files, and each walk
+    parsed them again. Keyed on the text and not on the path, so a test that
+    hands in a synthetic source gets its own tree and an edited file is never
+    served stale. Callers only read the trees; none rewrites one.
+    """
+    return ast.parse(source)
 
 
 def python_files(*folders):
@@ -68,8 +83,7 @@ class TestToolModulesAreLeaves(unittest.TestCase):
     """
 
     def folder(self):
-        root = SRC
-        return root / "rpgvxace_mcp" / "tools"
+        return TOOLS
 
     def registers_a_tool(self, path):
         """Whether a module under tools/ actually registers one.
@@ -107,7 +121,7 @@ class TestToolModulesAreLeaves(unittest.TestCase):
         shared = self.shared_modules()
         self.assertIn("registry", shared, "the scan lost the shared layer")
         for path in self.tool_modules():
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = _parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.ImportFrom):
                     continue
@@ -162,6 +176,10 @@ class TestOneBlankLineConvention(unittest.TestCase):
         return python_files(PACKAGE, HERE, ROOT / "scripts")
 
     def blanks_above(self, path):
+        """`blanks_in` over one file."""
+        return self.blanks_in(path.read_text(encoding="utf-8"))
+
+    def blanks_in(self, source):
         """How many blank lines sit above each top-level definition.
 
         Read with `ast` rather than a regular expression. The expression
@@ -176,8 +194,8 @@ class TestOneBlankLineConvention(unittest.TestCase):
         A comment block immediately above a definition belongs to it, so
         the count is taken above the comment.
         """
-        lines = path.read_text(encoding="utf-8").split("\n")
-        tree = ast.parse("\n".join(lines))
+        lines = source.split("\n")
+        tree = _parse(source)
         out = []
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
@@ -202,6 +220,30 @@ class TestOneBlankLineConvention(unittest.TestCase):
                 blank += 1
             out.append((top, blank))
         return out
+
+    def test_the_blank_line_scan_can_tell_the_counts_apart(self):
+        """The instrument, fed sources it must judge. Without this a scan
+        that always answered `[]` kept the convention test below green."""
+        def counts(source):
+            return [blank for _, blank in self.blanks_in(source)]
+
+        body = "import os\n"
+        for blanks, expected in ((0, 0), (1, 1), (2, 2), (3, 3)):
+            with self.subTest(blanks=blanks):
+                self.assertEqual(
+                    counts(body + "\n" * blanks + "def f():\n    pass\n"),
+                    [expected])
+        # A comment block belongs to the definition under it, so the count
+        # is taken above the comment; a decorator likewise.
+        self.assertEqual(
+            counts(body + "\n\n# why\n# more\ndef f():\n    pass\n"), [2])
+        self.assertEqual(
+            counts(body + "\n@decorator\ndef f():\n    pass\n"), [1])
+        self.assertEqual(counts(body + "\n\nclass C:\n    pass\n"), [2])
+
+    def test_the_blank_line_scan_sees_many_definitions(self):
+        seen = sum(len(self.blanks_above(path)) for path in self.modules())
+        self.assertGreater(seen, 500, "the scan found almost nothing to judge")
 
     def test_every_top_level_definition_has_two_blank_lines_above_it(self):
         # Constants as well as definitions: four constants placed after a
@@ -275,6 +317,17 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
     ANALYSIS = {
         "walk": set(),
         "references": {"walk"},
+        "reachability": {"walk"},
+        # Reads `reachability`'s edge builder and start-map reader rather
+        # than keeping a second copy of the transfer parsing.
+        "dead_ends": {"walk", "reachability"},
+        "map_shape": {"walk"},
+        "tile_variety": {"walk"},
+        "stat_outliers": {"walk"},
+        # Fences a project's maps with `stat_outliers`' rule, and walks
+        # nothing: it reads the replies the other scopes built.
+        "summary": {"stat_outliers"},
+        "switch_usage": {"walk"},
         "lint": {"walk", "references"},
     }
     LINT = {
@@ -299,6 +352,18 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
                    "database"},
     }
 
+    # The picture-drawing half, in the order a map render needs it: PNG in
+    # and out, then pixel operations on a decoded image, then the tile
+    # geometry and autotile tables that cut sheets with them, then the scene
+    # that composes a map from all three. `scene` knowing nothing of projects
+    # is the point of the split, and it is checked below with the rest.
+    RENDER = {
+        "png": set(),
+        "canvas": {"png"},
+        "tiles": {"png", "canvas"},
+        "scene": {"png", "canvas", "tiles"},
+    }
+
     # And the package root, which three docstrings assert and nothing read:
     # `paths.py:3` calls itself "the bottom of this module's layering",
     # `backups.py` says it reads `paths`, and `project.py` reads both. Only
@@ -308,7 +373,10 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
     ROOT_MODULES = {
         "paths": set(),
         "backups": {"paths"},
-        "project": {"paths", "backups"},
+        # Reads `paths` for its error type and containment check, and
+        # nothing else: it is a format reader, not a project.
+        "rgss_archive": {"paths"},
+        "project": {"paths", "backups", "rgss_archive"},
     }
 
     # The rest of the package root, listed rather than passed over. These
@@ -318,9 +386,18 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
     # bottom layers and `test_the_bottom_layer_imports_no_sibling` asserts
     # there is one. So they are named as out of scope, which is a fact a
     # reader can check, rather than skipped, which is a hole.
+    #
+    # `autotile` is with them: it reads `schema` for the layer-3 word and is
+    # read by `render` and the tools, which is an order, but not one with
+    # `paths` at the bottom. `live` too. It sits above `marshal_rb`, `rubytypes` and `render`'s
+    # `png` and below `tools`, but its own modules have three independent
+    # bottoms (`wire`, `frame`, `winapi`), so it cannot take a table here
+    # without inventing an order between them. Its one edge into `render`
+    # is held by `test_live_reaches_render_only_through_its_bottom_layer`.
     ROOT_UNORDERED = {
-        "analysis", "commands", "convert", "docs", "marshal_rb",
-        "rubytypes", "schema", "server", "tools", "__main__",
+        "analysis", "autotile", "commands", "convert", "docs", "live",
+        "marshal_rb", "render", "rubytypes", "schema", "server", "tools",
+        "__main__",
     }
 
     def tables(self):
@@ -328,6 +405,7 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         package = PACKAGE
         return (("rpgvxace_mcp", self.ROOT_MODULES, package),
                 ("analysis", self.ANALYSIS, package / "analysis"),
+                ("render", self.RENDER, package / "render"),
                 ("lint", self.LINT, package / "analysis" / "lint"))
 
     def found(self, where):
@@ -350,7 +428,7 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         out = set()
         for path in paths:
             level = 1 if path.parent == where else 2
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = _parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.ImportFrom) or node.level != level:
                     continue
@@ -360,6 +438,21 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
                     if alias.name in table:
                         out.add(alias.name)
         return out
+
+    def test_the_import_scan_finds_edges_to_judge(self):
+        """The instrument, observed. `reached - allowed` is empty for a scan
+        that finds nothing, so the two tests below stayed green when
+        `sibling_imports` was changed to the wrong level or to `set()`."""
+        for label, table, where in self.tables():
+            modules = self.found(where)
+            edges = sum(
+                len(self.sibling_imports(table, where, modules[name])
+                    - {name})
+                for name in table)
+            with self.subTest(package=label):
+                self.assertGreater(
+                    edges, 2, "%s: the scan found almost no imports between "
+                    "its modules, so nothing below was judged" % label)
 
     def test_no_module_imports_a_layer_above_itself(self):
         for label, table, where in self.tables():
@@ -425,7 +518,7 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         from rpgvxace_mcp import analysis
         wanted = set()
         for path in python_files(TOOLS):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = _parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if (isinstance(node, ast.ImportFrom)
                         and node.module == "analysis"):
@@ -458,7 +551,7 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         self.assertIn("validate", of_the_linter)
         importers = {}
         for path in python_files(TOOLS):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = _parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.ImportFrom):
                     continue
@@ -489,7 +582,7 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         for path in paths:
             if path.name == "__init__.py":
                 continue
-            for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            for node in _parse(path.read_text(encoding="utf-8")).body:
                 if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
                     found.add(node.name)
                 elif isinstance(node, ast.AnnAssign):
@@ -532,7 +625,9 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         from rpgvxace_mcp import analysis
         # The submodule names themselves are re-exported on purpose, and
         # `annotations` is the future import.
-        modules = {"walk", "references", "lint"}
+        modules = {"walk", "references", "reachability", "dead_ends",
+                   "map_shape", "tile_variety", "stat_outliers",
+                   "summary", "switch_usage", "lint"}
         exported = {name for name in vars(analysis)
                     if not name.startswith("__")}
         dangling = sorted(exported - self.defined_below() - modules
@@ -579,6 +674,81 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
                 self.assertTrue(hasattr(analysis.lint, name), name)
                 self.assertTrue(hasattr(analysis, name), name)
 
+    # `live` and `render` are both in ROOT_UNORDERED, so nothing above
+    # constrains what one takes from the other. `live` draws its screenshot
+    # PNG with render's encoder, and that one edge is stated here instead:
+    # it reaches `render`'s bottom layer and nothing higher, and `render`
+    # reaches nothing outside itself at all.
+    LIVE_MAY_TAKE_FROM_RENDER = {"png"}
+
+    def relative_imports(self, path):
+        """(level, dotted module, imported names) for each `from .x import`."""
+        tree = _parse(path.read_text(encoding="utf-8"))
+        return [(node.level, node.module or "",
+                 [alias.name for alias in node.names])
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.level]
+
+    def test_live_reaches_render_only_through_its_bottom_layer(self):
+        for path in sorted((PACKAGE / "live").glob("*.py")):
+            for level, module, names in self.relative_imports(path):
+                if level != 2 or module.split(".")[0] != "render":
+                    continue
+                reached = ({module.split(".")[1]} if "." in module
+                           else set(names))
+                with self.subTest(file=path.name, module=module):
+                    self.assertEqual(
+                        sorted(reached - self.LIVE_MAY_TAKE_FROM_RENDER), [],
+                        "live/%s reaches above render's PNG layer, so the "
+                        "screenshot depends on the map compositor"
+                        % path.name)
+
+    # `render` reads the layer model from `schema` and the autotile facts
+    # from `autotile`, which it shares with `map_paint`. Neither reaches
+    # `live`, and the second test below holds that, so no cycle can close.
+    RENDER_MAY_READ = {"autotile", "schema"}
+
+    def test_render_reaches_nothing_outside_itself(self):
+        for path in sorted((PACKAGE / "render").glob("*.py")):
+            outward = [module for level, module, _ in
+                       self.relative_imports(path) if level > 1
+                       and module.split(".")[0] not in self.RENDER_MAY_READ]
+            with self.subTest(file=path.name):
+                self.assertEqual(outward, [],
+                                 "render/%s imports from outside render, so "
+                                 "live, which reads render's PNG layer, "
+                                 "could close a cycle through it"
+                                 % path.name)
+
+    def test_what_render_may_read_never_reaches_live(self):
+        for name in sorted(self.RENDER_MAY_READ):
+            path = PACKAGE / ("%s.py" % name)
+            reached = [module for _, module, _ in self.relative_imports(path)
+                       if module.split(".")[0] in ("live", "render", "tools")]
+            with self.subTest(module=name):
+                self.assertEqual(reached, [],
+                                 "%s is below render, so importing live, "
+                                 "render or tools from it closes a cycle"
+                                 % name)
+
+    def test_one_module_encodes_a_png(self):
+        """Two encoders are two places a chunk or a CRC can be got wrong.
+
+        The mark of an encoder is writing an IHDR chunk; a decoder reads
+        one by comparing, which is a bytes literal too, so only a call that
+        builds a chunk counts.
+        """
+        writers = []
+        for path in sorted(PACKAGE.rglob("*.py")):
+            tree = _parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value == b"IHDR"):
+                    writers.append(path.relative_to(PACKAGE).as_posix())
+                    break
+        self.assertEqual(writers, ["render/png.py"])
+
 
 class TestEveryMixinContractHolds(unittest.TestCase):
     """A mixin declares what it needs from its host, and both are checked.
@@ -616,7 +786,7 @@ class TestEveryMixinContractHolds(unittest.TestCase):
         return (ROOT / where).read_text(encoding="utf-8")
 
     def declared(self, where, name, tuple_name):
-        for node in ast.parse(self.source(where)).body:
+        for node in _parse(self.source(where)).body:
             if isinstance(node, ast.ClassDef) and node.name == name:
                 for inner in node.body:
                     if (isinstance(inner, ast.Assign)
@@ -627,7 +797,7 @@ class TestEveryMixinContractHolds(unittest.TestCase):
 
     def reached(self, where, name):
         """Every `self.<name>` the mixin reads that it does not define."""
-        cls = next(node for node in ast.parse(self.source(where)).body
+        cls = next(node for node in _parse(self.source(where)).body
                    if isinstance(node, ast.ClassDef) and node.name == name)
         out = {node.attr for node in ast.walk(cls)
                if isinstance(node, ast.Attribute)
@@ -685,14 +855,15 @@ class TestEveryMixinContractHolds(unittest.TestCase):
         building one to ask is what this test would be doing anyway.
         """
         import shutil
-        import sys
         import tempfile
-        from pathlib import Path as P
-        sys.path.insert(0, str(P(__file__).resolve().parent / "fixtures"))
+        # `HERE / "fixtures"` is on `sys.path` from the module preamble, so
+        # this used to insert it again through a second spelling of
+        # `Path(__file__).resolve().parent` -- in the file whose subject is
+        # this codebase not repeating itself.
         from build_project import build
         from rpgvxace_mcp.backups import BackupStore
         from rpgvxace_mcp.project import Project
-        tmp = P(tempfile.mkdtemp(prefix="rpgvxace-mixin-"))
+        tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-mixin-"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         build(tmp / "project")
         project = Project(tmp / "project")
@@ -728,11 +899,13 @@ class TestImportBlocksAreInOrder(unittest.TestCase):
         return found
 
     def blocks(self, path):
+        """`blocks_in` over one file."""
+        return self.blocks_in(path.read_text(encoding="utf-8"))
+
+    def blocks_in(self, text):
         """Every `from X import (a, b, c)` written one name per line."""
-        import re
-        text = path.read_text(encoding="utf-8")
         lines = text.split("\n")
-        for node in ast.parse(text).body:
+        for node in _parse(text).body:
             if not isinstance(node, ast.ImportFrom):
                 continue
             if node.end_lineno <= node.lineno:
@@ -749,6 +922,19 @@ class TestImportBlocksAreInOrder(unittest.TestCase):
             if names:
                 yield node.lineno, names
 
+    def test_the_block_scan_finds_blocks_and_their_order(self):
+        """The instrument, fed sources it must judge, and the tree it must
+        find blocks in: a scan whose pattern stopped matching read as every
+        block being sorted."""
+        unsorted = "from x import (\n    b,\n    a,\n)\n"
+        self.assertEqual(list(self.blocks_in(unsorted)), [(1, ["b", "a"])])
+        self.assertEqual(list(self.blocks_in(
+            "from x import (\n    a,\n    b,\n)\n")), [(1, ["a", "b"])])
+        self.assertEqual(list(self.blocks_in(
+            "from x import (\n    a as z,\n    b,\n)\n")), [])
+        found = sum(len(list(self.blocks(path))) for path in self.modules())
+        self.assertGreater(found, 20, "the scan found almost no blocks")
+
     def test_every_multiline_import_block_is_sorted(self):
         out = []
         for path in self.modules():
@@ -759,6 +945,46 @@ class TestImportBlocksAreInOrder(unittest.TestCase):
                     out.append("%s:%d (%s)" % (path.name, line, wrong))
         self.assertEqual(out, [], "these import blocks are not sorted: "
                                   + ", ".join(out))
+
+    def imports_inside(self, tree):
+        """Every plain `import x` that is not at the top of the file."""
+        top = {id(node) for node in tree.body}
+        found = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and id(node) not in top:
+                found += [(alias.asname or alias.name, node.lineno)
+                          for alias in node.names]
+        return found
+
+    def test_no_module_is_imported_both_at_the_top_and_inside(self):
+        """The same defect as the test below, for a plain `import`.
+
+        `import ast` inside a method reads as "only this method needs it".
+        Thirty-one of them across five suites read as nothing at all, and
+        one round removed twelve of them from one file by hand -- so this
+        is the rule rather than a thirteenth fix.
+
+        Only a module the file *also* imports at the top, which is the
+        property the test below states for `from X import`: two statements
+        naming one module put the same names in two places to look. A
+        lazily imported module that appears nowhere else -- `winreg` on the
+        Windows path, `base64` inside the measurement -- names one place
+        and is left alone, with no exception list to keep in step.
+        """
+        out = []
+        for path in self.modules():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            top = {alias.asname or alias.name
+                   for node in tree.body if isinstance(node, ast.Import)
+                   for alias in node.names}
+            for name, line in self.imports_inside(tree):
+                if name in top:
+                    out.append("%s:%d imports %s, which the file already "
+                               "imports" % (path.name, line, name))
+        self.assertEqual(
+            out, [],
+            "these import a module the file's own import block already "
+            "names: " + "; ".join(out))
 
     def test_a_module_is_imported_from_once(self):
         """`from ..commands import (...)` and then `from ..commands import x`.
@@ -771,7 +997,7 @@ class TestImportBlocksAreInOrder(unittest.TestCase):
         out = []
         for path in self.modules():
             seen = {}
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = _parse(path.read_text(encoding="utf-8"))
             for node in tree.body:
                 if not isinstance(node, ast.ImportFrom):
                     continue
@@ -806,7 +1032,7 @@ class TestTheMainBlockIsLast(unittest.TestCase):
     def test_the_main_block_is_the_last_statement(self):
         wrong = []
         for path in self.suites():
-            body = ast.parse(path.read_text(encoding="utf-8")).body
+            body = _parse(path.read_text(encoding="utf-8")).body
             where = [index for index, node in enumerate(body)
                      if isinstance(node, ast.If)
                      and "__main__" in ast.unparse(node.test)]
@@ -871,7 +1097,7 @@ class TestNoSuiteRewritesAFieldList(unittest.TestCase):
         """
         source = (PACKAGE / "schema.py").read_text(encoding="utf-8")
         found = set()
-        for node in ast.parse(source).body:
+        for node in _parse(source).body:
             if not (isinstance(node, ast.FunctionDef)
                     and node.name.startswith("new_")):
                 continue
@@ -937,10 +1163,13 @@ class TestNoSuiteRewritesAFieldList(unittest.TestCase):
         was rewritten to remove.
         """
         out = []
+        # Order does not matter -- `hand_built_in` sorts by line number --
+        # so this pops from the end. `pop(0)` made it a queue drained from
+        # the front, which is linear each time and was not the point.
         stack = [node for node in statements
                  if not isinstance(node, self.HOLDS_A_SCOPE)]
         while stack:
-            node = stack.pop(0)
+            node = stack.pop()
             out.append(node)
             stack.extend(child for child in ast.iter_child_nodes(node)
                          if not isinstance(child, self.HOLDS_A_SCOPE))
@@ -974,7 +1203,7 @@ class TestNoSuiteRewritesAFieldList(unittest.TestCase):
 
     def hand_built_in(self, source):
         """The same, on source text, so the scan itself can be tested."""
-        tree = ast.parse(source)
+        tree = _parse(source)
         out = []
         for statements in self.scopes(tree):
             sites = {}
@@ -1001,7 +1230,9 @@ class TestNoSuiteRewritesAFieldList(unittest.TestCase):
                     owner = self.target_name(node.func.value)
                     if owner in sites:
                         sites[owner][2].add(node.args[0].value)
-        return [(line, cls, fields) for line, cls, fields in out]
+        # The sites are built as lists so the fields can be added to
+        # them, and handed back as tuples because a caller only reads them.
+        return [tuple(site) for site in out]
 
     # The instrument's own tests, on source written here rather than on the
     # suites: the property this class asserts is only as good as the scan,
@@ -1028,12 +1259,14 @@ class TestNoSuiteRewritesAFieldList(unittest.TestCase):
                   '    def one(self):\n'
                   '        page = RubyObject("RPG::Event::Page")\n'
                   '        page.set("a", 1)\n'
-                  '    def two(self):\n'
-                  '        page = RubyObject("RPG::Event::Page")\n'
+                  '    def two(self, page):\n'
                   '        page.set("b", 2)\n')
-        self.assertEqual(sorted(sorted(fields) for _, _, fields
-                                in self.hand_built_in(source)),
-                         [["a"], ["b"]])
+        # `two` only writes through a parameter that merely shares the name:
+        # one site with one field. In one merged scope the parameter would be
+        # the object `one` built, and the answer would be one site of two.
+        self.assertEqual([sorted(fields) for _, _, fields
+                          in self.hand_built_in(source)],
+                         [["a"]])
 
     def test_the_scan_keeps_counting_after_an_unrelated_assignment(self):
         source = ('page = RubyObject("RPG::Event::Page")\n'
@@ -1082,6 +1315,62 @@ class TestNoSuiteRewritesAFieldList(unittest.TestCase):
                      "new_graphic"):
             with self.subTest(constructor=name):
                 self.assertTrue(callable(getattr(schema, name, None)), name)
+
+
+class TestEverySuiteImportsFromTheRepoRoot(unittest.TestCase):
+    """`python -m unittest tests.test_x`, from the root, with no PYTHONPATH.
+
+    The README documents that invocation, and each suite makes it work by
+    putting `src/`, `tests/fixtures/` and `tests/` on `sys.path` itself.
+    `tests/test_prove_guards.py` cannot see a suite that forgets the last
+    of the three: it runs each file under pytest, whose default import mode
+    puts the file's own directory on the path, so the bare `tool_case`
+    import resolves there and fails only under the documented unittest
+    form. `test_stat_outliers.py` arrived that way.
+
+    Each module in its own interpreter: in one process the first suite to
+    run fixes the path for every suite after it, which is how this passes
+    while checking nothing.
+    """
+
+    @staticmethod
+    def suites():
+        return sorted(HERE.glob("test_*.py"))
+
+    @staticmethod
+    def import_alone(path):
+        import os
+        import subprocess
+
+        env = {key: value for key, value in os.environ.items()
+               if key != "PYTHONPATH"}
+        done = subprocess.run(
+            [sys.executable, "-c",
+             "import importlib, sys; importlib.import_module(sys.argv[1])",
+             "tests." + path.stem],
+            cwd=str(ROOT), capture_output=True, text=True, env=env,
+            timeout=120)
+        if done.returncode == 0:
+            return None
+        lines = done.stderr.strip().splitlines()
+        return "%s: %s" % (path.name, lines[-1] if lines else "no detail")
+
+    def test_the_scan_finds_the_suites(self):
+        """So the assertion below cannot pass by importing nothing."""
+        names = {path.name for path in self.suites()}
+        self.assertIn("test_tools.py", names)
+        self.assertIn(Path(__file__).name, names)
+
+    def test_every_suite_imports_from_the_repo_root(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            failed = [line for line in pool.map(self.import_alone,
+                                                self.suites()) if line]
+        self.assertEqual(failed, [],
+                         "these suites do not import as `tests.<name>` from "
+                         "the repository root: " + "; ".join(failed))
+
 
 # Last in the file, deliberately. Module statements run in order, so a
 # `unittest.main()` above a class definition exits before that class

@@ -83,9 +83,10 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
     # Built only when both are selected, so the assets branch below is the
     # only place that reads it into `findings` -- which is what it has
     # always been.
+    chosen = set(scopes)
     shared_checker = (_AssetChecker(project)
-                      if {"events", "assets"} <= set(scopes) else None)
-    walked_maps = bool({"maps", "events", "assets"} & set(scopes))
+                      if {"events", "assets"} <= chosen else None)
+    walked_maps = bool({"maps", "events", "assets"} & chosen)
     # One allowance for every walk this call makes, built before the first of
     # them rather than between two: a file that shares objects by reference
     # can render as millions of nodes from a few kilobytes, and neither the
@@ -121,11 +122,6 @@ def validate(project: Project, scopes: list[str], map_ids: list[int] | None = No
     # Last, so it covers every table any check actually asked for.
     findings.extend(tables.findings())
 
-    # Counted before anything is dropped, and sorted before it: truncating by
-    # arrival order first meant five thousand warnings from one check could
-    # push out the errors from a later one, and `counts` would then report zero
-    # errors while errors existed. A count the model cannot trust is worse than
-    # no count.
     return _report(project, findings.items, ids if walked_maps else [], ran,
                    walk_budget, limit)
 
@@ -207,12 +203,20 @@ def _report(project: Project, findings: "list[Finding]",
         # Said in the reply, because a clean bill from a walk that never
         # finished is the worst answer this function can give.
         report["command_walk_stopped"] = walk_stopped
-    if not project.command_layouts_modelled:
+    if project.engine != project.profile.key:
         report["engine_warning"] = (
             "this is a %s project, whose event command layouts are not modelled "
             "here, so command parameter rules were skipped. Only structural and "
             "database checks ran." % project.engine
         )
+    elif not project.command_layouts_modelled:
+        # XP: modelled, but not with the VX family's layouts.
+        report["engine_warning"] = (
+            "this is an %s project. Its commands are numbered and laid out "
+            "differently from VX and VX Ace: the reference, transfer and label "
+            "rules ran with %s's own layouts, and the rules that read graphics "
+            "and audio out of command parameters were skipped."
+            % (project.profile.label, project.profile.label))
     if stopped:
         report["stopped_early"] = (
             "collection stopped at %d findings, so this is not the whole "

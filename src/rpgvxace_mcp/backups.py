@@ -33,6 +33,13 @@ from .paths import (
 )
 
 
+# How long one line of the change log may be. This server writes that file
+# itself and a record it writes is a few hundred bytes -- but the file sits
+# in a folder the threat model treats as untrusted, so the bound is a fact
+# about where it lives rather than about who wrote it.
+MAX_CHANGE_LINE_BYTES = 64 * 1024
+
+
 class BackupStore:
     """The backup store and the change log, mixed into `Project`.
 
@@ -124,6 +131,13 @@ class BackupStore:
             self._assert_writable("taking a snapshot")
         clean = re.sub(r"[^A-Za-z0-9._-]", "-", label) or "manual"
         stamp = datetime.now().strftime(BACKUP_STAMP_FORMAT) + "-" + clean
+        # The stamp has one-second resolution, and a snapshot copies over a
+        # directory that already exists: two safety snapshots in one second
+        # were one, holding the later data, and the original was gone.
+        base, number = stamp, 1
+        while self._backup_dir(stamp).exists():
+            number += 1
+            stamp = "%s-%d" % (base, number)
         target = self._backup_dir(stamp)
         if not dry_run:
             target.mkdir(parents=True, exist_ok=True)
@@ -197,7 +211,15 @@ class BackupStore:
         # the containment check in the copy loop meant a symlink planted in a
         # backup aborted partway, with Data/ half old and half new.
         wanted = []
-        for name in (files or available_files):
+        if files is not None and not files:
+            # `[]` used to mean "every file": the one call that overwrites
+            # the whole Data folder, from the argument a caller uses to say
+            # "only these". The tool refuses it too; the store must not rely
+            # on that.
+            raise ProjectError("files is empty; name the files to restore, "
+                               "or leave files out to restore the whole "
+                               "snapshot")
+        for name in (available_files if files is None else files):
             safe_component(name, "file name")
             # Both ends of the copy, and both with the boundary the copy
             # loop uses -- the snapshot, not the backup root.
@@ -314,14 +336,40 @@ class BackupStore:
             with open(path, encoding="utf-8", errors="replace") as handle:
                 # A deque keeps only the tail: the log grows for the life of
                 # the project and there is no reason to hold all of it.
-                rows = deque((line for line in handle if line.strip()),
-                             maxlen=limit)
+                rows: "deque[str]" = deque(maxlen=max(limit, 0))
+                # Bounded per line as well. `for line in handle` reads to
+                # the next newline however far away it is, and this file
+                # lives in the project folder -- which the threat model
+                # treats as untrusted, and which is routinely the process
+                # CWD -- so one line with no newline in it is an unbounded
+                # read into memory before `maxlen` can drop anything. The
+                # same bound `MAX_GAME_INI_BYTES` and `server._read_line`
+                # were written for; this was the reader still without it.
+                while True:
+                    line = handle.readline(MAX_CHANGE_LINE_BYTES + 1)
+                    if not line:
+                        break
+                    if len(line) > MAX_CHANGE_LINE_BYTES:
+                        # Dropped, not truncated: half a JSON record is not
+                        # a record. The rest of it is read past one bounded
+                        # chunk at a time, so the next line starts at a
+                        # record boundary.
+                        while line and not line.endswith("\n"):
+                            line = handle.readline(
+                                MAX_CHANGE_LINE_BYTES + 1)
+                        continue
+                    if line.strip():
+                        rows.append(line)
         except OSError:
             return []
         out = []
         for line in rows:
             try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
+                record = json.loads(line)
+            except (json.JSONDecodeError, RecursionError):
+                # A line of 30,000 brackets is under the line bound and
+                # overflows the parser's stack.
                 continue
+            if isinstance(record, dict):
+                out.append(record)
         return out
