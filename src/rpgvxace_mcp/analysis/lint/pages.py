@@ -83,6 +83,8 @@ def check_event_pages(project: Project, map_ids: list[int],
         if not isinstance(events, RubyHash):
             continue
         for event_id, event in events.sorted_items():
+            if _int(event_id) is None:
+                continue  # a key that is not an id would be quoted into findings
             # Two findings per event at most, and the event count comes out of
             # the file: a crafted map that shares one event object across
             # forty thousand slots produced forty thousand findings here.

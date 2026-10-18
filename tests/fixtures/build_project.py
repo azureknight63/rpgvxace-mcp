@@ -43,7 +43,7 @@ LIBRARY = {"vx_ace": "System/RGSS301.dll", "vx": "RGSS200J.dll",
 # The XP fixture's tile ids: a tileset tile for the ground, an autotile for
 # the row above it. XP's tileset tiles start at 384 and its seven autotiles
 # take 48 ids each from 48.
-XP_GROUND, XP_AUTOTILE, XP_CAVE_FLOOR = 384, 48, 392
+XP_GROUND, XP_AUTOTILE, XP_CAVE_FLOOR = 384, 48, 391
 
 
 class Fixture:
@@ -282,9 +282,9 @@ class Fixture:
                             price=80 * armor_id, params=params, features=[])
         return self.obj("RPG::Armor", id=armor_id, name=self.S(name),
                         icon_index=32 + armor_id, description=self.S(""),
-                        price=80 * armor_id, kind=0, atk=0, spi=0, agi=0,
-                        prevent_critical=False, half_mp_cost=False,
-                        double_exp_gain=False)
+                        price=80 * armor_id, kind=0, atk=0, def_=defence,
+                        spi=0, agi=0, eva=0, prevent_critical=False,
+                        half_mp_cost=False, double_exp_gain=False)
 
     def enemy(self, enemy_id: int, name: str, hp: int, exp: int) -> RubyObject:
         if self.xp:

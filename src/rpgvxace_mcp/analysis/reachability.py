@@ -75,7 +75,9 @@ _MAX_SCRIPT_BLOCK_CHARS = 65536
 
 _NEWLINE = "\n"
 _BACKSLASH = "\\"
-_INT_ARG = r"-?\d+(?:_\d+)*"
+# Bounded: `int()` of a literal past 4,300 digits raises, and no map id is
+# longer than a few. A longer one fails to match and counts as unresolved.
+_INT_ARG = r"-?\d{1,12}(?:_\d{1,12}){0,4}"
 _RESERVE = re.compile(r"(?<![\w:])reserve_transfer\b(?!\s*=)")
 _RESERVE_OPEN = re.compile(r"[ \t]*\(\s*|[ \t]+(?=[\w$@(-])")
 _RESERVE_LITERAL = re.compile(r"(" + _INT_ARG + r")\s*[,)]")

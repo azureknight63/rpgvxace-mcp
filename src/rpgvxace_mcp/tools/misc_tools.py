@@ -125,7 +125,8 @@ def project_info(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             elif entry.container == SCRIPTS:
                 # Only the slot count is wanted here, so skip inflating every
                 # script body.
-                counts[key] = len(ctx.project.load_scripts(with_code=False))
+                counts[key] = len(ctx.project.load_scripts(with_code=False,
+                                                           refresh=refresh))
             else:
                 ctx.project.load_data(key, refresh)
                 counts[key] = 1
@@ -380,6 +381,15 @@ def _set_script(ctx: Context, args: dict[str, Any], index: int) -> dict[str, Any
     return write_reply(out, dry_run)
 
 
+# Longest snapshot name, label or file name taken: a name is a path component,
+# and one over the filesystem's limit was a bare ValueError, not a refusal.
+MAX_BACKUP_NAME_CHARS = 128
+# Short enough that a snapshot made with a label this long (a 15-character
+# stamp, a dash, the label, and a numeric suffix if the second is taken) is
+# still a name the restore tool takes.
+MAX_LABEL_CHARS = 64
+
+
 @tool(
     "backups",
     "Manage backups of the project data",
@@ -394,11 +404,19 @@ def _set_script(ctx: Context, args: dict[str, Any], index: int) -> dict[str, Any
     schema({
         "op": prop(STR, "list, create (snapshot every data file), restore, or prune.",
                    enum=list(BACKUP_OP_ARGS)),
-        "backup": prop(STR, "Which snapshot to restore, as named by list."),
+        "backup": prop(STR, "Which snapshot to restore, as named by list. "
+                            "At most %d characters." % MAX_BACKUP_NAME_CHARS,
+                       maxLength=MAX_BACKUP_NAME_CHARS),
         "files": prop(ARR, "For restore: only these files (default all in "
-                           "the snapshot). At most %d." % MAX_RESTORE_FILES,
+                           "the snapshot; leave it out for that, an empty "
+                           "list is refused). At most %d, each at most %d "
+                           "characters." % (MAX_RESTORE_FILES,
+                                            MAX_BACKUP_NAME_CHARS),
                       items={"type": STR}, maxItems=MAX_RESTORE_FILES),
-        "label": prop(STR, "For create: a short label added to the snapshot name."),
+        "label": prop(STR, "For create: a short label added to the snapshot "
+                           "name. At most %d characters."
+                           % MAX_LABEL_CHARS,
+                      maxLength=MAX_LABEL_CHARS),
         "dry_run": DRY_RUN,
     }, ["op"]),
     writes=True,
@@ -444,10 +462,20 @@ def backups(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                             "kept": ctx.project.backup_keep}, dry_run)
     # Through `write_reply` like every other branch here, so a restore's
     # preview reads as one and its key set matches the act's.
+    files = None
+    if args.get("files") is not None:
+        files = str_list(args, "files", MAX_RESTORE_FILES)
+        if not files:
+            # `[]` used to mean "every file in the snapshot": the one call
+            # that overwrites the whole Data folder, from the one argument a
+            # caller uses to say "only these".
+            raise ToolError("files is empty; name the files to restore, or "
+                            "leave files out to restore the whole snapshot")
+        for number, name in enumerate(files):
+            if len(name) > MAX_BACKUP_NAME_CHARS:
+                raise ToolError("files[%d] is %d characters long; at most %d"
+                                % (number, len(name), MAX_BACKUP_NAME_CHARS))
     return write_reply(ctx.project.restore_backup(
-        need_str(args, "backup"),
-        str_list(args, "files", MAX_RESTORE_FILES) or None,
-        dry_run,
-    ), dry_run)
+        need_str(args, "backup"), files, dry_run), dry_run)
 
 

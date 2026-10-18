@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
+import tempfile
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -76,6 +78,11 @@ RENDER_EVENTS = ("graphics", "markers", "none")
 # How many events one render looks at. Events times nothing here, but the count
 # comes out of the file and each one is converted before it is drawn.
 MAX_RENDER_EVENTS = 2000
+
+
+# How many different character sheets one render opens. Each is a PNG decode
+# in Python of up to `png.MAX_PNG_PIXELS`; a map has a handful.
+_MAX_CHARACTER_SHEETS = 32
 
 
 # How many pictures `.rpgvxace-mcp/renders/` keeps; the oldest go first. A
@@ -204,9 +211,18 @@ def _ids_in(grid: TileGrid, window: tuple[int, int, int, int]) -> set[int]:
     return found
 
 
+# The names `_write_picture` makes: `?` in the glob matches any character, so
+# a person's `map-0001-holidaypic.png` in a shared folder looked like ours.
+_OWN_PICTURE = re.compile(r"map-[0-9]{4}-[0-9a-f]{10}\.png")
+
+
 def _write_picture(ctx: Context, data: bytes, map_id: int) -> Path:
     """Put the PNG in the render folder, and trim the folder to its ceiling."""
     folder = ctx.project.render_dir()
+    # Checked before it is made: a link planted as the work folder carried
+    # the `mkdir` outside the project before the check below refused.
+    if ctx.project.render_dir_override is None:
+        _contained(folder, ctx.project.root, "the render folder")
     folder.mkdir(parents=True, exist_ok=True)
     name = "map-%04d-%s.png" % (map_id, hashlib.sha1(data).hexdigest()[:10])
     target = folder / name
@@ -214,10 +230,27 @@ def _write_picture(ctx: Context, data: bytes, map_id: int) -> Path:
     # planted there cannot carry the write somewhere else.
     if ctx.project.render_dir_override is None:
         _contained(target, ctx.project.root, "the render file")
-    temporary = folder / (name + ".tmp")
-    temporary.write_bytes(data)
-    os.replace(temporary, target)
-    kept = sorted((p for p in folder.glob("map-*.png") if p.is_file()),
+    # A temp file made new, under a name of its own. `<picture>.tmp` was a
+    # name an attacker could predict (the picture is named by a hash of its
+    # bytes), and `write_bytes` follows a link planted there.
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=folder, prefix=name + ".", suffix=".tmp")
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+        os.replace(temporary, target)
+    except BaseException:
+        # The trim below never matches a `.tmp`, so one left here stays.
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+    # Only names this function writes: `map-*.png` also took the pictures a
+    # person kept in a shared `--render-dir`.
+    kept = sorted((p for p in folder.glob("map-????-??????????.png")
+                   if p.is_file() and _OWN_PICTURE.fullmatch(p.name)),
                   key=lambda p: p.stat().st_mtime_ns, reverse=True)
     for stale in kept[MAX_KEPT_RENDERS:]:
         try:
@@ -334,7 +367,10 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
     # Only the sheets the window actually uses are opened: a decode costs
     # more than the drawing, and most maps use five of the nine.
     wanted = {sheet_needed(t) for t in _ids_in(grid, window)}
-    wanted.update(sheet_needed(s.tile_id) for s in sprites if s.tile_id)
+    if events == "graphics":
+        # A marker draws no graphic, so it needs no sheet; decoding one here
+        # also reported sheets "not read" that nothing drew.
+        wanted.update(sheet_needed(s.tile_id) for s in sprites if s.tile_id)
     wanted.discard(None)
     names = as_list(tileset.get("tileset_names"))
     sheets: dict[str, png.Image | None] = {}
@@ -353,9 +389,15 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
             unread[sheet_name] = "%s: %s" % (file_name, exc)
 
     loaded: dict[str, png.Image | None] = {}
+    left_out: set[str] = set()
 
     def character(name: str) -> png.Image | None:
         if name not in loaded:
+            if len(loaded) >= _MAX_CHARACTER_SHEETS:
+                # 2,000 events can each name a different sheet, and each is a
+                # decode of up to MAX_PNG_PIXELS; the rest are markers.
+                left_out.add(name)
+                return None
             try:
                 loaded[name] = _load_graphic(ctx, "characters", name)
             except ToolError:
@@ -397,6 +439,9 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
     reply.update(partial("events", truncated=cut_short, notes=(
         ("only the first %d events were considered" % MAX_RENDER_EVENTS)
         if cut_short else "",
+        ("only the first %d different character sheets were opened; %d "
+         "more were drawn as markers" % (_MAX_CHARACTER_SHEETS, len(left_out)))
+        if left_out else "",
         ("event graphics replaced by a marker: %s" % "; ".join(
             "%d (%s)" % item for item in result.sprites_marked[:20])
          + (" ..." if len(result.sprites_marked) > 20 else ""))

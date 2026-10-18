@@ -323,9 +323,12 @@ class TestSearchPatternsStayFast(ToolTest):
     def test_the_tool_refuses_them_too(self):
         """Through `search`, so the refusal reaches the caller as a ToolError."""
         for pattern, _subject, why in self.ATTACKS[:6]:
-            with self.subTest(shape=why):
-                with self.assertRaises(ToolError):
+            with self.subTest(shape=why, pattern=pattern[:28]):
+                with self.assertRaises(ToolError) as caught:
                     self.call("search", query=pattern, regex=True)
+                # The gate, and not a bad argument or a pattern that does
+                # not compile.
+                self.assertIn("cannot be interrupted", str(caught.exception))
 
     def test_every_allowed_pattern_finishes_quickly(self):
         import re
@@ -661,6 +664,7 @@ class TestTheMeasurementReachesItsChild(unittest.TestCase):
         def spy(command, **kwargs):
             seen["command"] = command
             seen["input"] = kwargs.get("input")
+            seen["cwd"] = kwargs.get("cwd")
             return real_run(command, **kwargs)
 
         self.safety.subprocess.run = spy
@@ -711,16 +715,19 @@ class TestTheMeasurementReachesItsChild(unittest.TestCase):
                       "server's working directory is on its sys.path")
 
     def test_the_child_runs_somewhere_neutral(self):
-        """So the answer does not depend on how the client launched us."""
-        import subprocess as sp
-        import sys as _sys
+        """So the answer does not depend on how the client launched us.
+
+        Observed on what `measure_cost` spawns. This used to run its own
+        subprocess and check CPython's `-I`, so it passed whatever the server
+        did.
+        """
+        import os
         import tempfile
-        done = sp.run([_sys.executable, "-I", "-c",
-                       "import sys; print(sys.path[0])"],
-                      capture_output=True, text=True,
-                      cwd=tempfile.gettempdir())
-        self.assertNotEqual(done.stdout.strip(), tempfile.gettempdir(),
-                            "the working directory is still on sys.path")
+        seen = self.command_for("Gold[0-9]+")
+        self.assertIsNotNone(seen["cwd"], "the child inherits the server's "
+                                          "working directory")
+        self.assertEqual(os.path.realpath(seen["cwd"]),
+                         os.path.realpath(tempfile.gettempdir()))
 
     def test_the_subjects_travel_on_stdin(self):
         seen = self.command_for("Gold[0-9]+")
@@ -1094,11 +1101,14 @@ class TestTheAlphabetFailsClosed(unittest.TestCase):
     pass for the life of the process, and the single-threaded server had no
     way out but being killed.
 
-    Nine levels because `_alphabet`'s depth cap is 8 and CPython emits a
-    SUBPATTERN node for `(?:...)` as well as for `(...)`.
+    One level under `MAX_ALPHABET_DEPTH`, the deepest the alphabet reads;
+    CPython emits a SUBPATTERN node for `(?:...)` as well as for `(...)`.
+    The cap was 8 when the defect was found and nine levels went past it;
+    built from the constant, the pattern follows the cap.
     """
 
-    NESTED = "(" * 9 + "[0-9]+[0-9]+!" + ")" * 9
+    NESTED = ("(" * (MAX_ALPHABET_DEPTH - 1) + "[0-9]+[0-9]+!"
+              + ")" * (MAX_ALPHABET_DEPTH - 1))
 
     def test_the_alphabet_sees_the_pattern_or_nothing_does(self):
         """The one assertion that is the regression test for this."""
@@ -1116,8 +1126,10 @@ class TestTheAlphabetFailsClosed(unittest.TestCase):
         to say which characters the pattern mentions.
         """
         too_deep = MAX_ALPHABET_DEPTH + 10
-        with self.assertRaises(PatternTooCostly):
+        with self.assertRaises(PatternTooCostly) as caught:
             check_pattern("(" * too_deep + "a" + ")" * too_deep)
+        # The depth cap, and not a shape rule or the length cap.
+        self.assertIn(str(MAX_ALPHABET_DEPTH), str(caught.exception))
 
     def test_a_pattern_at_the_cap_is_still_read(self):
         """The cap is a refusal, so it has to sit above what callers write."""
@@ -1125,8 +1137,8 @@ class TestTheAlphabetFailsClosed(unittest.TestCase):
         self.assertIn("P", _alphabet(list(_sre_parse.parse(deep))))
 
     def test_the_nested_pattern_does_not_reach_the_matcher(self):
-        """End to end: `search` refuses it rather than running it."""
-        with self.assertRaises((PatternTooCostly, ToolError)):
+        """The gate refuses it rather than letting it run."""
+        with self.assertRaises(PatternTooCostly):
             check_pattern(self.NESTED)
 
     def test_an_ordinary_nested_pattern_still_works(self):

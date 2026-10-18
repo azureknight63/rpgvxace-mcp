@@ -315,6 +315,14 @@ class Server:
                     None, PARSE_ERROR,
                     "message nests too deeply to parse"))
                 continue
+            except ValueError:
+                # After JSONDecodeError, which is a subclass: an integer
+                # literal of more than 4,300 digits raises a plain ValueError
+                # on CPython 3.11, and one such line ended the session.
+                _write(stdout, _error(
+                    None, PARSE_ERROR,
+                    "a number in the message is too long to parse"))
+                continue
             # A batch is a list of messages; respond with a list of the answers.
             if isinstance(message, list):
                 if len(message) > MAX_BATCH_MESSAGES:

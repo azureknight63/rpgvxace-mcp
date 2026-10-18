@@ -695,8 +695,12 @@ class TestTheReferenceAgreesWithTheTables(unittest.TestCase):
     def test_every_variable_operation_is_named(self):
         from rpgvxace_mcp.commands import VARIABLE_OPERATIONS
         text = self.document(self.ace)
-        for code in VARIABLE_OPERATIONS:
-            self.assertIn(str(code), text)
+        for code, symbol in VARIABLE_OPERATIONS.items():
+            # The code beside its operator, as the document writes them
+            # ("2 -="). A bare "2" is in every document.
+            self.assertIn("%d %s" % (code, symbol), text,
+                          "variable operation %d (%s) is not documented"
+                          % (code, symbol))
 
     def test_every_comparison_is_named(self):
         from rpgvxace_mcp.commands import COMPARISONS
@@ -731,7 +735,12 @@ class TestTheReferenceAgreesWithTheTables(unittest.TestCase):
 
     def test_the_two_documents_differ(self):
         """An engine-keyed document whose sections are identical is not one."""
-        self.assertNotEqual(self.document(self.ace), self.document(self.vx))
+        ace, vx = self.document(self.ace), self.document(self.vx)
+        self.assertNotEqual(ace, vx)
+        # Different in the shared values, which is what the engines disagree
+        # about -- not merely in a header that names the engine.
+        marker = "Shared parameter values"
+        self.assertNotEqual(ace[ace.index(marker):], vx[vx.index(marker):])
 
     def test_a_condition_type_is_not_typed_out_twice(self):
         """The Conditional Branch types come from the COND_* constants."""
@@ -740,8 +749,13 @@ class TestTheReferenceAgreesWithTheTables(unittest.TestCase):
                  if name.startswith("COND_")}
         self.assertTrue(names, "no COND_ constants to generate from")
         text = self.document(self.ace)
-        for code in names:
-            self.assertIn(str(code), text)
+        for code, name in names.items():
+            # The code beside its type name ("3 timer"): a bare digit is in
+            # every document, so omitting a type left this green.
+            kind = name[len("COND_"):].lower().replace("_", " ")
+            self.assertIn("%d %s" % (code, kind), text,
+                          "conditional branch type %d (%s) is not documented"
+                          % (code, kind))
 
 
 class TestTheTablesKeyedOffOneListAgree(unittest.TestCase):
@@ -783,9 +797,13 @@ class TestTheTablesKeyedOffOneListAgree(unittest.TestCase):
     def test_every_regex_category_is_in_every_table(self):
         from rpgvxace_mcp.tools import pattern_safety
         names = sorted(pattern_safety._CATEGORIES)
-        self.assertEqual(len(names), 8, names)
+        # Not a count copied from the implementation: that the table is not
+        # empty, and that what refers to its names refers to names it has.
+        self.assertTrue(names, "no regex categories at all")
+        self.assertTrue(pattern_safety._CATEGORY_DISJOINT)
         for pair in pattern_safety._CATEGORY_DISJOINT:
             with self.subTest(pair=sorted(pair)):
+                self.assertEqual(len(pair), 2, "a pair is two categories")
                 self.assertEqual(sorted(set(pair) - set(names)), [],
                                  "this pair names a category no table has")
 

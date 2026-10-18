@@ -119,6 +119,14 @@ FIXNUM_MAX = 2 ** 30 - 1
 # from an arbitrary point in the parse.
 MAX_DEPTH = 192
 
+# A warning is a line in a tool reply, and a file can make one from three bytes
+# (an empty `I` record is 3 bytes and about 118 characters of warning), so a
+# 128 MB file was 5 GB of reply. Past this many, the rest are only counted.
+MAX_LOAD_WARNINGS = 50
+
+# A symbol name quoted in a warning is the file's own text; it is clipped.
+MAX_WARNED_NAME = 64
+
 # ``_dump``-serialised classes we understand well enough to decode. The writer
 # reads this same mapping, so a class added here cannot decode on read and then
 # fail on dump.
@@ -146,6 +154,14 @@ class MarshalReader:
         self.symbols: list[RubySymbol] = []
         self.objects: list[Any] = []
         self.warnings: list[str] = []
+        self.warnings_left_out = 0
+
+    def warn(self, text: str) -> None:
+        """Record a warning, up to `MAX_LOAD_WARNINGS`; count the rest."""
+        if len(self.warnings) < MAX_LOAD_WARNINGS:
+            self.warnings.append(text)
+        else:
+            self.warnings_left_out += 1
 
     # -- primitives -----------------------------------------------------------
     def _byte(self) -> int:
@@ -274,10 +290,10 @@ class MarshalReader:
             ivars = self._read_ivars(depth + 1)
             symbol.ivars.update(ivars)
             if ivars:
-                self.warnings.append(
+                self.warn(
                     "symbol :%s carries an encoding record in a name position; "
                     "that record cannot be reproduced when writing this file "
-                    "back" % symbol
+                    "back" % str(symbol)[:MAX_WARNED_NAME]
                 )
             return symbol
         raise MarshalError(
@@ -328,7 +344,7 @@ class MarshalReader:
             # Ruby only writes a Fixnum inside that range, so this came from
             # somewhere else and we would re-dump it as a Bignum. Say so rather
             # than quietly changing the file's shape.
-            self.warnings.append(
+            self.warn(
                 "Fixnum %d at byte %d is outside the range Ruby writes as a "
                 "Fixnum; it will be written back as a Bignum" % (value, self.pos)
             )
@@ -353,7 +369,7 @@ class MarshalReader:
             # one, so this is a crafted or damaged file; dropping it is the
             # right read, but it means the bytes will not come back identical,
             # and every other unreproducible construct here says so.
-            self.warnings.append(
+            self.warn(
                 "an instance-variable record with no variables was dropped at "
                 "byte %d; this file will not write back byte-identically"
                 % self.pos)
@@ -486,7 +502,7 @@ class MarshalReader:
             except (ValueError, struct.error) as exc:
                 # Better to hand back opaque bytes than to refuse the file: the
                 # payload still round trips, and callers get a warning.
-                self.warnings.append("could not decode %s payload (%s)" % (cls, exc))
+                self.warn("could not decode %s payload (%s)" % (cls, exc))
         return RubyUserDef(cls, payload)
 
 
@@ -548,9 +564,14 @@ def load_with_warnings(data: bytes) -> tuple[Any, list[str]]:
     reader = MarshalReader(data)
     value = reader.read()
     if reader.pos != len(data):
-        reader.warnings.append(
+        reader.warn(
             "%d trailing bytes after the top-level object" % (len(data) - reader.pos)
         )
+    if reader.warnings_left_out:
+        reader.warnings.append(
+            "%d further warnings were left out; this file has many "
+            "constructs that will not write back identically"
+            % reader.warnings_left_out)
     return value, reader.warnings
 
 
@@ -558,7 +579,7 @@ def load_with_warnings(data: bytes) -> tuple[Any, list[str]]:
 # Writing
 # ---------------------------------------------------------------------------
 
-# The two wrapper records that do not claim a link slot of their own: the value
+# The three wrapper records that do not claim a link slot of their own: the value
 # they wrap takes it, exactly as in Ruby. Adding _register for these would shift
 # every later link index and misresolve the file.
 NON_LINKED_TYPES = (RubyExtended, RubyUClass, RubyIvars)
@@ -573,6 +594,7 @@ class MarshalWriter:
         # id() is only unique among live objects, so hold references to
         # everything registered to stop the interpreter reusing an address.
         self._alive: list[Any] = []
+        self._depth = 0
 
     # -- primitives -----------------------------------------------------------
     def _byte(self, value: int) -> None:
@@ -648,6 +670,18 @@ class MarshalWriter:
         return bytes(self.out)
 
     def _write_value(self, obj: Any) -> None:
+        # The reader refuses past `MAX_DEPTH`, so a deeper value would be
+        # written and then be a file this server cannot open. No decrement on
+        # an error: it ends the whole write.
+        self._depth += 1
+        if self._depth > MAX_DEPTH:
+            raise MarshalError(
+                "this value is nested more than %d levels deep, which could "
+                "be written but not read back" % MAX_DEPTH)
+        self._write_body(obj)
+        self._depth -= 1
+
+    def _write_body(self, obj: Any) -> None:
         # Immediates first: they never take a link slot.
         if obj is None:
             self._byte(T_NIL)
@@ -775,7 +809,10 @@ class MarshalWriter:
         raw = obj.raw if isinstance(obj, RubyFloat) else None
         # The stored bytes are reused only while they still describe this value,
         # so an edited float is reformatted rather than written back stale.
-        if raw is None or _parse_float(raw) != obj:
+        # 0.0 == -0.0, so the sign of a zero is compared on its own.
+        if raw is None or _parse_float(raw) != obj or (
+                obj == 0 and math.copysign(1.0, _parse_float(raw))
+                != math.copysign(1.0, obj)):
             raw = _format_float(float(obj))
         self._string_bytes(raw)
 
@@ -826,6 +863,9 @@ class MarshalWriter:
     def _write_regexp(self, obj: RubyRegexp) -> None:
         self._byte(T_REGEXP)
         self._string_bytes(obj.source)
+        if not 0 <= obj.options <= 0xFF:
+            raise MarshalError("a regexp's options are one byte, got %d"
+                               % obj.options)
         self._byte(obj.options)
 
     # -- shared helpers -------------------------------------------------------

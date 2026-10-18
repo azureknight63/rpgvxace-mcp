@@ -745,12 +745,20 @@ def _command_texts(ctx: Context, command: RubyObject,
     everything first, which is the same distinction `rendered`'s own
     docstring draws.
     """
+    # One budget for the command, counted across the lists too: the cap used
+    # to apply to the parameters and again to each inner list, so a command of
+    # 64 lists of 64 links to one big string was 4,096 decodes.
+    left = MAX_TEXTS_PER_COMMAND
     out = []
+    # Sliced as well as budgeted: the budget counts decodes, and a Marshal
+    # link lets one million-element list of integers be every command's
+    # parameters -- walked in full, for nothing, by each of them.
     for value in as_list(command.get("parameters"))[:MAX_TEXTS_PER_COMMAND]:
-        if isinstance(value, RubyString):
-            out.append(subject_text(ctx, value, matcher))
-        elif isinstance(value, list):
-            out.extend(subject_text(ctx, v, matcher)
-                       for v in value[:MAX_TEXTS_PER_COMMAND]
-                       if isinstance(v, RubyString))
+        for part in (value[:MAX_TEXTS_PER_COMMAND]
+                     if isinstance(value, list) else (value,)):
+            if left <= 0:
+                return [t for t in out if t]
+            if isinstance(part, RubyString):
+                out.append(subject_text(ctx, part, matcher))
+                left -= 1
     return [t for t in out if t]

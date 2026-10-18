@@ -42,6 +42,7 @@ from ..schema import (
     MAX_REGION_ID,
     META_LAYER,
     TILESET_SHEET_NAMES,
+    on_map,
     with_region,
 )
 from .map_common import MAX_CELLS_PER_READ, _check_budget
@@ -167,10 +168,28 @@ _SPEC_HELP = (
     "map_tiles, written as a number in a string, names the same kind.")
 
 
+_MAX_KIND_SPELLING = 32
+
+
+def _is_number(text: str) -> bool:
+    """Whole-number text `int()` will take: ASCII digits, and few of them.
+
+    `str.isdigit()` is True for "\u00b2" and "\u0663", which `int()` then
+    refuses with a bare ValueError instead of the spelling help.
+    """
+    return text.isascii() and text.isdigit()
+
+
 def _parse_kind(spec: str, what: str) -> _Kind:
     """A kind spelled by the caller, or a refusal that says how to spell it."""
     text = spec.strip()
-    if text.isdigit():
+    if len(text) > _MAX_KIND_SPELLING:
+        # A spelling is a few characters. Refused before it is echoed: it went
+        # whole into every refusal below, past the reply-size ceilings.
+        raise ToolError("%s is %d characters long; a kind is written like "
+                        "A2:0 or a tile id. %s"
+                        % (what, len(text), _SPEC_HELP))
+    if _is_number(text):
         tile_id = int(text)
         kind = kind_of(tile_id)
         if kind is not None:
@@ -190,7 +209,7 @@ def _parse_kind(spec: str, what: str) -> _Kind:
     else:
         raise ToolError("%s %r names no A1-A5 sheet. %s"
                         % (what, spec, _SPEC_HELP))
-    if not index.isdigit() or int(index) >= count:
+    if not _is_number(index) or int(index) >= count:
         raise ToolError("%s %r: %s has blocks 0 to %d. %s"
                         % (what, spec, sheet, count - 1, _SPEC_HELP))
     if sheet == "A5":
@@ -314,7 +333,7 @@ def _cells(args: dict[str, Any], width: int,
             raise ToolError("cells[%d] must be an [x, y] pair" % index)
         x = as_int(pair[0], "cells[%d][0]" % index)
         y = as_int(pair[1], "cells[%d][1]" % index)
-        if not (0 <= x < width and 0 <= y < height):
+        if not on_map(x, y, width, height):
             raise ToolError("cells[%d] is (%d, %d), outside this %dx%d map"
                             % (index, x, y, width, height))
         out.append((x, y))

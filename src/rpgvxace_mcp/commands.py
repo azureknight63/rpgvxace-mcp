@@ -3,7 +3,8 @@
 Command codes come from the ``Game_Interpreter`` that ships with each engine, so
 :data:`ENGINE_COMMANDS` holds exactly the codes that engine dispatches, plus the
 continuation codes that only ever appear in data files. VX Ace's set is VX's
-plus fifteen additions (see :data:`ACE_ONLY_COMMANDS`).
+plus fifteen interpreter commands and the continuation code 405 (see
+:data:`ACE_ONLY_COMMANDS`).
 
 Parameter layouts are given in :data:`PARAM_SPECS` for the commands that are
 worth authoring directly. Codes missing from that table are still read, listed
@@ -16,12 +17,15 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from .convert import TextCodec, brief, decoded_text
+from .convert import (MAX_JSON_DEPTH, MAX_TEXT_CHARS, TextCodec, brief,
+                      decoded_text)
 from .rubytypes import (
     Color,
+    MAX_NAMES_LISTED,
     RGSSFloats,
     RubyObject,
     RubyString,
+    RubySymbol,
     Tone,
     as_int,
     as_list,
@@ -322,6 +326,9 @@ MAX_CANCEL_KIND = MAX_CHOICES + 1
 # Indentation is read from the file, so it is clamped before being used to build
 # a string: a corrupt command can carry an indent of 2**30.
 MAX_RENDER_INDENT = 64
+# The ceiling on the `indent` of a `raw` entry, which the caller sets by hand.
+# A request's own limit, not a figure taken from the engine: the DSL's own
+# forms compute their indent from how deeply they nest.
 MAX_AUTHORED_INDENT = 99
 
 
@@ -534,7 +541,8 @@ AUDIO_COMMAND_KINDS = {241: "bgm", 245: "bgs", 249: "me", 250: "se"}
 
 # The codes other modules test for by name rather than by number.
 CODE_BLANK = 0          # the empty command every list ends with
-CODE_SHOW_TEXT = 101    # parameters[0] is the face graphic name
+CODE_SHOW_TEXT = 101    # VX and Ace: parameters[0] is the face graphic name;
+                        # XP's layout is just the text (XP_PARAM_SPECS[101])
 CODE_LABEL = 118
 CODE_JUMP_TO_LABEL = 119
 CODE_TRANSFER_PLAYER = 201
@@ -727,7 +735,10 @@ def command_name(code: Any, engine: str = "vx_ace") -> str:
         # million-link Array is not a thing to put in a line of output.
         return "Unknown (%s)" % brief(code)
     known = (XP_COMMAND_NAMES if engine == "xp" else COMMAND_NAMES).get(number)
-    return known if known is not None else "Unknown (%d)" % number
+    # `_display_safe`: `as_int` accepts an Integer of any size, and `%d` of
+    # one past 4300 digits raises.
+    return known if known is not None else "Unknown (%s)" % _display_safe(
+        number)
 
 
 # ---------------------------------------------------------------------------
@@ -749,7 +760,7 @@ def _text(value: Any, codec: TextCodec) -> str:
         # object. `decoded_text` would say `<RubyObject>`, which names this
         # reader's wrapper rather than anything that is in the file.
         return "<%s>" % decoded_text(codec, value.cls)
-    return decoded_text(codec, value)
+    return decoded_text(codec, _display_safe(value))
 
 
 def _id_range(start: Any, end: Any, singular: str, plural: str) -> str:
@@ -764,6 +775,103 @@ def _param(params: list[Any], index: int, default: Any = None) -> Any:
     return params[index] if len(params) > index else default
 
 
+# A parameter is whatever the file put in its slot, and two things Marshal
+# writes in a few bytes defeat the renderers that print or look one up: an
+# Integer of thousands of digits (CPython refuses to turn one into a string
+# at all) and an Array (unhashable as a `dict.get` key, and as long as its
+# `repr` is wide). The ones that read a slot through `p` get neither.
+MAX_PARAM_BITS = 64
+# How many entries of an Array out of the file a renderer can reach. The
+# longest list a renderer shows is `MAX_NAMES_LISTED`; the rest is a count.
+MAX_PARAM_ITEMS = 100
+
+
+class _HugeInteger(int):
+    """An Integer past a Fixnum, standing in for itself.
+
+    Clamped to one past the Fixnum range, so every comparison with a table
+    key or an id still comes out the way the real value would, and `%d`
+    prints twenty digits; `%s` and `repr` say how big it was instead. Two of
+    them are equal only if the values they stand for are: `_id_range` folds
+    `start == end` into one id, and 2**70..2**80 is not one.
+    """
+
+    def __new__(cls, value: int):
+        clamped = 1 << MAX_PARAM_BITS
+        shown = super().__new__(cls, clamped if value > 0 else -clamped)
+        shown.bits = value.bit_length()
+        shown.original = value
+        return shown
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, _HugeInteger):
+            return self.original == other.original
+        return int.__eq__(self, other)
+
+    def __ne__(self, other: Any) -> bool:
+        result = self.__eq__(other)
+        return result if result is NotImplemented else not result
+
+    __hash__ = int.__hash__
+
+    def __repr__(self) -> str:
+        return "<Integer, %d bits>" % self.bits
+
+    __str__ = __repr__
+
+
+class _BoundedList(list):
+    """An Array out of the file, safe to print and to look up, and cheap.
+
+    It holds a short prefix and remembers how long the whole was: Marshal
+    links let one Array of a million entries sit in the slot of every command
+    for a few bytes each, so a copy per command would turn one step of a walk
+    budget into the length of the Array. `len` is the true length, which is
+    all `rendered` and `reprlib` ask of what they do not show; indexing and
+    iteration reach the prefix. A hash, so `TABLE.get(array, default)` misses
+    instead of raising `unhashable`, and a `repr` that stops where `brief`
+    does.
+    """
+
+    def __init__(self, value: list[Any]):
+        super().__init__(value[:MAX_PARAM_ITEMS])
+        self._total = len(value)
+
+    def __len__(self) -> int:
+        return self._total
+
+    def __repr__(self) -> str:
+        return brief(self)
+
+    __str__ = __repr__
+
+    def __hash__(self) -> int:
+        return 0
+
+
+# Named for what it stands in for. `decoded_text` says `<list>` of a list by
+# its type's name, and `reprlib` (so `brief`) picks its bounded list renderer
+# by the same name: under its own name the wrapper put `<_BoundedList>` in a
+# line and truncated a long list a second time with a different marker.
+_BoundedList.__name__ = "list"
+
+
+def _display_safe(value: Any) -> Any:
+    """The value a renderer may print, or look up, without failing."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value.bit_length() > MAX_PARAM_BITS:
+        return _HugeInteger(value)
+    if type(value) is list:
+        return _BoundedList(value)
+    if isinstance(value, RubySymbol) and len(value) > MAX_TEXT_CHARS:
+        # A name is a few characters; a megabyte one is a value to say the
+        # length of, and `%s` would copy all of it into the line.
+        return "%s... (%d characters)" % (str(value)[:MAX_TEXT_CHARS],
+                                          len(value))
+    return value
+
+
 class _Params:
     """One command's parameters, read by position with a default.
 
@@ -772,15 +880,24 @@ class _Params:
     `describe_condition` takes the list, being callable from outside this
     module. One example, not two: the choices renderer's `as_list(p(0))`
     was the other, and that goes through `__call__` like any other slot.
+
+    Every slot is read through `_display_safe`, once, so a renderer that
+    formats or looks up what it reads cannot be stopped by what the file
+    put there. `params` is the file's own list, for the code that wants it.
     """
 
-    __slots__ = ("params",)
+    __slots__ = ("params", "_safe")
 
     def __init__(self, params: list[Any]):
         self.params = params
+        self._safe: dict[int, Any] = {}
 
     def __call__(self, index: int, default: Any = None) -> Any:
-        return _param(self.params, index, default)
+        if len(self.params) <= index:
+            return default
+        if index not in self._safe:
+            self._safe[index] = _display_safe(self.params[index])
+        return self._safe[index]
 
 
 def _show_text_line(p: _Params, codec: TextCodec, name: str) -> str:
@@ -1131,7 +1248,7 @@ def summarize(command: RubyObject, codec: TextCodec,
     spec = (XP_PARAM_SPECS if xp else ALL_PARAM_SPECS).get(code)
     if spec and spec[-1] != VARIADIC:
         pairs = ", ".join(
-            "%s=%s" % (field, _text(params[i], codec))
+            "%s=%s" % (field, _text(p(i), codec))
             for i, field in enumerate(spec) if len(params) > i
         )
         return "%s (%s)" % (name, pairs) if pairs else name
@@ -1151,7 +1268,7 @@ def _value(value: Any, codec: TextCodec) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
-        return str(value)
+        return str(_display_safe(value))
     return _text(value, codec)
 
 
@@ -1173,8 +1290,8 @@ def describe_condition(params: list[Any], codec: TextCodec) -> str:
     """
     if not params:
         return "?"
-    kind = params[0]
     p = _Params(params)
+    kind = p(0)
     # The noun, from the table that holds the nouns.
     noun = CONDITION_KINDS.get(kind, "")
 
@@ -1208,7 +1325,10 @@ def describe_condition(params: list[Any], codec: TextCodec) -> str:
     # whose elements both come out of the file, and `%s` on a list calls
     # `repr` on every element with nothing capping either. The kind is what
     # selects this branch, so a crafted map picks it.
-    return "condition type %s %s" % (brief(kind), brief(params[1:]))
+    rest = params[1:1 + MAX_NAMES_LISTED]
+    more = len(params) - 1 - len(rest)
+    return "condition type %s %s%s" % (
+        brief(kind), brief(rest), " and %d more" % more if more > 0 else "")
 
 
 def _character(value: Any) -> str:
@@ -1253,6 +1373,14 @@ MESSAGE_LINES_PER_BOX = 4
 # levels deep; the cap keeps a hostile payload from exhausting the stack.
 MAX_DSL_DEPTH = 32
 
+# A command code is a small number (the engine's highest is in the 600s), and
+# the script editor's writes stay under four digits; a raw code outside this is
+# not one any interpreter dispatches on.
+MAX_COMMAND_CODE = 9999
+
+# Control Self Switch and the condition for it: the four every engine has.
+SELF_SWITCH_LETTERS = ("A", "B", "C", "D")
+
 
 def compile_commands(entries: list[dict[str, Any]], codec: TextCodec,
                      indent: int = 0, depth: int = 0,
@@ -1273,11 +1401,12 @@ def compile_commands(entries: list[dict[str, Any]], codec: TextCodec,
             "any event needs" % MAX_DSL_DEPTH
         )
     if not isinstance(entries, list):
-        raise CommandError("commands must be an array, got %r" % (entries,))
+        raise CommandError("commands must be an array, got %s" % brief(entries))
     out: list[RubyObject] = []
     for entry in entries:
         if not isinstance(entry, dict):
-            raise CommandError("each command entry must be an object, got %r" % (entry,))
+            raise CommandError("each command entry must be an object, got %s"
+                               % brief(entry))
         recognised = sorted(SUPPORTED_KEYS & set(entry))
         if len(recognised) > 1:
             # First-key-wins would silently compile one and drop the other,
@@ -1354,7 +1483,7 @@ def _compile_raw(entry: dict[str, Any], enc: TextCodec, indent: int,
     raw = _needs_object(entry["raw"], "raw")
     if "code" not in raw:
         raise CommandError('a "raw" entry needs a "code"')
-    code = _needs_int(raw["code"], "raw.code")
+    code = _bounded(raw["code"], "raw.code", 0, MAX_COMMAND_CODE)
     given = raw.get("indent", indent)
     raw_indent = _needs_int(given, "raw.indent")
     if not 0 <= raw_indent <= MAX_AUTHORED_INDENT:
@@ -1363,8 +1492,9 @@ def _compile_raw(entry: dict[str, Any], enc: TextCodec, indent: int,
             % (MAX_AUTHORED_INDENT, raw_indent))
     params = raw.get("parameters", [])
     if not isinstance(params, list):
-        raise CommandError("raw.parameters must be an array, got %r" % (params,))
-    return [_cmd(code, raw_indent, [_literal(v, enc) for v in params])]
+        raise CommandError("raw.parameters must be an array, got %s"
+                           % brief(params))
+    return [_cmd(code, raw_indent, [_literal(v, enc, 1) for v in params])]
 
 
 def _compile_switch(entry: dict[str, Any], enc: TextCodec, indent: int,
@@ -1373,6 +1503,9 @@ def _compile_switch(entry: dict[str, Any], enc: TextCodec, indent: int,
     state = _switch_state(entry)
     switch_id = _needs_int(entry["switch"], "switch")
     end = _needs_int(entry.get("switch_end", switch_id), "switch_end")
+    if end < switch_id:
+        raise CommandError("switch_end (%d) is before switch (%d); a range "
+                           "runs upward" % (end, switch_id))
     return [_cmd(CODE_CONTROL_SWITCHES, indent, [switch_id, end, state])]
 
 
@@ -1381,7 +1514,7 @@ def _compile_self_switch(entry: dict[str, Any], enc: TextCodec, indent: int,
     """Control Self Switch: A, B, C or D on this event."""
     state = _switch_state(entry)
     return [_cmd(CODE_CONTROL_SELF_SWITCH, indent,
-                 [enc.make_string(str(entry["self_switch"])), state])]
+                 [enc.make_string(_self_switch(entry["self_switch"])), state])]
 
 
 def _compile_loop(entry: dict[str, Any], enc: TextCodec, indent: int,
@@ -1403,9 +1536,9 @@ def _compile_transfer(entry: dict[str, Any], enc: TextCodec, indent: int,
     # from where the caller said and the reply reported success.
     return [_cmd(CODE_TRANSFER_PLAYER, indent, [
         _needs_int(t.get("designation", 0), "transfer.designation"),
-        _needs_int(t["map_id"], "transfer.map_id"),
-        _needs_int(t["x"], "transfer.x"),
-        _needs_int(t["y"], "transfer.y"),
+        _needs_int(_required(t, "map_id", "transfer"), "transfer.map_id"),
+        _needs_int(_required(t, "x", "transfer"), "transfer.x"),
+        _needs_int(_required(t, "y", "transfer"), "transfer.y"),
         _needs_int(t.get("direction", 0), "transfer.direction"),
         _needs_int(t.get("fade", 0), "transfer.fade"),
     ])]
@@ -1496,13 +1629,11 @@ def _compile_variable(entry: dict[str, Any], indent: int,
     """
     variable_id = _needs_int(entry["variable"], "variable")
     end = _needs_int(entry.get("variable_end", variable_id), "variable_end")
-    operation = entry.get("op", entry.get("operation", "set"))
-    op_code = VARIABLE_OP_CODES.get(operation)
-    if op_code is None:
-        raise CommandError(
-            "unknown variable operation %r; use one of %s"
-            % (operation, ", ".join(sorted(VARIABLE_OP_CODES)))
-        )
+    if end < variable_id:
+        raise CommandError("variable_end (%d) is before variable (%d); a "
+                           "range runs upward" % (end, variable_id))
+    op_code = _named(entry.get("op", entry.get("operation", "set")),
+                     VARIABLE_OP_CODES, "the variable operation")
     if "from_variable" in entry:
         operand_type = OPERAND_VARIABLE
         operand = _needs_int(entry["from_variable"], "from_variable")
@@ -1516,8 +1647,8 @@ def _compile_variable(entry: dict[str, Any], indent: int,
         # the shape.
         if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
             raise CommandError(
-                "random takes two whole numbers, [low, high]; got %r"
-                % (bounds,))
+                "random takes two whole numbers, [low, high]; got %s"
+                % brief(bounds))
         operand_type = OPERAND_RANDOM
         operand = _needs_int(bounds[0], "random low")
         operand2 = _needs_int(bounds[1], "random high")
@@ -1541,7 +1672,7 @@ def _compile_if(entry: dict[str, Any], enc: TextCodec, indent: int,
     out = [_cmd(CODE_CONDITIONAL_BRANCH, indent, params)]
     out += compile_commands(entry.get("then", []), enc, indent + 1, depth + 1,
                             engine)
-    if entry.get("else"):
+    if entry.get("else") is not None:
         out.append(_cmd(CODE_ELSE, indent, []))
         out += compile_commands(entry["else"], enc, indent + 1, depth + 1,
                                 engine)
@@ -1554,7 +1685,8 @@ def _compile_condition(cond: dict[str, Any], enc: TextCodec) -> list[Any]:
         return [COND_SWITCH, _needs_int(cond["switch"], "switch"),
                 _switch_state(cond)]
     if "self_switch" in cond:
-        return [COND_SELF_SWITCH, enc.make_string(str(cond["self_switch"])),
+        return [COND_SELF_SWITCH,
+                enc.make_string(_self_switch(cond["self_switch"])),
                 _switch_state(cond)]
     if "variable" in cond:
         comparison = COMPARISON_CODES.get(str(cond.get("compare", ">=")))
@@ -1585,7 +1717,8 @@ def _compile_condition(cond: dict[str, Any], enc: TextCodec) -> list[Any]:
 def _compile_choices(entry: dict[str, Any], enc: TextCodec, indent: int,
                      depth: int, engine: str) -> list[RubyObject]:
     if not isinstance(entry["choices"], list):
-        raise CommandError("choices must be an array, got %r" % (entry["choices"],))
+        raise CommandError("choices must be an array, got %s"
+                           % brief(entry["choices"]))
     choices = list(entry["choices"])
     if not 1 <= len(choices) <= MAX_CHOICES:
         raise CommandError("the engine allows 1 to %d choices, got %d"
@@ -1598,7 +1731,7 @@ def _compile_choices(entry: dict[str, Any], enc: TextCodec, indent: int,
     given = entry.get("branches")
     if given is not None and not isinstance(given, list):
         raise CommandError("branches must be an array of command lists, "
-                           "got %r" % (given,))
+                           "got %s" % brief(given))
     branches = as_list(given)
     if len(branches) > len(choices):
         # Refused, not truncated. `body = branches[index] if index <
@@ -1633,7 +1766,7 @@ def _compile_choices(entry: dict[str, Any], enc: TextCodec, indent: int,
     if not 0 <= cancel <= MAX_CANCEL_KIND:
         raise CommandError(
             "cancel must be 0 to %d: 0 disallows cancelling, 1 to %d picks "
-            "that choice, and %d routes to the cancel_branch. Got %r."
+            "that choice, and %d routes to the cancel_branch. Got %d."
             % (MAX_CANCEL_KIND, MAX_CHOICES, MAX_CANCEL_KIND, cancel))
     out = [_cmd(CODE_SHOW_CHOICES, indent,
                 [[enc.make_string(str(c)) for c in choices], cancel])]
@@ -1855,6 +1988,14 @@ def _bare(entry: dict[str, Any], key: str, code: int,
         raise CommandError('write %s as {"%s": true}, got %s'
                            % (key, key, brief(entry[key])))
     return [_cmd(code, indent, [])]
+
+
+def _self_switch(value: Any) -> str:
+    """A self switch's letter: the engine has A, B, C and D."""
+    if value not in SELF_SWITCH_LETTERS:
+        raise CommandError("self_switch must be one of %s, got %s"
+                           % (", ".join(SELF_SWITCH_LETTERS), brief(value)))
+    return value
 
 
 def _needs_text(value: Any, what: str) -> str:
@@ -2481,82 +2622,104 @@ def _switch_state(mapping: dict[str, Any], default: str = "on") -> int:
     if isinstance(value, bool):
         return 0 if value else 1
     if isinstance(value, int):
+        if value not in (0, 1):
+            raise CommandError("a switch state is 0 (on) or 1 (off), got %d"
+                               % value)
         return value
     text = str(value).strip().lower()
     if text in ("on", "true", "yes"):
         return 0
     if text in ("off", "false", "no"):
         return 1
-    raise CommandError("expected on or off, got %r" % (value,))
+    raise CommandError("expected on or off, got %s" % brief(value))
 
 
 def _needs_object(value: Any, what: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise CommandError("%s must be an object, got %r" % (what, value))
+        raise CommandError("%s must be an object, got %s" % (what, brief(value)))
     return value
 
 
 def _needs_int(value: Any, what: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise CommandError("%s must be a whole number, got %r" % (what, value))
+        raise CommandError("%s must be a whole number, got %s"
+                           % (what, brief(value)))
     return value
 
 
-def _literal(value: Any, enc: TextCodec) -> Any:
-    """Convert a JSON literal from a ``raw`` entry into a Ruby value."""
+def _literal(value: Any, enc: TextCodec, depth: int = 0) -> Any:
+    """Convert a JSON literal from a ``raw`` entry into a Ruby value.
+
+    Bounded in depth: the writer has no limit and the reader refuses past 192,
+    so a literal nested a few hundred levels was written and the file then
+    could not be opened through the server.
+    """
+    if depth > MAX_JSON_DEPTH:
+        raise CommandError("a parameter is nested more than %d levels deep"
+                           % MAX_JSON_DEPTH)
     if isinstance(value, str):
         return enc.make_string(value)
     if isinstance(value, list):
-        return [_literal(v, enc) for v in value]
+        return [_literal(v, enc, depth + 1) for v in value]
     if isinstance(value, dict):
-        return _literal_object(value, enc)
+        return _literal_object(value, enc, depth)
     return value
 
 
-def _literal_object(value: dict[str, Any], enc: TextCodec) -> Any:
+def _literal_object(value: dict[str, Any], enc: TextCodec,
+                    depth: int = 0) -> Any:
     """Build a Ruby object from ``{"__class__": "RPG::AudioFile", ...}``."""
     cls = value.get("__class__")
-    if not cls:
+    if not cls or not isinstance(cls, str):
         raise CommandError(
             'object parameters need a "__class__" key naming the Ruby class, got %s'
-            % sorted(value)
+            % brief(sorted(value, key=str))
         )
     if cls == "RPG::MoveRoute":
-        return _build_move_route(value, enc)
+        return _build_move_route(value, enc, depth)
     obj = RubyObject(cls)
     for key, item in value.items():
         if key != "__class__":
-            obj.set(key, _literal(item, enc))
+            obj.set(key, _literal(item, enc, depth + 1))
     # A JSON object's keys come in whatever order the caller typed them.
     return in_editor_order(obj)
 
 
-def _build_move_route(value: dict[str, Any], enc: TextCodec) -> RubyObject:
+def _build_move_route(value: dict[str, Any], enc: TextCodec,
+                      depth: int = 0) -> RubyObject:
     """Build an RPG::MoveRoute from a JSON object.
 
     The steps may be given as ``list`` (the field's real name) or ``commands``;
     both are accepted because the former reads oddly in hand-written JSON.
     """
     route = RubyObject("RPG::MoveRoute", {
-        "@repeat": bool(value.get("repeat", False)),
-        "@skippable": bool(value.get("skippable", False)),
-        "@wait": bool(value.get("wait", False)),
+        "@repeat": _needs_bool(value.get("repeat", False), "repeat"),
+        "@skippable": _needs_bool(value.get("skippable", False), "skippable"),
+        "@wait": _needs_bool(value.get("wait", False), "wait"),
         "@list": [],
     })
     steps = value.get("list", value.get("commands", []))
     if not isinstance(steps, list):
-        raise CommandError("a move route's list must be an array, got %r" % (steps,))
-    commands = [
-        new_move_command(_needs_int(c.get("code", 0), "move code"),
-                         [_literal(p, enc) for p in c.get("parameters", [])])
-        for c in steps
-    ]
+        raise CommandError("a move route's list must be an array, got %s"
+                           % brief(steps))
+    commands = [_raw_route_step(step, enc, depth) for step in steps]
     # A route ends with a blank command. Only add one if the caller has not --
     # a read-modify-write of an existing route already carries it.
     if not commands or (commands[-1].get("code") or 0) != 0:
         commands.append(new_move_command(0, []))
     route.set("list", commands)
     return route
+
+
+def _raw_route_step(step: Any, enc: TextCodec, depth: int) -> RubyObject:
+    """One step of a hand-built move route: ``{"code": 1, "parameters": []}``."""
+    step = _needs_object(step, "a move route step")
+    given = step.get("parameters", [])
+    if not isinstance(given, list):
+        raise CommandError("a move route step's parameters must be an array, "
+                           "got %s" % brief(given))
+    return new_move_command(_needs_int(step.get("code", 0), "move code"),
+                            [_literal(p, enc, depth + 2) for p in given])
 
 
 def move_route_steps(route: RubyObject, indent: int,

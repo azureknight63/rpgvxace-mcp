@@ -34,6 +34,7 @@ from rpgvxace_mcp.rubytypes import (  # noqa: E402
     RubyHash,
     RubyObject,
     RubyString,
+    RubySymbol,
 )
 from rpgvxace_mcp.tools.registry import (  # noqa: E402
     REGISTRY,
@@ -229,6 +230,8 @@ class TestMapGetBoundsItsEventSummary(SharedObjectMap, ToolTest):
         out = self.assert_bounded("map_get", map_id=1, include_events=True)
         rows = sum(len(event["pages"]) for event in out["events"])
         self.assertLessEqual(rows, map_read_tools.MAX_EVENT_SUMMARY_ROWS)
+        # And not nothing: "at most" is also what an empty summary satisfies.
+        self.assertGreater(rows, 0, "the crafted map produced no rows")
 
     def test_a_stopped_summary_says_so(self):
         self.craft_shared_map()
@@ -614,9 +617,19 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
                         "%s rendered %d characters" % (what, len(line)))
 
     def test_one_long_string_parameter_is_capped(self):
-        """Code 401 is a text line: the whole parameter is the message."""
+        """Code 401 is a text line: the whole parameter is the message.
+
+        Short is not enough: the line has to be the *decoded* text, cut. A
+        `RubyString` has a bounded `repr` of its own now, so a renderer that
+        skipped the codec and printed the object would also be short -- and
+        wrong, which is how this test's guard came to read VACUOUS.
+        """
         huge = self.project.codec.make_string("A" * self.LONG)
-        self.assert_short(self.line_for(401, [huge]), "a text line")
+        line = self.line_for(401, [huge])
+        self.assert_short(line, "a text line")
+        self.assertIn("AAAA", line)
+        self.assertNotIn("RubyString(", line,
+                         "the text was printed as an object, not decoded")
 
     def test_a_long_choice_list_is_capped(self):
         """Show Choices renders every choice, and the list comes from a file."""
@@ -639,6 +652,8 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
             return str(value)
 
         rendered(list(range(self.FANOUT)), counting)
+        # Rendered at all: "at most" is also true of a renderer never called.
+        self.assertGreater(len(calls), 0, "nothing was rendered")
         self.assertLessEqual(
             len(calls), MAX_NAMES_LISTED,
             "%d of %d entries were rendered to produce a result that keeps "
@@ -652,8 +667,11 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
     def test_a_long_string_in_a_specced_field_is_capped(self):
         """The `field=value` branch renders each declared field with `_text`."""
         huge = self.project.codec.make_string("A" * self.LONG)
-        self.assert_short(self.line_for(101, [huge, 0, 0, 2]),
-                          "a Show Text face field")
+        line = self.line_for(101, [huge, 0, 0, 2])
+        self.assert_short(line, "a Show Text face field")
+        self.assertIn("AAAA", line)
+        self.assertNotIn("RubyString(", line,
+                         "the field was printed as an object, not decoded")
 
     def test_an_unknown_condition_kind_is_capped(self):
         """The last line of `describe_condition` renders the rest of the list.
@@ -702,6 +720,127 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
         self.assertIn("variable", self.line_for(301, [1, 5, False, False]))
         self.assertIn("troop 5", self.line_for(301, [0, 5, False, False]))
         self.assertIn("random", self.line_for(301, [2, 0, False, False]))
+
+    # One parameter slot out of the file can hold anything Marshal can write.
+    # Both values are small on disk and are the two that `%s` and `dict.get`
+    # mishandle: an Array is unhashable, and its `repr` is as long as it is
+    # wide; an Integer past 4300 digits raises on conversion to a string, and
+    # `%d` of an infinity or a NaN raises where `%s` of one does not.
+    BAD_VALUES = {
+        "an array": [1] * 50_000,
+        "a huge integer": 10 ** 5000,
+        "an infinity": float("inf"),
+        "a NaN": float("nan"),
+        "an array holding a huge integer": [10 ** 5000],
+        "a megabyte string": RubyString(b"A" * 1_000_000),
+        "a megabyte symbol": RubySymbol("S" * 1_000_000),
+    }
+    # A line is a few hundred characters plus, at most, twenty of what the
+    # file holds, each bounded: well under this, and far under a megabyte.
+    LINE_CEILING = 8_000
+    ENGINES = ("vx_ace", "vx", "xp")
+
+    def test_no_parameter_slot_of_any_command_can_stop_the_line(self):
+        """Every code the engine names, every slot, both bad values.
+
+        The population is the engine's own command table, not the list of
+        sites someone found: `summarize` looked codes up in a dict at six
+        places with a raw file value for the key (a Conditional Branch kind,
+        a switch operation, a comparison, a variable operation, a goods
+        kind), so an Array there raised `unhashable type` and one command
+        made `event_get`, `search` and `validate` fail for the whole map,
+        while an Integer past 4300 digits raised at the `%s` that formatted
+        it. A listed site is a site that got fixed; this finds the next.
+        """
+        codec = self.project.codec
+        slots = 8
+        tried = 0
+        failures = []
+        for engine in self.ENGINES:
+            for code in sorted(command_module.command_table(engine)):
+                for slot in range(slots):
+                    for what, bad in self.BAD_VALUES.items():
+                        params = [0] * slots
+                        params[slot] = bad
+                        command = new_event_command(code, 0, params)
+                        tried += 1
+                        try:
+                            line = command_module.summarize(
+                                command, codec, engine)
+                        except Exception as exc:  # noqa: BLE001
+                            failures.append("%s code %d slot %d (%s): %s: %s"
+                                            % (engine, code, slot, what,
+                                               type(exc).__name__,
+                                               str(exc)[:50]))
+                            continue
+                        if len(line) > self.LINE_CEILING:
+                            failures.append("%s code %d slot %d (%s): %d "
+                                            "characters" % (engine, code,
+                                                            slot, what,
+                                                            len(line)))
+        # A scan that tried nothing approves of everything.
+        self.assertGreater(tried, 5000, "the table walk found no commands")
+        self.assertEqual(failures, [],
+                         "%d of %d slot values stopped or bloated a line:\n  %s"
+                         % (len(failures), tried, "\n  ".join(failures[:25])))
+
+    def test_a_command_code_that_is_a_huge_integer_is_named_not_formatted(self):
+        """`@code` goes through `as_int`, which accepts any Integer at all."""
+        line = command_module.summarize(
+            new_event_command(10 ** 5000, 0, []), self.project.codec)
+        self.assertIn("bits", line)
+
+    def test_a_shared_huge_array_is_not_copied_for_every_command(self):
+        """One Array linked into the slot of every command is a few bytes each.
+
+        Copying it per command made each line cost the length of the Array
+        where `rendered` had only ever touched twenty entries of it: the
+        wrapper holds a short prefix and says how long the whole was.
+        """
+        big = list(range(1_000_000))
+        wrapped = command_module._display_safe(big)
+        self.assertEqual(len(wrapped), 1_000_000, "the true length is lost")
+        self.assertLessEqual(list.__len__(wrapped), 1_000,
+                             "the wrapper holds %d entries of a shared Array"
+                             % list.__len__(wrapped))
+        line = command_module.summarize(
+            new_event_command(102, 0, [big, 0]), self.project.codec)
+        self.assertIn("more", line, "a clipped list does not say it is longer")
+
+    def test_a_wrapped_list_renders_exactly_as_the_files_own_would(self):
+        """The wrapper is for what crashes; for what does not it must be silent.
+
+        A list in a text slot is `<list>` to `decoded_text`, which names the
+        type, and `brief` dispatches on the type's name too: a wrapper that is
+        called something else leaks its own name into the line and truncates
+        a long list a second time with a different marker.
+        """
+        codec = self.project.codec
+        line = command_module.summarize(
+            new_event_command(401, 0, [[1, 2]]), codec)
+        self.assertIn("<list>", line)
+        self.assertNotIn("_BoundedList", line)
+        from rpgvxace_mcp.convert import brief
+        plain = list(range(1000))
+        wrapped = command_module._display_safe(list(plain))
+        self.assertIsInstance(wrapped, list)
+        self.assertEqual(brief(wrapped), brief(plain))
+        self.assertEqual(str(wrapped), brief(plain))
+
+    def test_two_different_huge_integers_stay_different(self):
+        """Clamped for printing and lookup, not for telling one from another.
+
+        `_id_range` collapses `start == end` into one id: with both clamped
+        to the same number, 2**70..2**80 read as a single switch.
+        """
+        codec = self.project.codec
+        line = command_module.summarize(
+            new_event_command(121, 0, [2 ** 70, 2 ** 80, 0]), codec)
+        self.assertIn("71 bits", line)
+        self.assertIn("81 bits", line)
+        same = command_module.summarize(
+            new_event_command(121, 0, [2 ** 70, 2 ** 70, 0]), codec)
+        self.assertNotIn("81 bits", same)
 
     def test_a_command_code_that_is_not_a_number_is_rendered_anyway(self):
         """`@code` is read from the file, and every other reader coerces it.
@@ -772,7 +911,9 @@ class TestARawPathCannotBeUnboundedlyLong(ToolTest):
         long_path = "/".join(["events"] + ["1"] * 5000)
         with self.assertRaises(ToolError) as caught:
             self.call("raw_data", op="get", map_id=1, path=long_path)
-        self.assertIn(str(MAX_PATH_SEGMENTS), str(caught.exception))
+        # The clause that states the ceiling, not the digits (which "5001"
+        # also holds).
+        self.assertIn("at most %d" % MAX_PATH_SEGMENTS, str(caught.exception))
 
     def test_an_ordinary_path_still_resolves(self):
         out = self.call("raw_data", op="get", map_id=1, path="events/1/name")
@@ -881,12 +1022,21 @@ class TestTheTileRectangleUsesTheBuffer(ToolTest):
                                  % (x, y))
 
     def test_a_write_round_trips_through_the_file(self):
-        """The mask `Table.set` used to apply has to still be applied."""
+        """The mask `Table.set` used to apply has to still be applied.
+
+        The edges of the cell: 1 to 4 are untouched by any mask or sign
+        handling, so they could not show one. 0 and 0xFFFF are where a wrong
+        mask or typecode changes the value, and one past it is refused.
+        """
+        edge = [[0, 65535], [2816, 1]]
         self.call("map_tiles", op="write", map_id=1, x=0, y=0, z=0,
-                  width=2, height=2, rows=[[1, 2], [3, 4]])
+                  width=2, height=2, rows=edge)
         out = self.call("map_tiles", op="read", map_id=1, x=0, y=0, width=2,
                         height=2, z=0)
-        self.assertEqual(out["rows"], [[1, 2], [3, 4]])
+        self.assertEqual(out["rows"], edge)
+        with self.assertRaises(ToolError):
+            self.call("map_tiles", op="write", map_id=1, x=0, y=0, z=0,
+                      width=1, height=1, rows=[[65536]])
 
 
 class TestAListingBuildsOnlyItsWindow(ToolTest):
@@ -907,9 +1057,15 @@ class TestAListingBuildsOnlyItsWindow(ToolTest):
                            "the count must still say how many matched")
 
     def test_map_list_takes_a_window(self):
-        out = self.call("map_list", limit=1)
+        from unittest import mock
+        with mock.patch.object(self.ctx.project, "map_file",
+                               wraps=self.ctx.project.map_file) as built:
+            out = self.call("map_list", limit=1)
         self.assertEqual(len(out["maps"]), 1)
         self.assertGreater(out["matching_maps"], 1)
+        # A row's file name is asked for as the row is built: one row built,
+        # one asked. Slicing after building all of them asks for each.
+        self.assertEqual(built.call_count, 1)
 
     def test_map_list_pages(self):
         first = self.call("map_list", limit=1)["maps"][0]["id"]

@@ -75,6 +75,48 @@ class TestScale(unittest.TestCase):
         self.assertLess(large, max(small, 1e-4) * 3.2 + 0.05)
 
 
+class TestKeysThatShareAHash(unittest.TestCase):
+    """Equal hashes are not equal keys.
+
+    CPython hashes an int modulo 2**61 - 1, so 5, 5 + M and 5 + 2M all hash
+    to 5. The index leaves such ints out (a pile of them is the quadratic
+    case); whatever it does, an index that deduplicated on the hash alone
+    would merge three different keys into one, and every other test in this
+    file passes that.
+    """
+
+    M = 2 ** 61 - 1
+
+    def keys(self):
+        keys = [5, 5 + self.M, 5 + 2 * self.M]
+        self.assertEqual(len({hash(k) for k in keys}), 1,
+                         "the keys do not collide, so this tests nothing")
+        return keys
+
+    def test_each_key_keeps_its_own_value(self):
+        h = RubyHash()
+        for number, key in enumerate(self.keys()):
+            h.set(key, number)
+        self.assertEqual(len(h.pairs), 3)
+        for number, key in enumerate(self.keys()):
+            self.assertEqual(h.get(key), number, key)
+
+    def test_deleting_one_leaves_the_others(self):
+        h = RubyHash([(key, number) for number, key in enumerate(self.keys())])
+        h.delete(self.keys()[1])
+        self.assertIsNone(h.get(self.keys()[1]))
+        self.assertEqual(h.get(self.keys()[0]), 0)
+        self.assertEqual(h.get(self.keys()[2]), 2)
+        self.assertEqual(len(h.pairs), 2)
+
+    def test_setting_one_again_replaces_only_that_one(self):
+        h = RubyHash([(key, number) for number, key in enumerate(self.keys())])
+        h.set(self.keys()[2], "again")
+        self.assertEqual(len(h.pairs), 3)
+        self.assertEqual(h.get(self.keys()[2]), "again")
+        self.assertEqual(h.get(self.keys()[0]), 0)
+
+
 class TestSemantics(unittest.TestCase):
 
     def test_insertion_order_and_replacement_keeps_position(self):

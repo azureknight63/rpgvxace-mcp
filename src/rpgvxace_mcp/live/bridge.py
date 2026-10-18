@@ -194,11 +194,12 @@ module MCPBridge
     raw = File.open(REQUEST, "rb") { |f| f.read }
     File.delete(REQUEST)
     request = Marshal.load(raw)
+    raise TypeError, "a request is a Hash" unless request.is_a?(Hash)
     handle(request)
   rescue RGSSReset, SystemExit
     raise
   rescue Exception => e
-    respond(request ? request["seq"] : nil, false, nil,
+    respond(request.is_a?(Hash) ? request["seq"] : nil, false, nil,
             "#{e.class}: #{e.message}")
   end
 
@@ -224,7 +225,9 @@ module MCPBridge
       @paused = false
       respond(seq, true, status)
     when "step"
-      @step_left = args["frames"].to_i
+      frames = args["frames"].to_i
+      raise ArgumentError, "frames must be at least 1" if frames < 1
+      @step_left = frames
       @pending = [seq, "step"]
       @paused = false
     when "input"
@@ -684,15 +687,24 @@ def ruby_source() -> str:
     return text
 
 
+_SLOT_INFLATE_LIMIT = 32 * 1024 * 1024
+
+
 def _slot_code(row: Any) -> bytes:
     """One slot's Ruby, or nothing if the slot is not shaped like one."""
     if not (isinstance(row, list) and len(row) >= 3
             and isinstance(row[2], RubyString)):
         return b""
+    # Bounded: a slot is a few hundred KB of Ruby at most, and a crafted
+    # Scripts file can hold a slot that inflates to a gigabyte.
+    stream = zlib.decompressobj()
     try:
-        return zlib.decompress(row[2].data)
+        code = stream.decompress(row[2].data, _SLOT_INFLATE_LIMIT)
     except zlib.error:
         return b""
+    if stream.unconsumed_tail:
+        return b""
+    return code
 
 
 def _slot_name(row: Any) -> bytes:

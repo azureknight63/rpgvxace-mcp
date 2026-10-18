@@ -169,7 +169,9 @@ def _calls(project: Project, commands: list[Any]) -> "set[int] | None":
     for text, _ in _script_blocks(project, commands):
         for match in _RESERVE_COMMON.finditer(
                 _strip_comments_and_strings(text)):
-            if match.group(1) is None:
+            # A run of more than nine digits is not an id any project has
+            # (and `int()` of 4,300 would raise): treat it as "any".
+            if match.group(1) is None or len(match.group(1)) > 9:
                 return None
             called.add(int(match.group(1)))
     return called
@@ -211,15 +213,22 @@ class _ScriptExits:
         for m in maps:
             roots = _union(self.map_calls.get(m, set()), roots)
         every = set(self.common_calls)
+        if roots is None:
+            return every
         seen: set[int] = set()
-        frontier = list(every if roots is None else roots)
+        frontier = list(roots)
         while frontier:
             current = frontier.pop()
             if current in seen:
                 continue
             seen.add(current)
             calls = self.common_calls.get(current, set())
-            frontier.extend(every if calls is None else calls)
+            if calls is None:
+                # Any common event can run from here, so the closure is all
+                # of them. Pushing `every` again for each such event was
+                # N * N entries for N events that each call a non-literal id.
+                return seen | every
+            frontier.extend(calls)
         return seen
 
 

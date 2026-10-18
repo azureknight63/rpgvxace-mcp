@@ -588,7 +588,7 @@ class TestEveryWalkOnAWritePathIsBounded(SharedObjectMap, ToolTest):
 
     def test_deleting_a_map_bounds_its_reference_scan(self):
         self.craft_shared_map()
-        out = self.assert_bounded("map_edit", op="delete", map_id=3,
+        out = self.assert_bounded("map_edit", op="delete", map_id=2,
                                   dry_run=True)
         self.assertIn("incoming_transfers", out)
         self.assertTrue(
@@ -649,12 +649,18 @@ class TestAnEmptyPageStillCostsSomething(EmptyPageMap, ToolTest):
     def test_the_walk_charges_per_event_and_per_page(self):
         """Not per command: the product is what a crafted file buys."""
         from rpgvxace_mcp import analysis
+        # On the crafted map. This walked the ordinary fixture, which is
+        # small, so `visited < 1000` made the assertion true whatever the
+        # walk charged.
+        self.craft_empty_page_map()
         budget = analysis.WalkBudget()
         visited = 0
-        for _ in analysis.iter_command_lists(self.project, None, budget):
+        for _ in analysis.iter_command_lists(self.ctx.project, None, budget):
             visited += 1
-        self.assertTrue(budget.exhausted or visited < 1000,
-                        "the walk neither ran out nor finished small")
+        self.assertTrue(budget.exhausted,
+                        "%d command lists were walked from a map of "
+                        "millions of empty pages and the allowance never "
+                        "ran out" % visited)
 
     def test_search_stops_and_says_so(self):
         self.craft_empty_page_map()
@@ -736,7 +742,7 @@ class TestAnEmptyPageStillCostsSomething(EmptyPageMap, ToolTest):
 
     def test_deleting_a_map_is_bounded(self):
         self.craft_empty_page_map()
-        out = self.assert_bounded("map_edit", op="delete", map_id=3,
+        out = self.assert_bounded("map_edit", op="delete", map_id=2,
                                   dry_run=True)
         self.assertTrue(
             "stopped" in str(out) or "incomplete" in str(out),
@@ -1799,12 +1805,14 @@ class TestACopiedLocationCarriesEveryField(unittest.TestCase):
     def test_the_copy_sets_nothing_outside_the_slots(self):
         """So a field added to `__slots__` and not to `at` cannot pass."""
         from rpgvxace_mcp.analysis.walk import Location
-        here = Location("db", table="items", entry_id=3)
-        clone = here.at(1)
-        for name in Location.__slots__:
-            with self.subTest(field=name):
-                # Every slot is assigned: an unassigned one raises here.
-                getattr(clone, name)
+        # The earlier test carries every name in COPIED through `at`; this
+        # one closes the other side. `Location.__init__` assigns every slot,
+        # so reading a slot off the clone could never fail -- a slot added to
+        # `__slots__` and not to COPIED read back as None and passed.
+        self.assertEqual(set(Location.__slots__),
+                         {"kind"} | set(Location.COPIED),
+                         "a slot is neither `kind` nor in COPIED, so `at` "
+                         "does not carry it")
 
 
 class TestASetResolvesItsPathOnce(ToolTest):
@@ -1912,17 +1920,22 @@ class TestTheMapListingHasOneTruth(ToolTest):
     def test_a_restore_leaves_them_agreeing(self):
         """The fourth invalidation site, and the one in another module.
 
-        A restore overwrites the files the snapshot holds; it does not
-        delete a map added since, so the created map is still on disk
-        afterwards and still in both forms. What this holds is that the two
-        forms agree across the call -- `assert_agree` is the assertion.
+        A restore overwrites the files the snapshot holds, so it can bring a
+        map file back. That is what makes the call observable: the snapshot
+        is taken with the map present, the map is then deleted, and the
+        restore returns it -- a restore that did not forget the cached
+        listings would leave both forms saying it is still gone. (Restoring
+        over an unchanged set of files, as this did, left both forms stale
+        together and still agreeing, so it passed without the call.)
         """
         self.assert_agree("opening the project")
-        stamp = self.call("backups", op="create", label="t")["backup"]
         free = max(self.project.map_ids_present()) + 1
         self.call("map_edit", op="create", map_id=free, name="New",
                   width=20, height=15)
         self.assertIn(free, self.assert_agree("map_edit op=create"))
+        stamp = self.call("backups", op="create", label="t")["backup"]
+        self.call("map_edit", op="delete", map_id=free)
+        self.assertNotIn(free, self.assert_agree("map_edit op=delete"))
         self.call("backups", op="restore", backup=stamp)
         self.assertIn(free, self.assert_agree("backups op=restore"))
 
@@ -1942,6 +1955,11 @@ class TestTheMapListingHasOneTruth(ToolTest):
         self.assertNotIn(free, self.project.map_ids_present(),
                          "the cache saw a file written behind its back")
         self.assertIn(free, self.project.map_ids_present(refresh=True))
+        # And through the tool the docstring is about: the file the editor
+        # wrote shows as a map file with no tree entry, which it can only do
+        # if `map_list` asked the fresh listing.
+        out = self.call("map_list", refresh=True)
+        self.assertIn(free, out["map_files_without_tree_entry"])
 
 
 # Last in the file, deliberately. It used to sit mid-module,

@@ -245,7 +245,9 @@ class _Tally:
         self.unknown_where: list[str] = []
 
     def read(self, ident: int, row: dict[str, Any]) -> None:
-        if ident >= 1:
+        # Bounded like `write`: a Bignum id out of a crafted file otherwise
+        # becomes a key, and str() of it raises in the report.
+        if 1 <= ident <= _MAX_ID:
             self.reads.setdefault(ident, _Sightings()).add(row)
 
     def write(self, lo: int, hi: int, where: str, how: str) -> None:

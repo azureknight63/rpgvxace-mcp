@@ -90,6 +90,10 @@ MAX_DATA_FILE_BYTES = 128 * 1024 * 1024
 # because nothing legitimate comes near it.
 MAX_GAME_INI_BYTES = 1024 * 1024
 
+# An RTP name is a short word (RPGVXAce). Longer is clipped, because the name
+# is quoted into findings and the file is untrusted.
+_RTP_NAME_CLIP = 64
+
 # A script slot inflates into memory, so a crafted Scripts file must not be
 # able to ask for an unbounded amount of it.
 MAX_SCRIPT_BYTES = 16 * 1024 * 1024
@@ -417,6 +421,10 @@ class Project(BackupStore):
         for section in parser.sections():
             for key in ("rtp", "rtp1", "rtp2", "rtp3"):
                 value = parser[section].get(key, "").strip()
+                # Clipped: this name is quoted into every finding that cannot
+                # be checked against it, and no real RTP name is long.
+                if len(value) > _RTP_NAME_CLIP:
+                    value = value[:_RTP_NAME_CLIP]
                 if value and value not in names:
                     names.append(value)
         return names
@@ -702,6 +710,10 @@ class Project(BackupStore):
         value = self.load_data(key)
         kind = self.container_kind(key, value)
         if kind == ARRAY:
+            # `value[-1] = entry` would replace the last entry.
+            if entry_id < 0:
+                raise ProjectError("an entry id cannot be negative, got %d"
+                                   % entry_id)
             while len(value) <= entry_id:
                 value.append(None)
             value[entry_id] = entry
@@ -712,14 +724,15 @@ class Project(BackupStore):
 
     # -- scripts --------------------------------------------------------------
     def load_scripts(self, with_code: bool = True,
-                     indices: set[int] | None = None) -> list[dict[str, Any]]:
+                     indices: set[int] | None = None,
+                     refresh: bool = False) -> list[dict[str, Any]]:
         """The script editor slots.
 
         ``with_code`` false skips the inflate and decode, which is what a caller
         that only wants the names and sizes should ask for -- a project carrying
         script packs is megabytes of Ruby.
         """
-        raw = self.load_data("scripts")
+        raw = self.load_data("scripts", refresh)
         if not isinstance(raw, list):
             raise ProjectError("Scripts data is not an Array")
         scripts = []
@@ -767,7 +780,7 @@ class Project(BackupStore):
         Mutates the cache only; call :meth:`save_file` to persist it.
         """
         raw = self.load_data("scripts")
-        if not raw:
+        if not isinstance(raw, list) or not raw:
             raise ProjectError("this project's Scripts data holds no slots")
         if not 0 <= index < len(raw):
             raise ProjectError("script index %d is outside 0..%d"
@@ -810,9 +823,13 @@ class Project(BackupStore):
 
         # A unique temp name, opened exclusively: a predictable one in a
         # directory someone else can write is a way to redirect this write.
-        handle, temp_name = tempfile.mkstemp(dir=str(path.parent),
-                                             prefix=path.name + ".",
-                                             suffix=TMP_SUFFIX)
+        try:
+            handle, temp_name = tempfile.mkstemp(dir=str(path.parent),
+                                                 prefix=path.name + ".",
+                                                 suffix=TMP_SUFFIX)
+        except OSError as exc:
+            # A folder that refuses a new file: a message, not a traceback.
+            raise ProjectError("could not write %s: %s" % (filename, exc)) from exc
         temp_path = Path(temp_name)
         try:
             with os.fdopen(handle, "wb") as stream:
@@ -922,7 +939,10 @@ class Project(BackupStore):
         if cached is not None:
             self._assert_not_stale(filename, path, cached)
         backup = self.backup_file(filename)
-        path.unlink()
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise ProjectError("could not delete %s: %s" % (filename, exc)) from exc
         self._cache.pop(filename, None)
         self._forget_map_ids()
         # Deleting is the most destructive thing here, so it is logged like

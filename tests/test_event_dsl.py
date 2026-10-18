@@ -490,14 +490,17 @@ class TestVXLayouts(unittest.TestCase):
         self.assertEqual([c.get("code") for c in out], [205, 505])
 
     def test_an_unmodelled_engine_gets_no_layout_form(self):
+        # An engine this server has no table for. XP used to stand for it
+        # here; XP is a profile now and is refused earlier, by its own
+        # message, so this never reached the branch it is named for.
         with self.assertRaises(CommandError) as caught:
-            compiled({"gold": {"op": "add", "value": 1}}, engine="xp",
+            compiled({"gold": {"op": "add", "value": 1}}, engine="mv",
                      codec=ACE)
-        self.assertIn("xp", str(caught.exception))
+        self.assertIn("does not model", str(caught.exception))
         self.assertIn("raw", str(caught.exception))
         compiled({"gold": {"op": "add", "value": 1}})
         # The forms that predate this table are unchanged.
-        compiled({"switch": 1}, engine="xp", codec=ACE)
+        compiled({"switch": 1}, engine="mv", codec=ACE)
 
 
 # The codes XP's `Interpreter (part 2)` dispatches in `execute_command`,
@@ -652,6 +655,7 @@ class TestTheSpecsSayWhatTheFormsWrite(unittest.TestCase):
             for entry, codes in cases:
                 with self.subTest(engine=engine, entry=entry):
                     out = compiled(entry, engine=engine)
+                    self.assertEqual(len(out), len(codes))
                     for command, code in zip(out, codes):
                         self.assertEqual(command.get("code"), code)
                         self.assertEqual(len(specs[code]),
@@ -661,6 +665,73 @@ class TestTheSpecsSayWhatTheFormsWrite(unittest.TestCase):
         self.assertEqual(len(param_specs("vx_ace")[232]), 12)
         self.assertNotIn(232, param_specs("vx"))
         self.assertIn(232, command_table("vx"))
+
+
+class TestACallersWrongInputIsARefusalNotACrash(unittest.TestCase):
+    """Every shape a caller can get wrong ends in a `CommandError`.
+
+    A bare `TypeError` or `ValueError` reaches `server.py` as "an argument was
+    not the shape the tool expected", which names neither the argument nor the
+    shape, and a value that was coerced instead was written and reported as a
+    success.
+    """
+
+    BAD = [
+        ("an unhashable variable op", {"variable": 1, "op": ["add"]}),
+        ("a reversed variable range", {"variable": 5, "variable_end": 2}),
+        ("a reversed switch range", {"switch": 5, "switch_end": 2}),
+        ("a self switch that is not A to D", {"self_switch": "Z"}),
+        ("a self switch that is not text", {"self_switch": ["A"]}),
+        ("a switch state of 7", {"switch": 1, "value": 7}),
+        ("a transfer with no map", {"transfer": {"x": 1, "y": 1}}),
+        ("a transfer with no x", {"transfer": {"map_id": 1, "y": 1}}),
+        ("a raw code that is not a number", {"raw": {"code": "x"}}),
+        ("a raw code below zero", {"raw": {"code": -1}}),
+        ("a raw object with a list for a class",
+         {"raw": {"code": 108, "parameters": [{"__class__": ["x"]}]}}),
+        ("a move route step that is not an object",
+         {"raw": {"code": 205, "parameters": [0, {
+             "__class__": "RPG::MoveRoute", "list": ["up"]}]}}),
+        ("a move route whose repeat is a string",
+         {"raw": {"code": 205, "parameters": [0, {
+             "__class__": "RPG::MoveRoute", "repeat": "false"}]}}),
+    ]
+
+    def test_each_is_a_command_error(self):
+        for what, entry in self.BAD:
+            with self.subTest(what=what), self.assertRaises(CommandError):
+                compiled(entry)
+
+    def test_nesting_a_raw_parameter_deeply_is_refused(self):
+        value = 1
+        for _ in range(300):
+            value = [value]
+        with self.assertRaises(CommandError):
+            compiled({"raw": {"code": 108, "parameters": [value]}})
+
+    def test_an_empty_else_is_still_written(self):
+        codes = [c.get("code") for c in compiled(
+            {"if": {"switch": 1}, "then": [], "else": []})]
+        self.assertIn(411, codes)
+
+    def test_a_message_quotes_a_huge_value_briefly(self):
+        with self.assertRaises(CommandError) as caught:
+            compiled({"switch": "x" * 100000})
+        self.assertLess(len(str(caught.exception)), 2000)
+
+    def test_ordinary_forms_still_compile(self):
+        for entry in (
+            {"variable": 1, "op": "add", "value": 3},
+            {"variable": 2, "variable_end": 4},
+            {"switch": 3, "switch_end": 3},
+            {"self_switch": "D", "value": "off"},
+            {"switch": 1, "value": 1},
+            {"transfer": {"map_id": 2, "x": 1, "y": 1}},
+            {"choices": ["a", "b"], "cancel": 2},
+            {"raw": {"code": 108, "parameters": ["note"]}},
+        ):
+            with self.subTest(entry=entry):
+                self.assertTrue(compiled(entry))
 
 
 class TestRefusals(unittest.TestCase):
@@ -1099,6 +1170,11 @@ class TestEveryRealCommandRebuilds(unittest.TestCase):
                 out = compile_commands([entry], codec, engine="vx_ace")
                 built = [c for c in out if c.get("code") in (code, 605)]
                 real = [command, *following]
+                if len(built) != len(real):
+                    # `zip` stops at the shorter list, so a compiler that
+                    # dropped or added a line (the goods of a shop) compared
+                    # nothing and still counted as compared.
+                    wrong.append((code, entry))
                 for mine, theirs in zip(built, real):
                     if (marshal_rb.dump(mine.get("parameters"))
                             != marshal_rb.dump(theirs.get("parameters"))):

@@ -194,11 +194,19 @@ def _quantile(ordered: list[float], p: float) -> float:
     return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
 
 
+_MAX_MAGNITUDE = 2 ** 53
+
+
 def _number(value: Any) -> "float | int | None":
     """A finite number out of a project file, or None."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     if isinstance(value, float) and not math.isfinite(value):
+        return None
+    # A game stat is a small Fixnum. A Bignum, or a float near the limit of
+    # the type, overflows the fences (OverflowError is not an error the
+    # server reports) and past 4,300 digits cannot even be printed.
+    if abs(value) > _MAX_MAGNITUDE:
         return None
     return value
 
@@ -220,15 +228,17 @@ def _read(entry: Any, address: tuple) -> "float | int | None":
         _, attr, stat, level = address
         table = entry.get(attr)
         if (isinstance(table, Table) and stat < table.xsize
-                and level < table.ysize):
+                and level < table.ysize and table.zsize > 0):
             return _number(table.get(stat, level, 0))
         return None
     return None
 
 
-def _round(value: float) -> "float | int":
+def _round(value: float) -> "float | int | None":
     if isinstance(value, int):
         return value
+    if not math.isfinite(value):
+        return None
     rounded = round(value, 4)
     return int(rounded) if rounded == int(rounded) else rounded
 

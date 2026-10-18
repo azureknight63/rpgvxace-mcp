@@ -594,9 +594,22 @@ class TestAMapPatchCannotMoveAnEvent(ToolTest):
         self.assertEqual(event.get("x"), 5)
 
     def test_both_guards_read_the_same_list(self):
-        """The two lists had drifted, which is what opened the hole."""
-        self.assertEqual(tuple(raw_tools.STRUCTURAL_MAP_FIELDS),
-                         tuple(STRUCTURAL_MAP_FIELDS))
+        """The two lists had drifted, which is what opened the hole.
+
+        Every guard reads the schema's own tuple: the same object, not an equal
+        one, so a module that gained a shorter local copy of its own fails.
+        (Comparing `raw_tools`' name with the schema's was a tautology -- it is
+        an import of it -- and never looked at `map_edit_tools`, the other
+        guard.)
+        """
+        from rpgvxace_mcp.tools import map_edit_tools
+        self.assertIs(raw_tools.STRUCTURAL_MAP_FIELDS, STRUCTURAL_MAP_FIELDS)
+        self.assertIs(map_edit_tools.STRUCTURAL_MAP_FIELDS,
+                      STRUCTURAL_MAP_FIELDS)
+        # And what is in it, from outside the code: the four fields a map's
+        # other fields have to agree with.
+        self.assertEqual(set(STRUCTURAL_MAP_FIELDS),
+                         {"width", "height", "data", "events"})
 
 
 class TestDiscardedTileCountIsRight(ToolTest):
@@ -1076,11 +1089,30 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
 
     def test_nothing_reached_the_disk(self):
         """The claim the whole shape exists to make."""
+        import hashlib
+
+        def disk_state():
+            # Every file under the project, and the folders' listing: a dry
+            # run that wrote Map001, Scripts, a snapshot or the change log
+            # was invisible to a comparison of Items alone.
+            root = self.project.root
+            return {str(path.relative_to(root)): (
+                        hashlib.sha1(path.read_bytes()).hexdigest()
+                        if path.is_file() else "dir")
+                    for path in sorted(root.rglob("*"))}
+
+        seen = 0
         for label, name, arguments in self.previews():
             with self.subTest(op=label):
-                before = self.data_bytes("Items")
+                before = disk_state()
                 self.call(name, **arguments)
-                self.assertEqual(self.data_bytes("Items"), before)
+                after = disk_state()
+                self.assertEqual(
+                    after, before,
+                    "%s wrote to the project on a dry run: %s" % (
+                        label, sorted(set(after.items()) ^ set(before.items()))))
+                seen += 1
+        self.assertGreater(seen, 3, "almost no previews were compared")
 
     def test_a_real_write_still_reads_as_done(self):
         out = self.call("db_edit", table="items",
@@ -1228,8 +1260,13 @@ class TestAForeignBackupDirectoryIsSkipped(ToolTest):
         self.project.snapshot(label="one")
         self.project.snapshot(label="two")
         link, _ = self.plant_junction()
+        stale = self.stale_snapshot("20250101-000000-old")
         would = self.project.prune_backups(dry_run=True)
         self.assertNotIn(link.name, would)
+        # What it would remove is listed, and nothing was: "not the foreign
+        # one" is also what a dry run that lists nothing says.
+        self.assertIn(stale.name, would)
+        self.assertTrue(stale.exists())
 
 
 class TestOneRuleForBeingOnTheMap(ToolTest):
@@ -1288,35 +1325,66 @@ class TestOneRuleForBeingOnTheMap(ToolTest):
                         height=15, dry_run=True)
         self.assertNotIn("outside the map", str(out))
 
+    @staticmethod
+    def by_hand(source):
+        """The comparisons in `source` that write the rule out by hand.
+
+        A bare coordinate (`x`, `y`, or an attribute of that name) ordered
+        against a bare size (`width`, `height`) in any position, so the usual
+        `0 <= x < width` is seen as well as `x < width`. Precise on purpose:
+        three expressions in this tree mention a size and are not this rule --
+        the unusable-size refusal (`width < 1 or height < 1`), a resize
+        shortcut (`width >= data.xsize`), and a rectangle against a table
+        (`self.x + self.width > data.xsize`) -- and an approximate scan
+        flagged all three. None of them has a bare coordinate among its
+        operands.
+        """
+        found = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Compare):
+                continue
+            if not any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
+                       for op in node.ops):
+                continue
+            operands = [node.left, *node.comparators]
+            coordinate = any(
+                (isinstance(o, ast.Name) and o.id in ("x", "y"))
+                or (isinstance(o, ast.Attribute) and o.attr in ("x", "y"))
+                for o in operands)
+            size = any(isinstance(o, ast.Name)
+                       and o.id in ("width", "height") for o in operands)
+            if coordinate and size:
+                found.append(ast.unparse(node))
+        return found
+
+    def test_the_by_hand_scan_can_tell_the_forms_apart(self):
+        """The instrument, fed what it must flag and what it must not."""
+        for source in ("x < width", "0 <= x < width", "y >= height",
+                       "0 <= y < height", "event.x >= width"):
+            with self.subTest(flagged=source):
+                self.assertTrue(self.by_hand(source), source)
+        for source in ("width < 1 or height < 1", "width >= data.xsize",
+                       "self.x + self.width > data.xsize", "x == 3"):
+            with self.subTest(allowed=source):
+                self.assertEqual(self.by_hand(source), [], source)
+
     def test_no_module_writes_the_rule_out_by_hand(self):
         """The rule, not one copy of it: no bare coordinate comparison left."""
         root = Path(__file__).resolve().parent.parent / "src" / "rpgvxace_mcp"
         offenders = []
+        scanned = users = 0
         for path in sorted(root.rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
             if path.name == "schema.py":
                 continue        # where `on_map` lives
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if not isinstance(node, ast.Compare):
-                    continue
-                # A bare coordinate ordered against a bare size: `x < width`,
-                # `y >= height`. Precise on purpose. Three expressions in
-                # this tree mention both a width and a height and are not
-                # this rule -- the unusable-size refusal (`width < 1 or
-                # height < 1`), a resize shortcut (`width >= data.xsize`),
-                # and a rectangle against a table (`self.x + self.width >
-                # data.xsize`) -- and an approximate scan flagged all three.
-                if not (isinstance(node.left, ast.Name)
-                        and node.left.id in ("x", "y")):
-                    continue
-                if not any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
-                           for op in node.ops):
-                    continue
-                sizes = [c.id for c in node.comparators
-                         if isinstance(c, ast.Name)
-                         and c.id in ("width", "height")]
-                if sizes:
-                    offenders.append("%s: %s" % (path.name,
-                                                 ast.unparse(node)))
+            scanned += 1
+            users += "on_map(" in source
+            offenders += ["%s: %s" % (path.name, text)
+                          for text in self.by_hand(source)]
+        # The scan read the tree and the tree uses the rule it points to: a
+        # wrong `root`, or a rename of the variables, left this empty and green.
+        self.assertGreater(scanned, 20, "the scan read almost nothing")
+        self.assertGreater(users, 1, "no module outside schema.py asks on_map")
         self.assertEqual(offenders, [],
                          "these compare a coordinate against a map size "
                          "instead of asking on_map")

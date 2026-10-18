@@ -15,6 +15,7 @@ is preserved as-is, and decoding is deferred to the presentation layer.
 from __future__ import annotations
 
 import struct
+import unicodedata
 from array import array
 from typing import Any, Iterable, Literal
 
@@ -37,6 +38,9 @@ CELL_MASK = 0xFFFF
 # produced a fifty-nine-kilobyte error message, and `_tool_error` does not
 # truncate.
 MAX_NAMES_LISTED = 40
+# What a debugging `repr` of a value out of a file shows of it: `%s` on a
+# command parameter reaches these, and a megabyte string is one link away.
+MAX_REPR_CHARS = 200
 
 
 def named(names: "Any", limit: int = MAX_NAMES_LISTED,
@@ -112,7 +116,11 @@ def printable_text(text: str) -> str:
         return text
     # A question mark rather than a deletion, so the length still says
     # something about what was there.
+    # A space is text too: `isprintable()` is False for every space but
+    # U+0020, which turned the ideographic space (U+3000) in a Japanese name
+    # into a question mark.
     return "".join(char if char.isprintable() or char in KEPT_CONTROLS
+                   or unicodedata.category(char) == "Zs"
                    else "?" for char in text)
 
 
@@ -144,7 +152,10 @@ class RubySymbol(str):
         return self
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return ":" + str(self)
+        name = str(self)
+        if len(name) > MAX_REPR_CHARS:
+            return ":%s... (%d characters)" % (name[:MAX_REPR_CHARS], len(name))
+        return ":" + name
 
 
 class RubyString:
@@ -171,6 +182,9 @@ class RubyString:
         return hash(self.data)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        if len(self.data) > MAX_REPR_CHARS:
+            return "RubyString(%r... (%d bytes))" % (
+                self.data[:MAX_REPR_CHARS], len(self.data))
         return "RubyString(%r)" % (self.data,)
 
 
@@ -278,7 +292,8 @@ class RubyIvars:
         self.ivars = dict(ivars or {})
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return "RubyIvars(%r, %s)" % (self.inner, list(self.ivars))
+        return "RubyIvars(<%s>, %s)" % (type(self.inner).__name__,
+                                         list(self.ivars))
 
 
 class RubyStruct:
@@ -382,9 +397,24 @@ _INDEXABLE_KEYS = frozenset({int, bool, float, str, bytes, type(None),
                              RubySymbol, RubyFloat})
 
 
+# CPython hashes an int modulo 2**61 - 1, so a Bignum key from a file can be
+# made to share a bucket with any number of others, and the first lookup then
+# costs their count squared. Below the modulus an int is its own hash and
+# collides with nothing; a float is only kept when it is such a whole number.
+_HASH_MODULUS = 2 ** 61 - 1
+
+
 def _indexable(key: Any) -> bool:
-    # NaN is the one member of these types that is not equal to itself.
-    return type(key) in _INDEXABLE_KEYS and key == key
+    if type(key) not in _INDEXABLE_KEYS:
+        return False
+    if isinstance(key, bool):
+        return True
+    if isinstance(key, int):
+        return -_HASH_MODULUS < key < _HASH_MODULUS
+    if isinstance(key, float):
+        # NaN fails the first test, an infinity the second.
+        return key == key and abs(key) < _HASH_MODULUS and key == int(key)
+    return True  # str, bytes, None and the symbol types hash by a seeded hash
 
 
 def _dropping_cache(name: str):

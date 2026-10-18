@@ -1,10 +1,10 @@
 """Every guard in this codebase: the edit that removes it, and its tests.
 
 The `Guard` record and every instance of it: append-only, one entry per
-fix, which is why it reached two thousand lines. `prove_guards.py` next
-door is the engine that reads them, and the two are read for entirely
-different reasons -- a verdict you do not believe sends you to the engine,
-and you had to scroll past all of this to reach it.
+fix, so new entries go at the end of `GUARDS`, after the last banner.
+`prove_guards.py` next door is the engine that reads them. The two are read
+for different reasons -- a verdict you do not believe sends you to the
+engine -- so the table does not sit in front of it.
 
 `Guard` itself is here rather than there because it is the shape of the
 data, not part of the machine: it holds the fields and refuses a
@@ -12,11 +12,11 @@ mismatched anchor pair at import time, and the engine imports it from
 here along with the list.
 
 The aliases are here rather than there because they are part of the data:
-`LINT` and `BOUNDED` mean nothing to the engine, which takes the strings
-they hold as opaque.
+Aliases such as `LINT_ASSETS` and `BOUNDED` mean nothing to the engine,
+which takes the strings they hold as opaque.
 
 `tests/test_prove_guards.py` checks every entry: the named tests must exist
-and be collectable, no two guards may watch one line, no two aliases may
+and be collectable, no two guards may share an anchor, no two aliases may
 name one thing, and a reverted form must differ from the present one.
 """
 
@@ -89,8 +89,8 @@ SEARCH_TOOLS = _SRC + "tools/search_tools.py"
 class Guard:
     """One guard, the edit that removes it, and the test that must then fail."""
 
-    def __init__(self, name: str, file: str, present: "str | list[str]",
-                 reverted: "str | list[str]", tests: list[str], why: str):
+    def __init__(self, name: str, file: str, present: str | list[str],
+                 reverted: str | list[str], tests: list[str], why: str):
         self.name = name
         self.file = file
         # A property can be held in two places at once, and then no single
@@ -119,12 +119,9 @@ class Guard:
         return list(zip(self.present, self.reverted))
 
 
-# Every test class a guard names, grouped by the file it lives in and
-# alphabetical within the group. This block was ordered by line *width*,
-# so the thirty aliases for one suite were scattered across all 132 lines
-# and two carried gratuitous parentheses to satisfy the sort. The per-file
-# census is now visible by eye, which is what makes a future `tests/` split
-# a contiguous edit rather than a 132-line scan.
+# Every test class a guard names, grouped by the file it lives in. A group
+# is headed `# test_<file>`, so the per-file census is visible by eye and a
+# future split of `tests/` is a contiguous edit.
 
 
 def _at(module: str, cls: str) -> str:
@@ -136,13 +133,66 @@ def _at(module: str, cls: str) -> str:
 DSLREAL = _at("test_event_dsl", "TestFormsMatchEditorData")
 ROUTELINES = _at("test_event_dsl", "TestMoveRouteLines")
 DSLREFUSE = _at("test_event_dsl", "TestRefusals")
+DSLWRONG = _at("test_event_dsl", "TestACallersWrongInputIsARefusalNotACrash")
 DSLSPECS = _at("test_event_dsl", "TestTheSpecsSayWhatTheFormsWrite")
 DSLVX = _at("test_event_dsl", "TestVXLayouts")
 XPCMD = _at("test_event_dsl", "TestXPCommands")
 
 
 # test_guards_arguments
-DSLCHOICE =_at("test_guards_arguments", "TestAChoiceBranchIsNeverDropped")
+DSLCHOICE = _at("test_guards_arguments", "TestAChoiceBranchIsNeverDropped")
+CONVNAME = _at("test_convert_input", "TestANameWithATrailingNewlineIsRefused")
+HOSTILEFILE = _at("test_hostile_input", "TestAFileCannotMakeAnUnboundedListOfWarnings")
+HOSTILEW = _at("test_hostile_input", "TestTheWriterRefusesWhatTheReaderWould")
+HOSTILER = _at("test_hostile_input", "TestARegexpOptionIsAByte")
+HOSTILEN = _at("test_hostile_input", "TestANameThatIsAHugeIntegerIsDescribed")
+HOSTILEK = _at("test_hostile_input", "TestAReplacementHashWithAnArrayKey")
+HOSTILESP = _at("test_hostile_input", "TestASpaceInANameIsKept")
+HOSTILECOL = _at("test_hostile_input", "TestHashKeysThatCollideDoNotMakeALookupQuadratic")
+HOSTILEWF = _at("test_hostile_input", "TestAWriteThatFailsIsAProjectError")
+HOSTILEW6 = _at("test_hostile_input", "TestASchemaWalkDoesNotCopyForEveryLink")
+HOSTILELOG = _at("test_hostile_input", "TestAHostileChangeLog")
+HOSTILESNAP = _at("test_hostile_input", "TestTwoSnapshotsInOneSecondAreTwoSnapshots")
+HOSTILEMSG = _at("test_hostile_input", "TestAMessageWithAHugeIntegerDoesNotEndTheSession")
+HOSTILENAME = _at("test_hostile_input", "TestANameWithATrailingNewlineIsNotAComponent")
+HOSTILEDOC = _at("test_hostile_input", "TestTheWorkflowGuideDoesNotDenyTheLiveTool")
+HOSTILETALLY = _at("test_hostile_input", "TestABignumIdIsNotATallyKey")
+HOSTILEQ = _at("test_hostile_input", "TestAnyCommonEventCallIsNotQuadratic")
+HOSTILEBIG = _at("test_hostile_input", "TestAnEnormousIdInAScriptIsUnresolvedNotAnError")
+HOSTILECE = _at("test_hostile_input", "TestAnEnormousCommonEventIdIsAnyNotAnError")
+HOSTILESTAT = _at("test_hostile_input", "TestAStatisticOverHugeNumbersIsSkippedNotAnError")
+HOSTILERTP = _at("test_hostile_input", "TestAnRtpNameFromGameIniIsShort")
+HOSTILEBIGID = _at("test_hostile_input", "TestAnIdTooBigToBeAnIdIsNotAnId")
+HOSTILEVAL = _at("test_hostile_input", "TestValidateSurvivesBignumIdsInAFile")
+HOSTILEINI = _at("test_hostile_input", "TestGameIniCannotPointTheScriptPackOutsideTheCopy")
+HOSTILEREPLY = _at("test_hostile_input", "TestAReplyFromTheGameCannotExpandWithoutLimit")
+HOSTILEBOMB = _at("test_hostile_input", "TestAScriptSlotBombIsRefused")
+HOSTILEMARK = _at("test_hostile_input", "TestTheSessionIgnoresAMarkerItCannotRead")
+HOSTILESHAPE = _at("test_hostile_input", "TestATileWhoseShapeTheTableLacksIsNotDrawn")
+HOSTILETRIG = _at("test_hostile_input", "TestAPageTriggerThatIsNotANumberDoesNotBreakTheRead")
+HOSTILEGATE = _at("test_hostile_input", "TestTheRegexGateSeesWhatANegatedClassMatches")
+HOSTILEKIND = _at("test_hostile_input", "TestAPaintKindIsAShortAsciiSpelling")
+HOSTILEAPP = _at("test_hostile_input", "TestAppendingToADamagedCommandListIsARefusal")
+HOSTILESCOPE = _at("test_hostile_input", "TestAScopeListIsNotRunOnceForEachRepeat")
+HOSTILELIVE = _at("test_hostile_input", "TestTheLiveToolChecksWhatItForwards")
+HOSTILEMAPEDIT = _at("test_hostile_input", "TestMapEditAgreesWithTheTree")
+HOSTILETEXTS = _at("test_hostile_input", "TestOneCommandDecodesABoundedNumberOfTexts")
+HOSTILEMAPLIST = _at("test_hostile_input", "TestMapListSurvivesAHostileTree")
+HOSTILEMAPGET = _at("test_hostile_input", "TestMapGetSurvivesHostileEventFields")
+HOSTILERENDER = _at("test_hostile_input", "TestMapRenderIsBoundedAndStaysInItsFolder")
+HOSTILEBACKUPS = _at("test_hostile_input", "TestTheBackupsToolIsBoundedAndExplicit")
+HOSTILEINFO = _at("test_hostile_input", "TestProjectInfoRefreshRereadsTheScripts")
+HOSTILERAW = _at("test_hostile_input", "TestRawDataRefusesBeforeItLoadsAndKeepsItsShapeGuard")
+VOCABTILES = _at("test_guards_replies", "TestOneVocabularyForAPartialAnswer")
+HOSTILERE = _at("test_hostile_input", "TestTheRereviewOfTheScrubFixes")
+HOSTILEZ = _at("test_hostile_input", "TestAFloatKeepsItsSign")
+HOSTILEID = _at("test_hostile_input", "TestAnEntryIdBelowZeroIsRefused")
+CONVBYTES = _at("test_convert_input", "TestAStringThatDoesNotComeBackTravelsAsBytes")
+CONVSIZE = _at("test_convert_input", "TestASharedStringIsChargedBySize")
+CONVSTRICT = _at("test_convert_input", "TestACallersTextIsEncodedStrictly")
+CONVWHOLE = _at("test_convert_input", "TestANumberTheCallerSendsIsAWholeNumber")
+CONVDEEP = _at("test_convert_input", "TestAValueNestedTooDeeplyIsRefused")
+CONVMARK = _at("test_convert_input", "TestAMarkerHasTheShapeItPromises")
 CRAFTEDCOMMON = _at(
     "test_guards_arguments", "TestACraftedCommonEventIsReportedNotCrashed")
 TYPED = _at("test_guards_arguments", "TestADeclaredTypeIsChecked")
@@ -315,6 +365,7 @@ SNAPDRY = _at("test_guards_writes", "TestSnapshotPreviewMatchesTheSnapshot")
 PERFILE = _at("test_guards_writes", "TestStagingIsPerFile")
 STALE = _at("test_guards_writes", "TestStalenessDetection")
 
+
 # test_map_paint
 PAINTCORRIDOR = _at("test_map_paint", "TestACorridor")
 PAINTDUNGEON = _at("test_map_paint", "TestADungeon")
@@ -335,6 +386,8 @@ RENDERSIZE = _at("test_map_render", "TestWindowAndScale")
 RENDERSHEET = _at("test_map_render", "TestARender")
 RENDERVX = _at("test_map_render", "TestVX")
 RENDERIMAGE = _at("test_map_render", "TestThePictureComesBackAsAnImage")
+
+
 # test_live
 LIVEDRIVE = _at("test_live", "TestTheGameIsDriven")
 LIVEEVAL = _at("test_live", "TestEvalNeedsTheOperatorAndTheSession")
@@ -504,10 +557,10 @@ GUARDS = [
     Guard(
         "ivar-wrapped symbol in a name position", CODEC,
         """            if ivars:
-                self.warnings.append(
+                self.warn(
                     "symbol :%s carries an encoding record in a name position; "
                     "that record cannot be reproduced when writing this file "
-                    "back" % symbol
+                    "back" % str(symbol)[:MAX_WARNED_NAME]
                 )
 """,
         "",
@@ -580,7 +633,7 @@ GUARDS = [
             # Ruby only writes a Fixnum inside that range, so this came from
             # somewhere else and we would re-dump it as a Bignum. Say so rather
             # than quietly changing the file's shape.
-            self.warnings.append(
+            self.warn(
                 "Fixnum %d at byte %d is outside the range Ruby writes as a "
                 "Fixnum; it will be written back as a Bignum" % (value, self.pos)
             )
@@ -591,12 +644,10 @@ GUARDS = [
         "said about it",
     ),
 
-    # -- C2: engine profiles, schema observation, response safety -------------
+    # -- engine profiles, schema observation, response safety -------------
     Guard(
         "schema walk identity memo", SCHEMA,
-        """        if id(value) in seen:
-            return
-        seen.add(id(value))""",
+        """        seen.add(id(value))""",
         """        pass""",
         [OBS + "test_link_shared_graph_does_not_explode",
          OBS + "test_shared_object_is_tallied_once"],
@@ -651,6 +702,7 @@ GUARDS = [
     Guard(
         "response text has no lone surrogates", RUBYTYPES,
         """    return "".join(char if char.isprintable() or char in KEPT_CONTROLS
+                   or unicodedata.category(char) == "Zs"
                    else "?" for char in text)""",
         "    return text",
         [SAFE + "test_class_names_from_a_file_survive_json_encoding",
@@ -741,7 +793,7 @@ GUARDS = [
     Guard(
         "read-only blocks snapshots and pruning", BACKUPS,
         '        self._assert_writable("pruning backups")',
-        "",
+        "        pass  # check removed",
         [PATHRO + "test_snapshot_and_prune_are_refused"],
         "a server started read-only still creates and deletes directories on "
         "the operator's disk",
@@ -891,8 +943,14 @@ GUARDS = [
     ),
     Guard(
         "tileset sheets go through the asset checker", LINT_DATABASE,
-        "        checker.check(sheet_name, \"tilesets\",",
-        "        _ = sheet_name and checker and (\"tilesets\",) and (",
+        "        checker.check(sheet_name, \"tilesets\",\n"
+        "                          _db_at(\"tilesets\", entry_id, \"tileset_names\"),\n"
+        "                          context=lambda: \"%s %s (%s) sheet %s\"\n"
+        "                          % (TABLE_NOUNS[\"tilesets\"], entry_id, name, sheet))",
+        # The whole call, not its first line: a revert that kept the lines
+        # after it would not be valid Python, and the guard would be proven by
+        # a file that does not import.
+        "        pass  # asset check removed",
         [VRTP + "test_a_tileset_sheet_miss_is_downgraded_with_an_unresolved_rtp"],
         "one rule keeps its own asset comparison, so a project whose RTP cannot "
         "be located gets up to nine warnings per tileset for the default sheets "
@@ -904,7 +962,8 @@ GUARDS = [
         "        if name in self._failures:\n"
         "            return None",
         "        self._load(name)\n"
-        "        if False:",
+        "        if False:\n"
+        "            return None",
         [VTBL + "test_an_unreadable_table_is_one_finding_not_a_dangling_reference_each"],
         "a table caught half-written by the editor reads as empty, so every id "
         "that refers to it is reported as missing",
@@ -1184,10 +1243,7 @@ GUARDS = [
     ),
     Guard(
         "creating a map checks its patch", MAP_EDIT,
-        """    # The same refusal the update path makes. Creating used to return before
-    # that check ran, so a create could write a map whose @width disagreed
-    # with its tile table -- the shape the editor will not open.
-    _refuse_structural(patch)""",
+        "    _refuse_structural(patch)",
         "    pass  # check removed",
         [EVERY + "test_creating_a_map_refuses_a_structural_patch"],
         "the create path returned before the update path's check ran, so a "
@@ -1458,7 +1514,7 @@ GUARDS = [
     Guard(
         "a hash table's own id is set", DB_TOOLS,
         '    if request.kind == ARRAY:\n        return True',
-        '    return request.kind == ARRAY\n    if False:',
+        '    return request.kind == ARRAY\n    if False:\n        return True',
         [AREAID + "test_a_created_area_carries_its_own_id",
          AREAID + "test_a_clone_gets_its_own_id_not_the_originals",
          AREAID + "test_a_patch_cannot_move_an_areas_id"],
@@ -1547,8 +1603,8 @@ GUARDS = [
     ),
     Guard(
         'raw_data checks a replacement too', RAW_TOOLS,
-        '    refuse_invented_in_replacement(existing, new_value, "/".join(path))',
-        '    pass  # replacement fields unchecked',
+        '    refuse_invented_in_replacement(',
+        '    _ignored = (  # replacement fields unchecked',
         [WHOLE + "test_raw_data_refuses_one_too"],
         "the escape hatch's own description says it refuses a field the object does not have, and it checked only the name in the path",
     ),
@@ -1561,15 +1617,21 @@ GUARDS = [
     ),
     Guard(
         'a common event read refuses page arguments', EVENT_TOOLS,
-        '    refuse_inert(\n        args, ("event_ids", "name_contains", "page", "offset"),',
-        '    _unused = (\n        args, ("event_ids", "name_contains", "page", "offset"),',
+        "    refuse_inert(\n"
+        "        args, (\"event_ids\", \"name_contains\", \"page\", \"offset\"),\n"
+        "        \"a common event has no pages and is addressed by its own id, so \"\n"
+        "        \"reading one\",\n"
+        "        remedy=\"Drop them, or read a map's events with map_id instead.\")",
+        "    pass  # inapplicable arguments not refused",
         [READDROP + "test_a_common_event_read_refuses_page_arguments"],
         'event_get common_event_id=N name_contains=X returns the event whether or not it matches, and the reply reads exactly like a positive match',
     ),
     Guard(
         'a code lookup refuses a search', COMMAND_DOCS,
-        '        refuse_inert(args, ("search",),',
-        '        _unused = (args, ("search",),',
+        "        refuse_inert(args, (\"search\",),\n"
+        "                     \"a lookup of one code answers for that code alone, so it\",\n"
+        "                     remedy=\"Ask for one or the other.\")",
+        "        pass  # search not refused",
         [READDROP + "test_a_code_lookup_refuses_a_search_it_would_not_run"],
         'command_reference code=101 search=X answers for 101 alone, and the caller cannot tell that from a search that matched nothing',
     ),
@@ -1732,13 +1794,10 @@ GUARDS = [
     ),
     Guard(
         'the event page walk stops at the ceiling', LINT_PAGES,
-        '''            # Two findings per event at most, and the event count comes out of
-            # the file: a crafted map that shares one event object across
-            # forty thousand slots produced forty thousand findings here.
-            if findings.full:
+        '''            if findings.full:
                 return findings.items''',
         '''            if False:
-                return findings''',
+                return findings.items''',
         [CEILWALK + "test_the_page_walk_stops_visiting_at_the_ceiling"],
         'one event object shared across forty thousand slots keeps the walk charging for a finding per slot, long after the ceiling has stopped keeping them',
     ),
@@ -1781,8 +1840,8 @@ GUARDS = [
     ),
     Guard(
         'every ivars dict has its names checked', CONVERT,
-        '    return {check_ivar_name(name): from_json(item, codec)',
-        '    return {name: from_json(item, codec)',
+        '    return {check_ivar_name(name): from_json(item, codec, depth + 1)',
+        '    return {name: from_json(item, codec, depth + 1)',
         [NAMES + "test_a_strings_ivars_are_checked",
          NAMES + "test_a_byte_strings_ivars_are_checked",
          NAMES + "test_an_ivar_wrappers_names_are_checked"],
@@ -1804,8 +1863,8 @@ GUARDS = [
     ),
     Guard(
         'every extended module name is checked', CONVERT,
-        '            [check_class_name(name) for name in value["__extended__"]],',
-        '            list(value["__extended__"]),',
+        '            [check_class_name(name) for name in modules],',
+        '            list(modules),',
         [NAMES + "test_an_extended_module_name_is_checked"],
         'the module list on an extended object reached the file unchecked',
     ),
@@ -2259,7 +2318,7 @@ GUARDS = [
         # object. `decoded_text` would say `<RubyObject>`, which names this
         # reader's wrapper rather than anything that is in the file.
         return "<%s>" % decoded_text(codec, value.cls)
-    return decoded_text(codec, value)""",
+    return decoded_text(codec, _display_safe(value))""",
         """    if isinstance(value, RubyObject):
         return "<%s>" % value.cls
     return str(value)""",
@@ -2269,11 +2328,17 @@ GUARDS = [
     ),
     Guard(
         'a command line renders a bounded number of parts', COMMANDS,
-        """    return "%s: %s" % (name, rendered(as_list(p(0)),
+        # Two anchors: `_BoundedList` already holds only a prefix of a long
+        # Array, so the cap in `rendered` alone is a second line of defence and
+        # reverting it by itself reads VACUOUS. The property is that a long
+        # choice list costs a bounded amount, and it is held twice.
+        ["""    return "%s: %s" % (name, rendered(as_list(p(0)),
                                       lambda c: _text(c, codec),
                                       separator=" / "))""",
-        """    return "%s: %s" % (name, " / ".join(
+         """        super().__init__(value[:MAX_PARAM_ITEMS])"""],
+        ["""    return "%s: %s" % (name, " / ".join(
         _text(c, codec) for c in as_list(p(0))))""",
+         """        super().__init__(value)"""],
         [BYTES + "test_a_long_choice_list_is_capped"],
         'Show Choices renders every choice and the list length comes out of the file, not from MAX_CHOICES which bounds authoring: an Array of a million links to one string is three megabytes on disk',
     ),
@@ -2313,8 +2378,9 @@ GUARDS = [
     ),
     Guard(
         'an unmodelled condition renders a bounded line', COMMANDS,
-        """    return "condition type %s %s" % (brief(kind), brief(params[1:]))""",
-        """    return "condition type %s %s" % (kind, params[1:])""",
+        '''    return "condition type %s %s%s" % (
+        brief(kind), brief(rest), " and %d more" % more if more > 0 else "")''',
+        '''    return "condition type %s %s" % (kind, params[1:])''',
         [BYTES + "test_an_unknown_condition_kind_is_capped"],
         'the kind selects this branch and comes out of the file, and `%s` on a list reprs every element with nothing capping either: an Array of a million links to one string is three megabytes on disk and one walk step',
     ),
@@ -2439,8 +2505,8 @@ GUARDS = [
     ),
     Guard(
         'a listed name is capped like every other name', DB_TOOLS,
-        """        name = decoded(ctx, entry.get("name")) if isinstance(
-            entry, RubyObject) else """"",
+        '''        name = decoded(ctx, entry.get("name")) if isinstance(
+            entry, RubyObject) else ""''',
         """        name = ""
         if isinstance(entry, RubyObject):
             raw_name = entry.get("name")
@@ -2454,7 +2520,8 @@ GUARDS = [
         'a path cannot be unboundedly long', RAW_TOOLS,
         '    if len(path) > MAX_PATH_SEGMENTS:',
         '    if False:',
-        [RAWPATH + "test_a_path_with_too_many_segments_is_refused"],
+        [RAWPATH + "test_a_path_with_too_many_segments_is_refused",
+         HOSTILERAW + 'test_a_too_deep_path_does_not_load_the_file'],
         'a hash may legally contain itself -- _read_hash_pairs registers it before reading its pairs -- and each hash segment costs three linear scans, so "events/" + "1/" * 4,000,000 fits inside MAX_MESSAGE_CHARS and asks for 10^11 comparisons',
     ),
     Guard(
@@ -2503,7 +2570,7 @@ GUARDS = [
     ),
     Guard(
         'a transfer destination refuses a coercible value', COMMANDS,
-        """        _needs_int(t["map_id"], "transfer.map_id"),""",
+        """        _needs_int(_required(t, "map_id", "transfer"), "transfer.map_id"),""",
         """        int(t["map_id"]),""",
         [DSLIDS + "test_a_transfer_destination_map_is_not_coerced",
          DSLIDS + "test_every_id_in_the_compiler_goes_through_the_checker"],
@@ -2817,8 +2884,8 @@ GUARDS = [
     ),
     Guard(
         'a block past the end of its sheet is refused', MAP_PAINT,
-        '    if not index.isdigit() or int(index) >= count:',
-        '    if not index.isdigit():',
+        '    if not _is_number(index) or int(index) >= count:',
+        '    if not _is_number(index):',
         [PAINTREFUSE + "test_a_block_past_the_end_of_its_sheet_names_the_range"],
         'A2:32 is read as the first A3 kind, so a caller who miscounted the sheet paints a roof where they asked for ground',
     ),
@@ -3174,5 +3241,796 @@ GUARDS = [
         '    modelled = ctx.project.command_layouts_modelled',
         [XPREF + "test_the_layouts_are_xp_s_own"],
         'every XP lookup carried a warning that the layouts were VX Ace\'s and unconfirmed, beside layouts read from XP\'s own Interpreter',
+    ),
+    Guard(
+        "a command parameter is read through the display-safe wrapper", COMMANDS,
+        "            self._safe[index] = _display_safe(self.params[index])",
+        "            self._safe[index] = self.params[index]",
+        [BYTES + "test_no_parameter_slot_of_any_command_can_stop_the_line"],
+        "a command parameter is whatever the file put in its slot: an Array "
+        "is unhashable as a table key and as long as its repr is wide, and an "
+        "Integer past 4300 digits raises where it is turned into a string, so "
+        "one crafted command made event_get, search and validate fail for the "
+        "whole map. Every renderer reads its slots through this call, which is "
+        "why the fix is here and not at the six sites that were found",
+    ),
+    Guard(
+        "the bridge refuses eval the session did not allow", LIVE_BRIDGE,
+        '    unless @config["allow_eval"]',
+        "    unless true",
+        [LIVETEXT + "test_eval_is_refused_in_ruby_unless_the_session_allowed_it"],
+        "the request file is plain data in a folder the game polls, so a request "
+        "written by hand never passes through the tool's two gates: without "
+        "this check the game evaluates whatever Ruby the file holds, with the "
+        "player's own privileges",
+    ),
+    Guard(
+        "an ivar name with a trailing newline is refused", CONVERT,
+        '_IVAR_NAME = re.compile(r"^@[A-Za-z_][A-Za-z0-9_]*\\Z")',
+        '_IVAR_NAME = re.compile(r"^@[A-Za-z_][A-Za-z0-9_]*$")',
+        [CONVNAME + "test_an_ivar_name"],
+        "`$` also matches just before a final newline, so a field name with one "
+        "passed the check and was written into the Marshal stream with it: a "
+        "file the editor cannot open",
+    ),
+    Guard(
+        "a class name with a trailing newline is refused", CONVERT,
+        '_CLASS_PATH = re.compile(r"^[A-Z][A-Za-z0-9_]*(::[A-Z][A-Za-z0-9_]*)*\\Z")',
+        '_CLASS_PATH = re.compile(r"^[A-Z][A-Za-z0-9_]*(::[A-Z][A-Za-z0-9_]*)*$")',
+        [CONVNAME + "test_a_class_name"],
+        "the same `$` slip for a class path: `RPG::Item` plus a newline was "
+        "accepted and written as a class name Ruby cannot resolve",
+    ),
+    Guard(
+        "a string that does not re-encode travels as bytes", CONVERT,
+        "        if not value.data.isascii() and text.encode(codec.name) != value.data:",
+        "        if False:",
+        [CONVBYTES + "test_the_other_byte_pair_is_kept_exactly"],
+        "cp932 decodes 0x8790 and 0x81E0 to one character and writes back only "
+        "the second, so a string holding the first was silently rewritten by "
+        "any patch that carried it",
+    ),
+    Guard(
+        "a string is charged by its size", CONVERT,
+        "    walk.spend(_size_charge(len(value.data)))",
+        "    pass",
+        [CONVSIZE + "test_many_references_to_one_big_string_are_refused"],
+        "a Marshal link returns the same string for every reference and each "
+        "reference was decoded into a copy: one 4 MB string linked 5,000 times "
+        "built 20 GB of reply before anything refused it",
+    ),
+    Guard(
+        "an opaque payload is charged by its size", CONVERT,
+        "        walk.spend(_size_charge(len(value.payload)))",
+        "        pass",
+        [CONVSIZE + "test_many_references_to_one_big_payload_are_refused"],
+        "the same amplification through a _dump payload, which is base64'd "
+        "once per reference",
+    ),
+    Guard(
+        "a caller's text is encoded strictly", CONVERT,
+        '        return RubyString(codec.encode_strict(value["__string__"]),',
+        '        return RubyString(codec.encode(value["__string__"]),',
+        [CONVSTRICT + "test_a_lone_surrogate_cannot_write_a_raw_byte"],
+        "the lenient encoder turns a lone surrogate into a raw byte, so a "
+        "caller's text could write bytes into a string tagged as valid UTF-8",
+    ),
+    Guard(
+        "a table cell is a whole number", CONVERT,
+        '        number = _whole(cell, "cell %d" % index)',
+        "        number = int(cell)",
+        [CONVWHOLE + "test_a_fractional_cell_is_refused_not_truncated",
+         CONVWHOLE + "test_a_bool_or_a_string_is_not_a_cell"],
+        "`int(1.9)` is 1 and `int(True)` is 1, so a tile id the caller got "
+        "wrong was written as a different tile and reported as a success",
+    ),
+    Guard(
+        "a table size that is infinite is a conversion error", CONVERT,
+        '    xsize = _whole(value.get("xsize", 0), "xsize")',
+        '    xsize = int(value.get("xsize", 0))',
+        [CONVWHOLE + "test_infinity_is_a_conversion_error"],
+        "`int(float('inf'))` raises OverflowError, which is not in the server's "
+        "caught list, so a wrong argument was reported as an internal error",
+    ),
+    Guard(
+        "a value nested too deeply is refused", CONVERT,
+        "    if depth > MAX_JSON_DEPTH:\n"
+        "        raise ConversionError(\n"
+        '            "this value is nested more than %d levels deep, which the server "',
+        "    if False:\n"
+        "        raise ConversionError(\n"
+        '            "this value is nested more than %d levels deep, which the server "',
+        [CONVDEEP + "test_deep_is_refused"],
+        "the writer has no depth limit and the reader refuses past 192, so a "
+        "value nested a few hundred levels was written and the file could then "
+        "not be opened through the server",
+    ),
+    Guard(
+        "a hash form holds pairs", CONVERT,
+        "        if not isinstance(entries, list) or any(",
+        "        if False and any(",
+        [CONVMARK + "test_hash_entries_are_pairs"],
+        "`for k, v in entries` unpacks a two-character string into a key and a "
+        "value, so {'__hash__': ['ab']} wrote a pair nobody sent",
+    ),
+    Guard(
+        "a symbol form holds a string", CONVERT,
+        '        if not isinstance(value["__symbol__"], str):',
+        "        if False:",
+        [CONVMARK + "test_a_symbol_is_a_string"],
+        "`RubySymbol(123)` becomes the symbol \"123\": a number the caller "
+        "sent was written as a name",
+    ),
+    Guard(
+        'a variable operation that is not text is refused', COMMANDS,
+        """    op_code = _named(entry.get("op", entry.get("operation", "set")),
+                     VARIABLE_OP_CODES, "the variable operation")""",
+        """    op_code = VARIABLE_OP_CODES.get(entry.get("op", entry.get("operation", "set")))""",
+        [DSLWRONG + 'test_each_is_a_command_error'],
+        'an unhashable op was a bare TypeError from a dict lookup, reported as an argument of the wrong shape with no name',
+    ),
+    Guard(
+        'a variable range runs upward', COMMANDS,
+        """    if end < variable_id:""",
+        """    if False:""",
+        [DSLWRONG + 'test_each_is_a_command_error'],
+        'a reversed range wrote a command the interpreter loops over zero times, and the reply said the variables were set',
+    ),
+    Guard(
+        'a switch range runs upward', COMMANDS,
+        """    if end < switch_id:""",
+        """    if False:""",
+        [DSLWRONG + 'test_each_is_a_command_error'],
+        'the same reversed range for Control Switches',
+    ),
+    Guard(
+        'a self switch is one of A to D', COMMANDS,
+        """    if value not in SELF_SWITCH_LETTERS:""",
+        """    if False:""",
+        [DSLWRONG + 'test_each_is_a_command_error'],
+        'any text was written as a self-switch letter the engine has no switch for, and the event waited on a switch that could never be set',
+    ),
+    Guard(
+        "a switch state is the engine's 0 or 1", COMMANDS,
+        """        if value not in (0, 1):""",
+        """        if False:""",
+        [DSLWRONG + 'test_each_is_a_command_error'],
+        'an integer other than 0 or 1 was written through as the state, which the interpreter reads as neither on nor off',
+    ),
+    Guard(
+        'a transfer needs its coordinates', COMMANDS,
+        """        _needs_int(_required(t, "x", "transfer"), "transfer.x"),""",
+        """        _needs_int(t["x"], "transfer.x"),""",
+        [DSLWRONG + 'test_each_is_a_command_error'],
+        'a missing x was a bare KeyError, reported as an argument of the wrong shape with no name',
+    ),
+    Guard(
+        'a raw command code is bounded', COMMANDS,
+        """    code = _bounded(raw["code"], "raw.code", 0, MAX_COMMAND_CODE)""",
+        """    code = _needs_int(raw["code"], "raw.code")""",
+        [DSLWRONG + 'test_each_is_a_command_error'],
+        'a raw code of any size was written, and a negative one is not a command',
+    ),
+    Guard(
+        'a raw parameter nests only so deep', COMMANDS,
+        """    if depth > MAX_JSON_DEPTH:""",
+        """    if False:""",
+        [DSLWRONG + 'test_nesting_a_raw_parameter_deeply_is_refused'],
+        'the writer has no depth limit and the reader refuses past 192, so a literal nested a few hundred levels was written and the file could then not be opened through the server',
+    ),
+    Guard(
+        'a raw object names its class as text', COMMANDS,
+        """    if not cls or not isinstance(cls, str):""",
+        """    if not cls:""",
+        [DSLWRONG + 'test_each_is_a_command_error'],
+        'a list for __class__ went into the object as its class and crashed the writer',
+    ),
+    Guard(
+        'a move route step is an object', COMMANDS,
+        """    step = _needs_object(step, "a move route step")""",
+        """    step = step""",
+        [DSLWRONG + 'test_each_is_a_command_error'],
+        'a string step was a bare AttributeError on .get',
+    ),
+    Guard(
+        'a move route flag is true or false', COMMANDS,
+        """        "@repeat": _needs_bool(value.get("repeat", False), "repeat"),""",
+        """        "@repeat": bool(value.get("repeat", False)),""",
+        [DSLWRONG + 'test_each_is_a_command_error'],
+        'bool("false") is True, so a route the caller said does not repeat repeated forever',
+    ),
+    Guard(
+        'an empty else is still written', COMMANDS,
+        """    if entry.get("else") is not None:""",
+        """    if entry.get("else"):""",
+        [DSLWRONG + 'test_an_empty_else_is_still_written'],
+        'an else with no commands is falsy, so asking for one was silently dropped',
+    ),
+    Guard(
+        "a refusal quotes a caller's value briefly", COMMANDS,
+        """        raise CommandError("%s must be a whole number, got %s"
+                           % (what, brief(value)))""",
+        """        raise CommandError("%s must be a whole number, got %r"
+                           % (what, value))""",
+        [DSLWRONG + 'test_a_message_quotes_a_huge_value_briefly'],
+        'the message repeated a whole caller value, so one large wrong argument made a megabyte error',
+    ),
+    Guard(
+        'load warnings are capped', CODEC,
+        """        if len(self.warnings) < MAX_LOAD_WARNINGS:""",
+        """        if True:""",
+        [HOSTILEFILE + 'test_repeated_empty_ivar_records_are_capped'],
+        'an empty I record is 3 bytes and about 118 characters of warning, and the list goes into a tool reply whole: a 128 MB file was 5 GB of reply',
+    ),
+    Guard(
+        'the warnings left out are counted', CODEC,
+        """    if reader.warnings_left_out:""",
+        """    if False:""",
+        [HOSTILEFILE + 'test_the_cap_says_how_many_were_left_out'],
+        'a cap that does not say it fired reads as a file with fifty problems',
+    ),
+    Guard(
+        'a symbol in a warning is clipped', CODEC,
+        """                    "back" % str(symbol)[:MAX_WARNED_NAME]""",
+        """                    "back" % symbol""",
+        [HOSTILEFILE + 'test_a_long_symbol_is_clipped_in_its_warning'],
+        "the warning repeated the file's whole symbol name every time it fired: a 1 MB name reused 100,000 times is 100 GB",
+    ),
+    Guard(
+        "the writer stops at the reader's depth", CODEC,
+        """        if self._depth > MAX_DEPTH:""",
+        """        if False:""",
+        [HOSTILEW + 'test_deep_is_a_marshal_error_not_a_recursion_error', HOSTILEW + 'test_just_past_the_limit_is_refused_not_written'],
+        'the reader refuses past MAX_DEPTH, so a value written deeper was a file this server could not open',
+    ),
+    Guard(
+        'a regexp option is one byte', CODEC,
+        """        if not 0 <= obj.options <= 0xFF:""",
+        """        if False:""",
+        [HOSTILER + 'test_out_of_range_is_refused_not_cut'],
+        '_byte masks with 0xFF, so an option of 256 was written as 0 with no error',
+    ),
+    Guard(
+        'a name that is a huge integer is described', CONVERT,
+        """            and value.bit_length() > MAX_TEXT_CHARS * 3:""",
+        """            and False:""",
+        [HOSTILEN + 'test_a_bignum_name_does_not_raise'],
+        'str() of an Integer past about 4300 digits raises on CPython 3.11, and a Bignum is a legal name in a file: it ended the whole reply',
+    ),
+    Guard(
+        'a replaced hash is looked up, not turned into a dict', CONVERT,
+        """            old = existing.get(key, _ABSENT)""",
+        """            old = dict(existing.items()).get(key, _ABSENT)""",
+        [HOSTILEK + 'test_no_type_error'],
+        'an Array is a legal hash key and is unhashable, so building a dict of the existing pairs raised TypeError',
+    ),
+    Guard(
+        'a float keeps the sign of a zero', CODEC,
+        """                obj == 0 and math.copysign(1.0, _parse_float(raw))
+                != math.copysign(1.0, obj)):""",
+        """                False):""",
+        [HOSTILEZ + 'test_negative_zero_is_not_written_as_zero'],
+        '0.0 == -0.0, so a float edited to the other zero was written with its old bytes and lost the sign',
+    ),
+    Guard(
+        'an entry id below zero is refused', PROJECT,
+        """            if entry_id < 0:""",
+        """            if False:""",
+        [HOSTILEID + 'test_set_entry'],
+        'value[-1] = entry replaces the last entry and reports a create',
+    ),
+    Guard(
+        'a space in a name is kept', RUBYTYPES,
+        '''                   or unicodedata.category(char) == "Zs"''',
+        """                   or False""",
+        [HOSTILESP + 'test_unicode_spaces_survive'],
+        'isprintable() is False for every space but U+0020, so the ideographic space in a Japanese name came back as a question mark',
+    ),
+    Guard(
+        'a Bignum hash key is looked up by scan', RUBYTYPES,
+        """        return -_HASH_MODULUS < key < _HASH_MODULUS""",
+        """        return True""",
+        [HOSTILECOL + 'test_colliding_bignum_keys'],
+        'CPython hashes an int modulo 2**61-1, so n crafted Bignum keys share a bucket and the first lookup costs n squared',
+    ),
+    Guard(
+        'a temp file that cannot be made is a project error', PROJECT,
+        """            # A folder that refuses a new file: a message, not a traceback.
+            raise ProjectError("could not write %s: %s" % (filename, exc)) from exc
+        temp_path = Path(temp_name)""",
+        """            raise
+        temp_path = Path(temp_name)""",
+        [HOSTILEWF + 'test_a_temp_file_that_cannot_be_made'],
+        'mkstemp sat outside the try, so a folder that refuses a new file was a raw OSError after the backup had been taken',
+    ),
+    Guard(
+        'a file that cannot be deleted is a project error', PROJECT,
+        """            raise ProjectError("could not delete %s: %s" % (filename, exc)) from exc""",
+        """            raise""",
+        [HOSTILEWF + 'test_a_file_that_cannot_be_deleted'],
+        'unlink on a file held open on Windows was a raw PermissionError, where every other write path reports a ProjectError',
+    ),
+    Guard(
+        'the scripts table must be a list to set a slot', PROJECT,
+        """        if not isinstance(raw, list) or not raw:
+            raise ProjectError("this project's Scripts data holds no slots")""",
+        """        if not raw:
+            raise ProjectError("this project's Scripts data holds no slots")""",
+        [HOSTILEWF + 'test_a_script_table_that_is_not_a_list'],
+        'a non-empty dict passed the emptiness test and raised KeyError on the first index',
+    ),
+    Guard(
+        'the schema walk asks its memo before it builds children', SCHEMA,
+        """    if id(value) in seen:
+        return
+    children = ruby_children(value)""",
+        """    children = ruby_children(value)
+    if False:
+        return""",
+        [HOSTILEW6 + 'test_self_links_are_linear'],
+        'ruby_children copies the container, so one Array linking to itself N times copied N elements per link: N squared work for a few megabytes of file',
+    ),
+    Guard(
+        'a change-log line the parser cannot hold is skipped', BACKUPS,
+        """            except (json.JSONDecodeError, RecursionError):""",
+        """            except json.JSONDecodeError:""",
+        [HOSTILELOG + 'test_a_deeply_nested_line_is_skipped'],
+        'a line of 30,000 brackets is under the line bound and overflows the JSON parser, which crashed the tool the line bound was written to protect',
+    ),
+    Guard(
+        'a change-log line must be an object', BACKUPS,
+        """            if isinstance(record, dict):""",
+        """            if True:""",
+        [HOSTILELOG + 'test_a_line_that_is_not_an_object_is_skipped'],
+        'recent_changes promises a list of dicts and handed back whatever json.loads produced',
+    ),
+    Guard(
+        'a negative change-log limit is empty', BACKUPS,
+        """        rows: "deque[str]" = deque(maxlen=max(limit, 0))""",
+        """        rows: "deque[str]" = deque(maxlen=limit)""",
+        [HOSTILELOG + 'test_a_negative_limit_is_an_empty_answer'],
+        'deque(maxlen=-1) raises ValueError',
+    ),
+    Guard(
+        'two snapshots in one second are two snapshots', BACKUPS,
+        """        while self._backup_dir(stamp).exists():""",
+        """        while False:""",
+        [HOSTILESNAP + 'test_the_first_is_kept'],
+        'the stamp has one-second resolution and a snapshot copies over an existing directory, so a second pre-restore safety snapshot replaced the first, which held the original data',
+    ),
+    Guard(
+        'a number too long to parse is a parse error', SERVER,
+        """            except ValueError:
+                # After JSONDecodeError""",
+        """            except ZeroDivisionError:
+                # After JSONDecodeError""",
+        [HOSTILEMSG + 'test_the_session_goes_on'],
+        'an integer literal of more than 4,300 digits raises a plain ValueError on CPython 3.11, and one such line ended the whole session',
+    ),
+    Guard(
+        'a file name has no trailing newline', _SRC + "paths.py",
+        """_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*\\Z")""",
+        """_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")""",
+        [HOSTILENAME + 'test_refused'],
+        '`$` also matches before a final newline, so Map001.rvdata2 plus a newline was accepted as a file name',
+    ),
+    Guard(
+        'the workflow guide does not deny the live tool', DOCS,
+        """It edits files. Playtesting goes through `live`, which runs a scratch copy of""",
+        """It edits files; it does not talk to a running game. There is no live state, no""",
+        [HOSTILEDOC + 'test_no_false_claim'],
+        'the guide told the model there was no playtest control while the live tool and the server instructions describe exactly that',
+    ),
+    Guard(
+        'a switch read id is bounded like a write id', SWITCH_USAGE,
+        """        if 1 <= ident <= _MAX_ID:""",
+        """        if ident >= 1:""",
+        [HOSTILETALLY + 'test_read_ids_are_clamped_like_write_ids'],
+        'a Bignum read id from a crafted file became a tally key and str() of it raised in the report',
+    ),
+    Guard(
+        'an unknown common-event call ends the walk', _SRC + "analysis/dead_ends.py",
+        """            if calls is None:""",
+        """            if False:""",
+        [HOSTILEQ + 'test_called_from_with_many_unknown_calls'],
+        'each common event with a non-literal call pushed the whole id set again: N events were N squared frontier entries, and 30,000 of them took more than three minutes',
+    ),
+    Guard(
+        'an enormous common-event id means any', _SRC + "analysis/dead_ends.py",
+        """            if match.group(1) is None or len(match.group(1)) > 9:""",
+        """            if match.group(1) is None:""",
+        [HOSTILECE + 'test_a_script_naming_one'],
+        'int() of a run of more than 4,300 digits raises ValueError and the whole critique was lost',
+    ),
+    Guard(
+        'a script integer literal is bounded', _SRC + "analysis/reachability.py",
+        '''_INT_ARG = r"-?\\d{1,12}(?:_\\d{1,12}){0,4}"''',
+        '''_INT_ARG = r"-?\\d+(?:_\\d+)*"''',
+        [HOSTILEBIG + 'test_a_transfer_literal'],
+        'int() of a literal past 4,300 digits raised ValueError out of the reachability walk',
+    ),
+    Guard(
+        'a statistic ignores a number beyond a game stat', _SRC + "analysis/stat_outliers.py",
+        """    if abs(value) > _MAX_MAGNITUDE:""",
+        """    if False:""",
+        [HOSTILESTAT + 'test_a_bignum_is_not_a_number'],
+        'a Bignum or a float near the limit overflowed the fences, and OverflowError is not an error the server reports: every scope of the critique was lost',
+    ),
+    Guard(
+        'a rounded statistic must be finite', _SRC + "analysis/stat_outliers.py",
+        """    if not math.isfinite(value):""",
+        """    if False:""",
+        [HOSTILESTAT + 'test_round_refuses_a_non_finite'],
+        'int() of an infinity raises OverflowError and of NaN raises ValueError',
+    ),
+    Guard(
+        'a level curve needs a depth', _SRC + "analysis/stat_outliers.py",
+        """                and level < table.ysize and table.zsize > 0):""",
+        """                and level < table.ysize):""",
+        [HOSTILESTAT + 'test_a_table_with_no_depth_is_not_read'],
+        'a Table may have zsize 0 and table.get(...) then raises IndexError out of the report',
+    ),
+    Guard(
+        'an RTP name from Game.ini is clipped', PROJECT,
+        """                if len(value) > _RTP_NAME_CLIP:""",
+        """                if False:""",
+        [HOSTILERTP + 'test_a_huge_name_is_clipped'],
+        'the name is quoted into every finding that cannot be checked against it: a 1 MB RTP value times thousands of findings is gigabytes of message',
+    ),
+    Guard(
+        'a step of no frames is refused', LIVE_BRIDGE,
+        '''      raise ArgumentError, "frames must be at least 1" if frames < 1''',
+        '''      raise ArgumentError, "unused" if false''',
+        [LIVETEXT + 'test_a_step_of_no_frames_is_refused_not_left_pending'],
+        'a step of zero or fewer frames never finishes, answers nothing, and poll returns early for every later request: the client waits forever',
+    ),
+    Guard(
+        'a bridge request must be a hash', LIVE_BRIDGE,
+        '''    raise TypeError, "a request is a Hash" unless request.is_a?(Hash)''',
+        '''    raise TypeError, "unused" unless request.is_a?(Hash)''',
+        [LIVETEXT + 'test_a_request_that_is_not_a_hash_is_answered_not_fatal'],
+        'a stray non-Hash request raised again inside the rescue and sent the game into the crash loop',
+    ),
+    Guard(
+        'the walk reads a Bignum as absent', _SRC + "analysis/walk.py",
+        '''    if number is not None and not -_ID_BOUND <= number <= _ID_BOUND:''',
+        '''    if False:''',
+        [HOSTILEBIGID + 'test_the_walk_reads_it_as_absent',
+         HOSTILEVAL + 'test_a_crafted_map'],
+        'a Bignum id formatted into a finding raised past 4,300 digits and ended the whole validate run',
+    ),
+    Guard(
+        'Game.ini cannot move the script pack out of the copy', LIVE_SESSION,
+        '''                    chosen.resolve().relative_to(game_dir.resolve())''',
+        '''                    chosen.resolve()''',
+        [HOSTILEINI + 'test_the_path_stays_inside'],
+        'an absolute or .. Scripts= value sent the bridge-injected pack to a file outside the scratch copy, possibly the real project',
+    ),
+    Guard(
+        'a save file of any engine is not copied', LIVE_SESSION,
+        '''_SAVE_FILE = re.compile(r"^save\\d*\\.r[xv]data2?$", re.IGNORECASE)''',
+        '''_SAVE_FILE = re.compile(r"^save\\d*\\.rvdata2?$", re.IGNORECASE)''',
+        [HOSTILEMARK + 'test_an_xp_save_is_a_save'],
+        'XP saves (Save1.rxdata) were copied into the scratch run, which breaks the rule that a test run never sees saves',
+    ),
+    Guard(
+        'an orphan marker must name a real owner', LIVE_SESSION,
+        '''        if (not isinstance(owner, int) or isinstance(owner, bool)
+                or not 0 < owner < 2 ** 32):''',
+        '''        if False:''',
+        [HOSTILEMARK + 'test_a_marker_with_a_non_numeric_owner'],
+        'a marker owner that is not a pid raised out of sweep_orphans and stopped every later start',
+    ),
+    Guard(
+        'a game reply has a node budget', _SRC + "live/wire.py",
+        '''    if budget[0] < 0:''',
+        '''    if False:''',
+        [HOSTILEREPLY + 'test_a_shared_list_is_bounded'],
+        'Marshal links share one object, so 32 levels of [x, x] named 2**32 nodes and hung the server',
+    ),
+    Guard(
+        'a script slot inflates only so far', LIVE_BRIDGE,
+        '''    if stream.unconsumed_tail:''',
+        '''    if False:''',
+        [HOSTILEBOMB + 'test_a_slot_that_inflates_past_the_limit_is_empty'],
+        'zlib.decompress had no output cap, so a crafted slot inflated to a gigabyte while a session was being prepared',
+    ),
+    Guard(
+        'a tile whose shape the table lacks is not drawn', _SRC + "render/tiles.py",
+        '''    if shape >= len(rows):''',
+        '''    if False:''',
+        [HOSTILESHAPE + 'test_compose_returns_none_not_an_index_error'],
+        'autotile_block names a shape 0-47 for every kind and a wall has 16, a waterfall 4: a damaged map id crashed the whole render with IndexError',
+    ),
+    Guard(
+        'a trigger is named only when it is a number', _SRC + "tools/event_tools.py",
+        '''    if isinstance(trigger, int) and not isinstance(trigger, bool):''',
+        '''    if True:''',
+        [HOSTILETRIG + 'test_a_list_trigger'],
+        'dict.get hashes its key: an @trigger holding an Array raised TypeError and one crafted page failed the read of the whole map',
+    ),
+    Guard(
+        'a page trigger is converted once through the shared budget', _SRC + "tools/event_tools.py",
+        '''    trigger_code = to_json(trigger, ctx.codec, TABLE_MODES[0], walk)''',
+        '''    trigger_code = to_json(trigger, ctx.codec, walk)''',
+        [HOSTILETRIG + 'test_the_shared_budget_goes_where_to_json_expects_it'],
+        'walk is the fourth parameter of to_json; passed third it was read as the table mode and the budget was never used',
+    ),
+    Guard(
+        'a negated literal stands for a character it accepts', _SRC + "tools/pattern_safety.py",
+        '''            found |= _matched_by(lambda c: c != chr(av))''',
+        '''            found.add("a")''',
+        [HOSTILEGATE + 'test_a_negated_literal'],
+        '[^a]+[^a]+b was judged on runs of a (fail at once) and b (match at once): the ReDoS gate accepted it and 3,000 Japanese characters then took minutes',
+    ),
+    Guard(
+        'a negated class stands for characters it accepts', _SRC + "tools/pattern_safety.py",
+        '''                found |= _matched_by(lambda c: not _in_class_matches(av, c))''',
+        '''                found.add("\\x00")''',
+        [HOSTILEGATE + 'test_a_negated_class'],
+        'NEGATE assumed NUL is outside every negated class, so [^\\x00a]+[^\\x00a]+b got no run its class accepts',
+    ),
+    Guard(
+        'a range is measured inside as well as at its ends', _SRC + "tools/pattern_safety.py",
+        '''                    if high - low > 1:''',
+        '''                    if False:''',
+        [HOSTILEGATE + 'test_a_range_is_not_only_its_endpoints'],
+        '[a-z]+[a-z]+[az] has only the ends to be told apart from, and runs of an interior letter are as long as any other',
+    ),
+    Guard(
+        'a kind spelling is short', MAP_PAINT,
+        '''    if len(text) > _MAX_KIND_SPELLING:''',
+        '''    if False:''',
+        [HOSTILEKIND + 'test_a_long_spelling_is_refused_before_it_is_echoed'],
+        'a 10 MB spelling was echoed whole into every refusal, past the reply-size ceilings',
+    ),
+    Guard(
+        'a kind number is ASCII digits', MAP_PAINT,
+        '''    return text.isascii() and text.isdigit()''',
+        '''    return text.isdigit()''',
+        [HOSTILEKIND + 'test_a_non_ascii_digit_is_a_refusal'],
+        'str.isdigit() is True for the superscript two, which int() then rejects with a bare ValueError instead of the spelling help',
+    ),
+    Guard(
+        'a damaged command list is refused, not appended to', _SRC + "tools/event_tools.py",
+        '''    if existing is not None and not isinstance(existing, list):''',
+        '''    if False:''',
+        [HOSTILEAPP + 'test_a_list_that_is_a_string_is_not_split_into_characters'],
+        'list("abc") is three characters: a damaged @list was written back in front of the new commands',
+    ),
+    Guard(
+        'a repeated body is measured on an alternating subject', _SRC + "tools/pattern_safety.py",
+        '''    if 2 <= len(quantified) <= _ALTERNATING_LIMIT:''',
+        '''    if False:''',
+        [HOSTILEGATE + 'test_a_repeated_body_of_two_characters',
+         HOSTILEGATE + 'test_a_repeated_body_of_a_letter_and_a_digit'],
+        '(?:ab)+(?:ab)+! took 4.7 s on 2,000 characters and was accepted: every subject was one character at a time or built from the whole alphabet, with the literal ! between a and b',
+    ),
+    Guard(
+        'a scope named twice is run once', _SRC + "tools/registry.py",
+        '''    wanted = list(dict.fromkeys(s for s in asked if s in allowed))''',
+        '''    wanted = [s for s in asked if s in allowed]''',
+        [HOSTILESCOPE + 'test_duplicates_collapse_in_first_seen_order'],
+        'scopes=["summary"] * 1,000,000 ran the summary a million times and echoed the million names back',
+    ),
+    Guard(
+        'unknown scope names are listed briefly', _SRC + "tools/registry.py",
+        '''        shown = ", ".join(echo(u) for u in unknown[:MAX_NAMES_LISTED])''',
+        '''        shown = ", ".join(echo(u) for u in unknown)''',
+        [HOSTILESCOPE + 'test_a_flood_of_unknown_names_is_a_short_refusal'],
+        'a call naming fifty thousand unknown scopes got an error the size of the request',
+    ),
+    Guard(
+        'a state section is one the bridge advertises', _SRC + "tools/live_tools.py",
+        '''        if section not in bridge.STATE_SECTIONS:''',
+        '''        if False:''',
+        [HOSTILELIVE + 'test_an_unknown_state_section_is_refused_here'],
+        'sections went to the game unchecked and the bridge builds a method name from each',
+    ),
+    Guard(
+        'an id key is ASCII digits', _SRC + "tools/live_tools.py",
+        '''        if not (isinstance(name, str) and name.isascii() and name.isdigit()''',
+        '''        if not (isinstance(name, str) and name.isdigit()''',
+        [HOSTILELIVE + 'test_a_non_ascii_digit_key_is_a_refusal'],
+        'isdigit() passes the superscript two, which int() rejects with a bare ValueError',
+    ),
+    Guard(
+        'an id key is short', _SRC + "tools/live_tools.py",
+        '''                and len(name) <= 9 and int(name) >= 1):''',
+        '''                and int(name) >= 1):''',
+        [HOSTILELIVE + 'test_an_enormous_digit_key_is_a_refusal'],
+        'a 5,000-digit key trips the CPython int-string limit with a ValueError',
+    ),
+    Guard(
+        'deleting a map that exists nowhere is refused', _SRC + "tools/map_edit_tools.py",
+        '''    if not has_file and not (isinstance(infos, RubyHash)''',
+        '''    if False and not (isinstance(infos, RubyHash)''',
+        [HOSTILEMAPEDIT + 'test_deleting_a_map_that_does_not_exist_is_a_refusal',
+         HOSTILEMAPEDIT + 'test_the_preview_refuses_it_too'],
+        'map_id=999 re-saved and backed up MapInfos and reported success',
+    ),
+    Guard(
+        'a new map order is read as a bounded integer', _SRC + "tools/map_edit_tools.py",
+        '''    order = max([_tree_order(info.get("order")) for _, info in infos''',
+        '''    order = max([info.get("order") or 0 for _, info in infos''',
+        [HOSTILEMAPEDIT + 'test_a_tree_entry_with_a_text_order_does_not_stop_a_create',
+         HOSTILERE + 'test_a_huge_order_in_the_tree_does_not_become_the_next_order'],
+        'a String @order raised TypeError in max(); a Bignum was added to and written back',
+    ),
+    Guard(
+        'one command decodes a bounded number of texts', _SRC + "tools/search_tools.py",
+        '''            if left <= 0:''',
+        '''            if False:''',
+        [HOSTILETEXTS + 'test_nested_lists_share_one_budget'],
+        '64 lists of 64 links to one big string was 4,096 decodes in one command',
+    ),
+    Guard(
+        'map_list builds only the rows it returns', _SRC + "tools/map_read_tools.py",
+        '''        if matching <= offset or matching > offset + limit:''',
+        '''        if matching > offset + limit:''',
+        [HOSTILEMAPLIST + 'test_rows_before_the_offset_are_not_built'],
+        'rows before the offset were built, each with a map_file call and a map load, then thrown away',
+    ),
+    Guard(
+        'a tree key that is not a map id is skipped', _SRC + "tools/map_read_tools.py",
+        '''        if not isinstance(info, RubyObject) or not _is_map_id(map_id):''',
+        '''        if not isinstance(info, RubyObject):''',
+        [HOSTILEMAPLIST + 'test_a_key_that_is_not_a_map_id_does_not_fail_the_listing'],
+        'one MapInfos key of 0 raised ValueError from map_file and failed the whole listing',
+    ),
+    Guard(
+        'the map_list offset is bounded', _SRC + "tools/map_read_tools.py",
+        ['''    offset = opt_int_default(args, "offset", 0, minimum=0, maximum=MAX_MAP_ID)''',
+         '''% MAX_MAP_ID, minimum=0, maximum=MAX_MAP_ID),'''],
+        ['''    offset = opt_int_default(args, "offset", 0, minimum=0)''',
+         '''% MAX_MAP_ID, minimum=0),'''],
+        [HOSTILEMAPLIST + 'test_the_offset_is_bounded'],
+        'an offset of a trillion was taken and echoed back',
+    ),
+    Guard(
+        'a page trigger is named only when it is a whole number', _SRC + "tools/map_read_tools.py",
+        '''    if isinstance(trigger, int) and not isinstance(trigger, bool):''',
+        '''    if True:''',
+        [HOSTILEMAPGET + 'test_a_list_trigger_is_described_not_a_crash'],
+        'a Ruby Array as @trigger is a Python list, unhashable in TRIGGER_NAMES.get: map_get died with TypeError',
+    ),
+    Guard(
+        'a condition id is shown only when it is a sane number', _SRC + "tools/map_read_tools.py",
+        '''            and -_SHOWN_BOUND <= value <= _SHOWN_BOUND):''',
+        '''            ):''',
+        [HOSTILEMAPGET + 'test_a_bignum_condition_id_is_described_not_a_crash'],
+        'a 5,000-digit condition id cannot be formatted: map_get died with ValueError',
+    ),
+    Guard(
+        'a table lists a bounded number of layers', _SRC + "tools/map_read_tools.py",
+        ['''                       for z in range(min(data.zsize, _LAYERS_SHOWN))},''',
+         '''    for z in range(min(data.zsize, _LAYERS_SHOWN)):'''],
+        ['''                       for z in range(data.zsize)},''',
+         '''    for z in range(data.zsize):'''],
+        [HOSTILEMAPGET + 'test_a_huge_third_extent_does_not_list_every_layer'],
+        'a 0 x 0 x 60,000 table passed the cell budget and listed 60,000 layers twice',
+    ),
+    Guard(
+        'a render opens a bounded number of character sheets', _SRC + "tools/map_render_tools.py",
+        '''            if len(loaded) >= _MAX_CHARACTER_SHEETS:''',
+        '''            if False:''',
+        [HOSTILERENDER + 'test_a_map_of_many_character_sheets_decodes_a_bounded_number'],
+        '2,000 events each naming a different sheet decoded 2,000 PNGs of up to 8 megapixels',
+    ),
+    Guard(
+        'the render folder is checked before it is made', _SRC + "tools/map_render_tools.py",
+        '''        _contained(folder, ctx.project.root, "the render folder")''',
+        '''        pass''',
+        [HOSTILERENDER + 'test_the_folder_is_checked_before_it_is_made'],
+        'a junction planted as the work folder carried the mkdir outside the project before the check refused',
+    ),
+    Guard(
+        'a failed render write removes its temp file', _SRC + "tools/map_render_tools.py",
+        '''            temporary.unlink()''',
+        '''            unused = temporary''',
+        [HOSTILERENDER + 'test_a_failed_move_leaves_no_temp_file'],
+        'a failed os.replace left name.png.tmp, which the trim glob never matches',
+    ),
+    Guard(
+        'the render trim names only its own pictures', _SRC + "tools/map_render_tools.py",
+        ['''    kept = sorted((p for p in folder.glob("map-????-??????????.png")''',
+         '''                   if p.is_file() and _OWN_PICTURE.fullmatch(p.name)),'''],
+        ['''    kept = sorted((p for p in folder.glob("map-*.png")''',
+         '''                   if p.is_file()),'''],
+        [HOSTILERENDER + 'test_only_its_own_pictures_are_trimmed'],
+        'map-*.png trimmed pictures a person kept in a shared --render-dir; the property is held twice (glob and name pattern), so both are reverted together',
+    ),
+    Guard(
+        'an empty restore list is refused', _SRC + "tools/misc_tools.py",
+        '''        if not files:''',
+        '''        if False:''',
+        [HOSTILEBACKUPS + 'test_an_empty_file_list_is_not_every_file'],
+        'files: [] meant every file in the snapshot, overwriting the whole Data folder',
+    ),
+    Guard(
+        'a snapshot name is bounded', _SRC + "tools/misc_tools.py",
+        '''                       maxLength=MAX_BACKUP_NAME_CHARS),''',
+        '''                       ),''',
+        [HOSTILEBACKUPS + 'test_a_long_backup_name_is_refused_short'],
+        'a 100,000-character backup name was a bare ValueError (path too long) and was echoed back',
+    ),
+    Guard(
+        'a snapshot label is bounded', _SRC + "tools/misc_tools.py",
+        '''                      maxLength=MAX_LABEL_CHARS),''',
+        '''                      ),''',
+        [HOSTILEBACKUPS + 'test_a_long_label_is_refused'],
+        'a 100,000-character label became a directory name past the path limit: a raw OSError',
+    ),
+    Guard(
+        'a restore file name is bounded', _SRC + "tools/misc_tools.py",
+        '''            if len(name) > MAX_BACKUP_NAME_CHARS:''',
+        '''            if False:''',
+        [HOSTILEBACKUPS + 'test_a_long_file_name_is_refused_short'],
+        'each files entry was echoed whole into its refusal; the count was capped and the length was not',
+    ),
+    Guard(
+        'the scripts count honours refresh', _SRC + "tools/misc_tools.py",
+        '''refresh=refresh))''',
+        '''refresh=False))''',
+        [HOSTILEINFO + 'test_refresh_reaches_the_script_file'],
+        'project_info refresh=true re-read every file but the scripts, whose count could be stale',
+    ),
+    Guard(
+        'a set without a path is refused before the load', _SRC + "tools/raw_tools.py",
+        '''        if not path:''',
+        '''        if False:''',
+        [HOSTILERAW + 'test_a_set_without_a_path_does_not_load_the_file'],
+        'op=set with no path unmarshalled the whole table before saying a path is needed',
+    ),
+    Guard(
+        'a wrapped array is judged by what it holds', _SRC + "tools/raw_tools.py",
+        '''    if isinstance(existing, RubyIvars):''',
+        '''    if False:''',
+        [HOSTILERAW + 'test_a_wrapped_array_cannot_become_a_number'],
+        'an Array with instance variables is a RubyIvars wrapper: the same-kind guard saw no array and let a number replace it',
+    ),
+    Guard(
+        'unlisted tile ids force a partial key', _SRC + "tools/map_read_tools.py",
+        '''            if unlisted:''',
+        '''            if False:''',
+        [VOCABTILES + 'test_a_reply_that_omits_tile_ids_says_so_in_a_partial_key'],
+        'map_get tiles=counts left ids out and said so only in a count: a caller reading the list saw a complete answer',
+    ),
+    Guard(
+        'a command walks a bounded number of its parameters', _SRC + "tools/search_tools.py",
+        ['''    for value in as_list(command.get("parameters"))[:MAX_TEXTS_PER_COMMAND]:''',
+         '''        for part in (value[:MAX_TEXTS_PER_COMMAND]'''],
+        ['''    for value in as_list(command.get("parameters")):''',
+         '''        for part in (value'''],
+        [HOSTILERE + 'test_a_command_iterates_a_bounded_number_of_parameters'],
+        'the shared decode budget counted strings only: a Marshal link to one million-element list of integers was walked in full by every command holding it',
+    ),
+    Guard(
+        'a render writes through a temp file of its own making', _SRC + "tools/map_render_tools.py",
+        '''    descriptor, temporary_name = tempfile.mkstemp(''',
+        '''    descriptor, temporary_name = os.open(folder / (name + ".tmp"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC), str(folder / (name + ".tmp")) ; _unused = dict(''',
+        [HOSTILERE + 'test_a_predictable_temp_name_is_not_written_through'],
+        '<picture>.tmp is a name an attacker can predict, and write_bytes follows a link planted at it',
+    ),
+    Guard(
+        'a label at its cap still makes a restorable name', _SRC + "tools/misc_tools.py",
+        '''MAX_LABEL_CHARS = 64''',
+        '''MAX_LABEL_CHARS = 128''',
+        [HOSTILERE + 'test_a_snapshot_with_the_longest_label_can_be_restored'],
+        'a 100-character label made a snapshot name past the restore tool\'s own cap: recovery blocked by the safety net',
+    ),
+    Guard(
+        'the store refuses an empty file list', _SRC + "backups.py",
+        '''        if files is not None and not files:''',
+        '''        if False:''',
+        [HOSTILERE + 'test_an_empty_file_list_is_refused_by_the_store_too'],
+        'restore_backup(files=[]) meant every file; only the tool layer refused it',
+    ),
+    Guard(
+        'the render trim checks the hash, not just the wildcards', _SRC + "tools/map_render_tools.py",
+        '''                   if p.is_file() and _OWN_PICTURE.fullmatch(p.name)),''',
+        '''                   if p.is_file()),''',
+        [HOSTILERENDER + 'test_only_its_own_pictures_are_trimmed'],
+        'the glob wildcard ? matches any character: a map-0001-holidaypic.png kept in a shared --render-dir counted as ours and was trimmed',
     ),
 ]

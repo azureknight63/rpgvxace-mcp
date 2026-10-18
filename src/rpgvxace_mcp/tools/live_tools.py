@@ -284,6 +284,12 @@ def _status(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
 
 def _state(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     sections = opt_list(args, "sections")
+    # The bridge builds a method name from each; only the advertised readers
+    # may be reached, and a bad name is a refusal here, not a Ruby error there.
+    for section in sections:
+        if section not in bridge.STATE_SECTIONS:
+            raise ToolError("unknown state section %s; choose from %s"
+                            % (echo(section), ", ".join(bridge.STATE_SECTIONS)))
     reply = _running().request("state", {"sections": sections} if sections
                                else {})
     for section in reply.pop("truncated", None) or ():
@@ -331,7 +337,10 @@ def _ids(args: dict[str, Any], key: str, check: Any) -> dict[int, Any]:
                         % (key, len(given), MAX_SET_ENTRIES))
     out = {}
     for name, value in given.items():
-        if not (isinstance(name, str) and name.isdigit() and int(name) >= 1):
+        # ASCII digits only, and few: `isdigit()` passes "²", which
+        # `int()` rejects, and a 5,000-digit key trips the int-string limit.
+        if not (isinstance(name, str) and name.isascii() and name.isdigit()
+                and len(name) <= 9 and int(name) >= 1):
             raise ToolError("%s is keyed by id, a whole number from 1; got "
                             "%s" % (key, echo(name)))
         out[int(name)] = check("%s[%s]" % (key, name), value)

@@ -172,7 +172,14 @@ def compose_tile(tile_id: int, sheets: "dict[str, Image | None]"
         copy_rect(out, sheet, x, y, TILE, TILE, 0, 0)
         return out
     _, bx, by, table, shape = autotile_block(tile_id)
-    quarters = TABLES[table][shape]
+    rows = TABLES[table]
+    if shape >= len(rows):
+        # `autotile_block` names a shape 0-47 for every kind, and a wall has
+        # sixteen and a waterfall four: a hand-edited or damaged map can hold
+        # an id the table has no row for. Undrawable, not a crash -- the
+        # caller counts it with the other ids that drew nothing.
+        return None
+    quarters = rows[shape]
     for index, (qx, qy) in enumerate(quarters):
         sx = (bx * 2 + qx) * HALF
         sy = (by * 2 + qy) * HALF

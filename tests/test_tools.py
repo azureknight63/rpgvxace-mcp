@@ -302,9 +302,13 @@ class TestMaps(ToolTest):
         self.assertIn("does not fit", str(caught.exception))
 
     def test_tiles_rejects_mismatched_rows(self):
-        with self.assertRaises(ToolError):
+        with self.assertRaises(ToolError) as caught:
             self.call("map_tiles", map_id=1, op="write", x=0, y=0, width=2, height=2,
                       rows=[[1, 2]])
+        # The rows against the rectangle: any other refusal (a bad op, a
+        # bounds error) would also have satisfied the bare form.
+        self.assertIn("rows has 1 rows but the rectangle is 2 tall",
+                      str(caught.exception))
 
     def test_tiles_rejects_missing_layer(self):
         beyond = 4 if self.ace else 3
@@ -619,8 +623,10 @@ class TestSearch(ToolTest):
         self.assertIn("map 2", hits[0]["text"])
 
     def test_bad_regex_is_reported(self):
-        with self.assertRaises(ToolError):
+        with self.assertRaises(ToolError) as caught:
             self.call("search", query="([", regex=True)
+        # The pattern, and not a rejected scope or a missing query.
+        self.assertIn("invalid regular expression", str(caught.exception))
 
 
 class TestValidate(ToolTest):
@@ -2475,8 +2481,13 @@ class TestXPProject(ToolTest):
             self.project.profile.class_fields["RPG::Map"]))
         self.assertEqual(game_map.get("data").zsize, 3)
         self.assertEqual(game_map.get("bgm").cls, "RPG::AudioFile")
-        with self.assertRaises(ToolError):
+        maps_before = self.reopen().project.map_ids_on_disk(refresh=True)
+        with self.assertRaises(ToolError) as caught:
             self.call("map_edit", op="create", name="Nowhere", tileset_id=9)
+        self.assertIn("tileset 9 does not exist", str(caught.exception))
+        # And nothing was made on the way to refusing.
+        self.assertEqual(
+            self.reopen().project.map_ids_on_disk(refresh=True), maps_before)
 
     def test_a_created_event_has_xp_s_page(self):
         self.call("event_edit", map_id=1, ops=[{
@@ -3010,9 +3021,20 @@ class TestTheCompilerTableAndItsHelpAgree(unittest.TestCase):
         return sorted(_COMPILERS)
 
     def test_every_compiled_key_is_documented(self):
+        import re
         from rpgvxace_mcp.commands import DSL_HELP
+        # Written as a JSON key (`"wait":`), not merely quoted somewhere:
+        # "item" and "wait" are quoted elsewhere in the text (a shop's goods,
+        # a move step), so deleting their own form left a bare quote check
+        # green.
+        # The audio family is described once, as the same form as "bgm":
+        # an exception named here with the sentence that carries it, so it
+        # is checked and not waved through.
+        described_together = {
+            key: '"bgs", "me", "se" the same' for key in ("bgs", "me", "se")}
         missing = [key for key in self.keys()
-                   if '"%s"' % key not in DSL_HELP]
+                   if not re.search(r'"%s"\s*:' % re.escape(key), DSL_HELP)
+                   and described_together.get(key) not in DSL_HELP]
         self.assertEqual(
             missing, [],
             "these compile and `DSL_HELP` does not mention them, so no "

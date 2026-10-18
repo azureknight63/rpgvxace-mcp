@@ -114,16 +114,20 @@ class TestStatOutliers(StatOutlierCase):
         self.assertIn("zero", self.skipped(report, "enemies", "mhp")[0]["reason"])
 
     def test_nil_and_malformed_values_are_tolerated(self):
-        values = [100, 105, 110, 115, 120, 125, 130, 135, 140, 145, 150]
+        values = [100, 105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 155]
         self.fill_enemies(values)
         rows = self.project.load_data("enemies")
         rows.insert(3, None)                       # a nil slot
         rows[5].set("params", None)                # no params at all
         rows[6].set("params", [])                  # a short array
-        rows[7].set("params", [None, "x", True])   # junk, bool is not a number
+        rows[7].set("params", [None, "x", True])   # junk in the other slots
+        # The field that is analysed (max HP, the first) holding a bool: True
+        # is an int to Python and not a number to Ruby. It used to sit in an
+        # index nothing reads, so accepting bools passed this.
+        rows[8].set("params", [True, 1, 1])
         report = self.run_scope()
         hp = self.field(report, "enemies", "mhp")
-        self.assertEqual(hp["n"], len(values) - 3)
+        self.assertEqual(hp["n"], len(values) - 4)
         self.assertEqual(hp["outliers"], [])
 
     def test_blank_named_slots_are_left_out_and_counted(self):

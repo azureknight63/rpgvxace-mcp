@@ -74,7 +74,7 @@ AWAKE_SECONDS = 0.25
 
 
 # A save slot, which a test run must not see and must not overwrite.
-_SAVE_FILE = re.compile(r"^save\d*\.rvdata2?$", re.IGNORECASE)
+_SAVE_FILE = re.compile(r"^save\d*\.r[xv]data2?$", re.IGNORECASE)
 
 
 def launch_command(game_dir: Path) -> "list[str]":
@@ -137,6 +137,9 @@ def sweep_orphans() -> "list[str]":
             owner = json.loads(marker.read_text(encoding="utf-8"))["server_pid"]
         except (OSError, ValueError, KeyError, TypeError):
             continue
+        if (not isinstance(owner, int) or isinstance(owner, bool)
+                or not 0 < owner < 2 ** 32):
+            continue  # a marker this server did not write
         if owner != os.getpid() and not pid_alive(owner):
             if _remove_tree(folder):
                 removed.append(str(folder))
@@ -198,7 +201,15 @@ def _scripts_path(game_dir: Path) -> Path:
         for line in ini.read_text(encoding="utf-8", errors="replace").splitlines():
             key, _, value = line.partition("=")
             if key.strip().lower() == "scripts" and value.strip():
-                return game_dir / value.strip().replace("\\", "/")
+                chosen = game_dir / value.strip().replace("\\", "/")
+                # Game.ini is the project's own file: an absolute value
+                # (`/` discards the left side) or a `..` one would send the
+                # injected script pack to a file outside the scratch copy.
+                try:
+                    chosen.resolve().relative_to(game_dir.resolve())
+                except (ValueError, OSError):
+                    break
+                return chosen
     except OSError:
         pass
     return game_dir / "Data" / "Scripts.rvdata2"

@@ -7,7 +7,7 @@ from typing import Any, Callable, Iterator
 
 from ..convert import TextCodec, brief, decoded_text
 from ..project import Project
-from ..rubytypes import _bare_name as bare_name, named
+from ..rubytypes import MAX_NAMES_LISTED, _bare_name as bare_name, named
 
 # How much of a caller's own value is quoted back in an error. Without this, a
 # rejected multi-megabyte argument becomes a multi-megabyte error message.
@@ -566,11 +566,17 @@ def scopes_arg(args: dict[str, Any], key: str,
     asked = opt_list(args, key)
     unknown = [s for s in asked if s not in allowed]
     if unknown:
+        # A bounded list of them: a call naming fifty thousand got an error
+        # the size of the request.
+        shown = ", ".join(echo(u) for u in unknown[:MAX_NAMES_LISTED])
+        if len(unknown) > MAX_NAMES_LISTED:
+            shown += " and %d more" % (len(unknown) - MAX_NAMES_LISTED)
         raise ToolError("unknown %s %s; choose from %s"
-                        % (key, ", ".join(echo(u) for u in unknown),
-                           ", ".join(allowed)))
-    return ([s for s in asked if s in allowed]
-            or list(allowed if default is None else default))
+                        % (key, shown, ", ".join(allowed)))
+    # Once each, in the order first asked: the same scope named a million
+    # times ran a million times and was echoed back a million times.
+    wanted = list(dict.fromkeys(s for s in asked if s in allowed))
+    return wanted or list(allowed if default is None else default)
 
 
 def refuse_inert(args: dict[str, Any], names: "tuple[str, ...]",

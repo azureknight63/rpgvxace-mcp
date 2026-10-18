@@ -229,8 +229,8 @@ class TestNoWalkCollectsPastTheCeiling(ToolTest):
     def test_the_asset_walk_stops_collecting(self):
         self.craft_broken_map()
         found = self.analysis.check_assets(self.project, [1])
-        self.assertLessEqual(len(found), self.CEILING,
-                             "the asset walk collected %d findings past a "
+        self.assertEqual(len(found), self.CEILING,
+                         "the asset walk collected %d findings past a "
                              "ceiling of %d" % (len(found), self.CEILING))
 
     def test_the_asset_checker_itself_stops_collecting(self):
@@ -251,8 +251,8 @@ class TestNoWalkCollectsPastTheCeiling(ToolTest):
         """Shadowed pages: one finding per event, and EVENTS is from the file."""
         self.craft_broken_map()
         found = self.analysis.check_event_pages(self.project, [1])
-        self.assertLessEqual(len(found), self.CEILING,
-                             "the page walk collected %d findings past a "
+        self.assertEqual(len(found), self.CEILING,
+                         "the page walk collected %d findings past a "
                              "ceiling of %d" % (len(found), self.CEILING))
 
     def test_the_tileset_walk_stops_collecting(self):
@@ -268,8 +268,8 @@ class TestNoWalkCollectsPastTheCeiling(ToolTest):
         if not broken:
             self.skipTest("no tilesets in this engine's fixture")
         found = self.analysis.check_tilesets(self.project, [1], tables)
-        self.assertLessEqual(len(found), self.CEILING,
-                             "the tileset walk collected %d findings past a "
+        self.assertEqual(len(found), self.CEILING,
+                         "the tileset walk collected %d findings past a "
                              "ceiling of %d" % (len(found), self.CEILING))
 
     def test_an_ordinary_project_still_reports_everything(self):
@@ -351,6 +351,13 @@ class TestNarrowingValidateActuallyNarrowsIt(ToolTest):
         """Narrowing the loading must not narrow the checking."""
         out = self.call("validate", scopes=["events"])
         self.assertNotIn("command_walk_stopped", out)
+        # And the maps really were read: the absence of one key is also what a
+        # run that checked nothing reports.
+        loaded = set(self.loaded_maps(scopes=["events"]))
+        on_disk = set(self.ctx.project.map_ids_on_disk())
+        self.assertTrue(on_disk <= loaded,
+                        "a whole run left maps unread: %s"
+                        % sorted(on_disk - loaded))
 
     def test_a_transfer_to_an_undersized_map_is_still_caught(self):
         """The finding the eager lookup existed to produce.
@@ -461,7 +468,7 @@ class TestTheMapScopeStopsCollecting(ToolTest):
         self.assertGreater(len(maps), 1, "this needs more than one map")
         tables = self.analysis._Tables(self.project)
         found = self.analysis.check_maps(self.project, maps, tables)
-        self.assertLessEqual(
+        self.assertEqual(
             len(found), self.CEILING,
             "check_maps collected %d findings from %d maps against a ceiling "
             "of %d, because the guard was on a list it discards"
@@ -475,7 +482,9 @@ class TestTheMapScopeStopsCollecting(ToolTest):
         self.assertNotIn(missing, troop_ids)
         found = self.analysis._check_encounters(
             self.project, 1, game_map, troop_ids)
-        self.assertLessEqual(len(found), self.CEILING)
+        # Exactly the ceiling: a walk that found nothing would also be
+        # "at most" it.
+        self.assertEqual(len(found), self.CEILING)
 
     def test_a_real_encounter_list_is_still_checked(self):
         """The ceiling must not stop a project's genuine findings."""
@@ -607,6 +616,10 @@ class TestEveryScopeSpendsTheSameAllowance(ToolTest):
                                 budget)
         self.assertTrue(budget.exhausted,
                         "a %d-entry cycle was walked free" % total)
+        # The bound below is on lookups, which a walk that never looked
+        # anything up also satisfies.
+        self.assertGreater(Counting.lookups, 0,
+                           "the walk never asked the map tree for a parent")
         # One walk of the chain is `total` lookups. Once the budget is gone
         # nothing more is worth walking, so a second pass from another start
         # is the quadratic behaviour this bounds.
@@ -633,6 +646,28 @@ class TestEveryScopeSpendsTheSameAllowance(ToolTest):
                              "a %d-entry cycle collected %d findings against "
                              "a ceiling of %d"
                              % (total, len(findings), MAX_FINDINGS))
+
+    def test_a_parent_chain_fills_the_ceiling_and_no_more(self):
+        """The chain loop on its own, with a collector of its own.
+
+        `test_a_parent_chain_cannot_collect_past_the_ceiling` goes through
+        `check_map_tree`, where the outer loop can fill the collector first.
+        """
+        from rpgvxace_mcp import analysis
+        infos = {}
+        total = MAX_FINDINGS + 200
+        for map_id in range(1, total + 1):
+            info = RubyObject("RPG::MapInfo")
+            info.set("name", self.project.codec.make_string("M%d" % map_id))
+            info.set("parent_id", map_id + 1 if map_id < total else 1)
+            infos[map_id] = info
+        collector = analysis._Findings()
+        analysis._parent_cycles(infos, collector,
+                                analysis.WalkBudget(limit=10 ** 9))
+        self.assertEqual(len(collector.items), MAX_FINDINGS,
+                         "a %d-entry cycle left %d findings against a "
+                         "ceiling of %d" % (total, len(collector.items),
+                                            MAX_FINDINGS))
 
     def test_an_ordinary_project_still_reports_its_real_findings(self):
         """The charges must not make a real project look crafted."""
@@ -919,7 +954,9 @@ class TestTheCeilingStopsTheWalkingToo(ToolTest):
         self.craft_shared_events(self.shadowing_pages())
         found = self.lint.check_event_pages(self.project, [1],
                                             self.analysis.WalkBudget())
-        self.assertLessEqual(len(found), self.CEILING)
+        # Exactly the ceiling: 3000 shadowed events fill a ceiling of 4, and
+        # "at most" is also true of a walk that found nothing.
+        self.assertEqual(len(found), self.CEILING)
 
 
 class TestAFindingNamesTheRightCommand(ValidateTest):

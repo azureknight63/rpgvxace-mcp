@@ -9,7 +9,7 @@ in `guard_table.py`, this script
   3. runs the test that is supposed to catch the regression,
   4. and requires that test to FAIL.
 
-Three things can go wrong, and they read alike from the outside:
+Four things can go wrong, and they read alike from the outside:
 
 * VACUOUS -- the test still passes with the guard reverted, so it is checking
   something else.
@@ -19,15 +19,18 @@ Three things can go wrong, and they read alike from the outside:
 * AMBIGUOUS -- the anchor matches more than one place, so the revert hits
   whichever comes first, which may not be the one the test walks. A guard like
   this can report PROVEN for the wrong reason.
+* INVALID -- the reverted text is not valid Python, so every test fails to
+  import and the guard would be PROVEN by a syntax error rather than by the
+  behaviour it protects. Nothing is run; the revert has to be rewritten.
 
-Proving them all takes minutes, which is long enough to be tempting to skip
+Proving them all takes tens of minutes, which is long enough to be tempting to skip
 after an edit. ``--check`` validates every anchor against its file in well
 under a second and catches STALE and AMBIGUOUS immediately, so run that after
 touching anything a guard watches.
 
     python scripts/prove_guards.py            # prove them all
     python scripts/prove_guards.py --check    # anchors only, seconds
-    python scripts/prove_guards.py --list     # just list what is proven
+    python scripts/prove_guards.py --list     # list the guards, prove nothing
 
 The guards themselves are next door in `guard_table.py`, which is data. This
 file is the engine, and is the half worth reading when a verdict surprises
@@ -37,6 +40,7 @@ you.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -47,6 +51,13 @@ from guard_table import GUARDS, Guard, ROOT
 
 
 TEST_TIMEOUT = 300
+
+# What the scratch copy leaves out: caches, build output, and the folders of
+# a developer's own machine, which a copy per guard would repeat a few hundred
+# times (a virtual environment, every worktree under `.claude`).
+COPY_IGNORE = shutil.ignore_patterns(
+    "__pycache__", ".git", ".pytest_cache", "build", "dist", "*.egg-info",
+    ".claude", ".venv", "venv", "node_modules")
 
 
 def run_tests(tree: Path, tests: list[str]) -> subprocess.CompletedProcess | None:
@@ -66,7 +77,7 @@ def run_tests(tree: Path, tests: list[str]) -> subprocess.CompletedProcess | Non
             # failure message neither could hold left stdout as None.
             cwd=tree, capture_output=True, text=True,
             encoding="utf-8", errors="replace",
-            env={**dict(__import__("os").environ),
+            env={**os.environ,
                  "PYTHONPATH": str(tree / "src"),
                  "PYTHONIOENCODING": "utf-8"},
             timeout=TEST_TIMEOUT,
@@ -91,23 +102,40 @@ def prove(guard: Guard, run=None) -> tuple[bool, str]:
     tests, which drive every verdict without copying a tree.
     """
     run = run or run_tests
+    source = (ROOT / guard.file).read_text(encoding="utf-8")
+    problem = _anchor_problem(guard, source)
+    if problem:
+        # STALE and AMBIGUOUS are different things to fix from VACUOUS: the
+        # guard is describing code that has since moved, or matches more than
+        # one place, so nothing was reverted, or not the right thing.
+        return False, problem
+    edited = source
+    for present, reverted in guard.anchors:
+        if present not in edited:
+            # Each anchor is unique in the file, but not necessarily in what
+            # the reverts before it left behind: `replace` would do nothing
+            # and say nothing, and the verdict would be about half an edit.
+            return False, ("OVERLAP: an earlier revert in this guard removed "
+                           "the text of a later anchor in %s, so it was never "
+                           "reverted. Give the anchors text of their own."
+                           % guard.file)
+        edited = edited.replace(present, reverted, 1)
+    if guard.file.endswith(".py"):
+        try:
+            compile(edited, guard.file, "exec")
+        except SyntaxError as exc:
+            # The tests would fail, the restored baseline would pass, and the
+            # guard would be PROVEN -- by a file that does not import.
+            return False, ("INVALID: the reverted text is not valid Python "
+                           "(%s, line %s of %s), so every test would fail "
+                           "for that and not for the behaviour the guard "
+                           "protects. Rewrite the revert."
+                           % (exc.msg, exc.lineno, guard.file))
     with tempfile.TemporaryDirectory(prefix="prove-guard-") as tmp:
         tree = Path(tmp) / "tree"
-        shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns(
-            "__pycache__", ".git", ".pytest_cache", "build", "dist", "*.egg-info"))
+        shutil.copytree(ROOT, tree, ignore=COPY_IGNORE)
 
         target = tree / guard.file
-        source = target.read_text(encoding="utf-8")
-        if any(present not in source for present, _ in guard.anchors):
-            # Distinct from VACUOUS, and a different thing to fix: the guard is
-            # still describing code that has since moved or been reworded, so it
-            # has silently stopped watching anything at all.
-            return False, ("STALE: this guard's source text is no longer in %s, "
-                           "so nothing was reverted. Re-anchor it to the code "
-                           "as it now reads." % guard.file)
-        edited = source
-        for present, reverted in guard.anchors:
-            edited = edited.replace(present, reverted, 1)
         target.write_text(edited, encoding="utf-8")
 
         result = run(tree, guard.tests)
@@ -137,6 +165,27 @@ def prove(guard: Guard, run=None) -> tuple[bool, str]:
         return True, (_first_failure(result) or "failed as expected")
 
 
+def _anchor_problem(guard: Guard, source: str) -> str | None:
+    """STALE or AMBIGUOUS for a guard against its file, or None if it is fine.
+
+    One function for `prove` and `--check`: the two had each their own wording
+    of STALE, and `prove` had no AMBIGUOUS at all, though its own docstring
+    says that one can report PROVEN for the wrong reason.
+    """
+    for present, _ in guard.anchors:
+        found = source.count(present)
+        if found == 0:
+            return ("STALE: this guard's source text is no longer in %s, so "
+                    "nothing was reverted. Re-anchor it to the code as it "
+                    "now reads." % guard.file)
+        if found > 1:
+            return ("AMBIGUOUS: this guard's source text matches %d places in "
+                    "%s, so the revert hits whichever comes first, which may "
+                    "not be the one its test walks. Narrow the anchor so it "
+                    "matches once." % (found, guard.file))
+    return None
+
+
 def _first_failure(result) -> str:
     """The most useful line of a failed test run, for the verdict to quote."""
     lines = [line for line in result.stdout.splitlines()
@@ -151,22 +200,15 @@ def check_anchors(guards: list[Guard]) -> int:
     not. A stale anchor reverts nothing and so proves nothing, and an anchor
     that matches twice reverts whichever copy comes first -- which may not be
     the one the test walks. Both read exactly like a guard that passes, and a
-    full run takes twenty minutes to say so, which is long enough that it is
+    full run takes tens of minutes to say so, which is long enough that it is
     tempting not to. This says it in seconds, so there is no excuse.
     """
     problems = []
     for guard in guards:
         source = (ROOT / guard.file).read_text(encoding="utf-8")
-        for present, _ in guard.anchors:
-            found = source.count(present)
-            if found == 0:
-                problems.append((guard.name,
-                                 "STALE: no longer in %s" % guard.file))
-            elif found > 1:
-                problems.append((guard.name,
-                                 "AMBIGUOUS: matches %d places in %s, so the "
-                                 "revert may hit the wrong one"
-                                 % (found, guard.file)))
+        problem = _anchor_problem(guard, source)
+        if problem:
+            problems.append((guard.name, problem))
     for name, detail in problems:
         print("PROBLEM  %-46s %s" % (name, detail))
     if problems:

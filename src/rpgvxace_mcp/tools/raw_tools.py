@@ -162,23 +162,35 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             "stops the game booting. Use the scripts tool, which decompresses "
             "and compresses it for you.")
 
+    # Every refusal that needs only the arguments comes before the load, like
+    # the scripts one above: a bad call unmarshalled the file and left a
+    # cache entry for nothing.
+    path = [p for p in (opt_str(args, "path") or "").split("/") if p]
+    if len(path) > MAX_PATH_SEGMENTS:
+        raise ToolError(
+            "path has %d segments and at most %d are addressed. A path this "
+            "deep does not address a field in an RGSS file: the deepest real "
+            "one is about eight segments. Resolving each segment costs a scan "
+            "of the container it names, so the work is the path's length "
+            "times the file's."
+            % (len(path), MAX_PATH_SEGMENTS))
+    mode = one_of(args, "tables", list(TABLE_MODES), TABLE_MODES[0])
+    if op == "set":
+        if not path:
+            raise ToolError("set needs a path; replacing a whole file is not "
+                            "supported")
+        if "value" not in args or not isinstance(args["value"], dict) \
+                or "value" not in args["value"]:
+            raise ToolError('set needs value as {"value": <the new value>}')
+        if map_id is not None:
+            _check_structural(path)
+
     if map_id is not None:
         filename = ctx.project.map_file(map_id)
         root = ctx.project.load_map(map_id, refresh)
     else:
         filename = ctx.project.filename_for(table)
         root = ctx.project.load_data(table, refresh)
-
-    path = [p for p in (opt_str(args, "path") or "").split("/") if p]
-    if len(path) > MAX_PATH_SEGMENTS:
-        raise ToolError(
-            "path has %d segments and at most %d are read. A path this deep "
-            "does not address a field in an RGSS file: the deepest real one "
-            "is about eight segments. Resolving each segment costs a scan of "
-            "the container it names, so the work is the path's length times "
-            "the file's."
-            % (len(path), MAX_PATH_SEGMENTS))
-    mode = one_of(args, "tables", list(TABLE_MODES), TABLE_MODES[0])
 
     # One allowance for every resolve this call makes: `op="set"` reaches
     # the parent and then the value, and the second reach is one segment
@@ -191,14 +203,6 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
                 "type": type(value).__name__,
                 "value": to_json(value, ctx.codec, mode)}
 
-    if not path:
-        raise ToolError("set needs a path; replacing a whole file is not supported")
-    if "value" not in args or not isinstance(args["value"], dict) \
-            or "value" not in args["value"]:
-        raise ToolError('set needs value as {"value": <the new value>}')
-
-    if map_id is not None:
-        _check_structural(path)
     parent = _resolve(root, path[:-1], ctx.codec, walk)
     key = path[-1]
     new_value = from_json(args["value"]["value"], ctx.codec)
@@ -216,7 +220,9 @@ def raw_data(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     # deliberately permissive about *values* and has never been permissive
     # about shapes: an invented field name is a shape the editor rejects, and
     # this tool's own description says it refuses one.
-    refuse_invented_in_replacement(existing, new_value, "/".join(path))
+    refuse_invented_in_replacement(
+        existing.inner if isinstance(existing, RubyIvars) else existing,
+        new_value, "/".join(path))
     before = to_json(existing, ctx.codec, "summary")
 
     dry_run = opt_bool(args, "dry_run")
@@ -262,6 +268,10 @@ def _check_same_kind(existing: Any, replacement: Any, path: str) -> None:
     guard it keeps, because being able to write an odd *value* is the point,
     and being able to write an odd *shape* is not.
     """
+    if isinstance(existing, RubyIvars):
+        # The array or hash the wrapper holds is what is being replaced; the
+        # wrapper is only where Ruby hung its instance variables.
+        existing = existing.inner
     if existing is None:
         # A field or slot holding nil has no fields to set inside it, so the
         # remedy below cannot be followed -- and filling one in is exactly

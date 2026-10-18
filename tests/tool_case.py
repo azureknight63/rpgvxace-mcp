@@ -238,7 +238,11 @@ class ToolTest(unittest.TestCase):
 
     def reopen(self):
         """A fresh Project, to prove a change actually reached the disk."""
-        return Context(Project(self.tmp / "project"))
+        # With the test's own `read_only`: a reopened project that was
+        # writable in a read-only test left every guard checked through
+        # `reopen()` or `craft_page_map` unexercised.
+        return Context(Project(self.tmp / "project",
+                               read_only=self.read_only))
 
     def data_bytes(self, stem):
         """Bytes of one data file, named without its extension."""

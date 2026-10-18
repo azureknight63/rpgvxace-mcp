@@ -486,8 +486,10 @@ class TestARoom(PaintTest):
         self.assertEqual(self.ground(2).kind(2, 5), 16)
 
     def test_a_door_off_the_side_is_refused(self):
-        with self.assertRaises(ToolError):
+        with self.assertRaises(ToolError) as caught:
             self.room(door="left", door_at=3)
+        # The door, and not some other rule the room might trip.
+        self.assertIn("door_at is 3, past the end", str(caught.exception))
 
     def test_the_reply_is_short_and_says_what_it_did(self):
         out = self.room()
@@ -560,10 +562,22 @@ class TestADungeon(PaintTest):
         self.assertGreaterEqual(len(out["rooms"]), 2)
         self.assertTrue(connected(self.floor_cells(self.ground(map_id), 16)))
 
+    def test_the_wall_shadow_is_a_shadow(self):
+        """Every shadow expectation here is built from `WALL_SHADOW`.
+
+        Mutated to 0 no shadow is ever cast, and the tests that compare with
+        it all agree with a map that has none. Held apart: the wall shadow
+        is a non-empty set of the layer's low four bits.
+        """
+        self.assertNotEqual(autotile.WALL_SHADOW, 0)
+        self.assertEqual(autotile.WALL_SHADOW & ~0xF, 0)
+
     def test_every_room_is_floor(self):
         map_id = self.new_map()
         out = self.dungeon(map_id)
         layer = self.ground(map_id)
+        # Rooms to judge: an empty list satisfied every loop below.
+        self.assertTrue(out["rooms"], "the dungeon reported no rooms")
         for room in out["rooms"]:
             for y in range(room["y"], room["y"] + room["height"]):
                 for x in range(room["x"], room["x"] + room["width"]):
@@ -573,13 +587,17 @@ class TestADungeon(PaintTest):
         map_id = self.new_map()
         self.dungeon(map_id, wall_height=2)
         layer = self.ground(map_id)
+        faces = 0
         for y in range(layer.height):
             for x in range(layer.width):
                 if layer.kind(x, y) != FACE:
                     continue
+                faces += 1
                 below = [layer.kind(x, y + d) for d in (1, 2)
                          if y + d < layer.height]
                 self.assertIn(16, below, (x, y))
+        # A dungeon with no wall faces satisfied the loop by never entering it.
+        self.assertGreater(faces, 0, "the dungeon painted no wall faces")
 
     def test_the_result_is_already_shaped(self):
         """Re-shaping the finished map from its neighbours changes nothing."""
@@ -592,10 +610,19 @@ class TestADungeon(PaintTest):
 
     def test_an_area_inside_the_map(self):
         map_id = self.new_map()
-        self.dungeon(map_id, x=20, y=0, width=20, height=30)
+        out = self.dungeon(map_id, x=20, y=0, width=20, height=30)
         layer = self.ground(map_id)
         self.assertEqual({layer.get(x, y) for y in range(30) for x in range(20)},
                          {0})
+        # And the area did take the paint: a dungeon that painted nothing, or
+        # painted outside it, also left the first twenty columns alone.
+        self.assertTrue(
+            any(layer.kind(x, y) == 16
+                for y in range(30) for x in range(20, 40)),
+            "nothing was painted inside the area")
+        self.assertTrue(out["rooms"])
+        self.assertTrue(all(room["x"] >= 20 for room in out["rooms"]),
+                        out["rooms"])
 
     def test_a_dungeon_too_large_is_refused(self):
         map_id = self.new_map(width=300, height=100)
@@ -605,8 +632,10 @@ class TestADungeon(PaintTest):
 
     def test_a_room_count_above_the_ceiling_is_refused(self):
         map_id = self.new_map()
-        with self.assertRaises(ToolError):
+        with self.assertRaises(ToolError) as caught:
             self.dungeon(map_id, rooms=map_paint_tools.MAX_ROOMS + 1)
+        self.assertIn("rooms must be at most %d" % map_paint_tools.MAX_ROOMS,
+                      str(caught.exception))
 
     def test_a_dry_run_reports_the_rooms_and_writes_nothing(self):
         map_id = self.new_map()
@@ -737,6 +766,10 @@ class TestAgainstTheRealProject(unittest.TestCase):
                     continue
                 total += 1
                 kept += old == new
+        # Named before it is divided by: with no floor cells this was a
+        # ZeroDivisionError that named nothing, and with a `reshape` that does
+        # nothing every cell is "kept", so the share alone cannot show it ran.
+        self.assertGreater(total, 1000, "found almost no floor autotiles")
         self.assertGreaterEqual(kept / total, self.render_share())
 
 

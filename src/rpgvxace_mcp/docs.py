@@ -568,9 +568,9 @@ Scripts: `scripts` reads and replaces the script editor slots.
 
 ## What this server does not do
 
-It edits files; it does not talk to a running game. There is no live state, no
-screenshotting and no playtest control. Encrypted archives are not read -- point
-the server at an unpacked project.
+It edits files. Playtesting goes through `live`, which runs a scratch copy of
+the game and never the project folder itself. Encrypted archives are not read --
+point the server at an unpacked project.
 """ % {
         "label": label,
         "tiles": regions_note,

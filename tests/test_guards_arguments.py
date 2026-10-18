@@ -405,9 +405,11 @@ class TestRawDataWillNotHandBackCompressedScripts(ToolTest):
         self.assertIn("scripts tool", str(caught.exception))
 
     def test_writing_it_is_still_refused(self):
-        with self.assertRaises(ToolError):
+        with self.assertRaises(ToolError) as caught:
             self.call("raw_data", op="set", table="scripts", path="0/2",
                       value={"value": "puts 1"})
+        # This refusal and not another (a bad path, a bad value).
+        self.assertIn("scripts tool", str(caught.exception))
 
 
 class TestAnEmptyCommandListIsRefusedEverywhere(ToolTest):
@@ -426,15 +428,18 @@ class TestAnEmptyCommandListIsRefusedEverywhere(ToolTest):
         self.assertIn("delete_page", str(caught.exception))
 
     def test_add_page_refuses_it(self):
-        with self.assertRaises(ToolError):
+        with self.assertRaises(ToolError) as caught:
             self.call("event_edit", map_id=1, dry_run=True, ops=[
                 {"op": "add_page", "event_id": 1, "commands": []}])
+        # The empty list, and not some other rule the op might trip.
+        self.assertIn("empty commands list", str(caught.exception))
 
     def test_create_refuses_it(self):
-        with self.assertRaises(ToolError):
+        with self.assertRaises(ToolError) as caught:
             self.call("event_edit", map_id=1, dry_run=True, ops=[
                 {"op": "create", "name": "New", "x": 1, "y": 1,
                  "commands": []}])
+        self.assertIn("empty commands list", str(caught.exception))
 
     def test_the_page_still_holds_what_it_did(self):
         before = len(self.project.load_map(1).get("events").get(1)
@@ -1448,6 +1453,10 @@ class TestARefusalComesBeforeTheWork(ToolTest):
         self.assertNotIn("scripts", loaded,
                          "the file was unmarshalled before the refusal that "
                          "always follows it")
+        # The control: the same spy sees an ordinary table being read, so its
+        # silence about `scripts` is not a spy that watches nothing.
+        self.call("raw_data", table="system", path="game_title")
+        self.assertIn("system", loaded)
 
     def test_an_ordinary_table_is_still_read(self):
         out = self.call("raw_data", table="system", path="game_title")
@@ -1505,7 +1514,7 @@ class TestEveryIdInTheDslRefusesACoercibleValue(ToolTest):
     against variable 2 and answered "rewrote page 0 of event 1".
     """
 
-    def compile_refused(self, entry):
+    def compile_refused(self, entry, field):
         """A DSL entry the compiler must refuse rather than coerce.
 
         Through the real `ops` shape. An earlier draft of this suite passed
@@ -1521,27 +1530,35 @@ class TestEveryIdInTheDslRefusesACoercibleValue(ToolTest):
         message = str(caught.exception)
         self.assertNotIn("unknown argument", message,
                          "refused for the wrong reason: %s" % message)
+        # And for the field under test: a missing event or page, or an empty
+        # `then`, would also be a refusal.
+        self.assertIn(field, message,
+                      "refused, but not over %r: %s" % (field, message))
         return message
 
     def test_a_call_common_event_id_is_not_coerced(self):
-        self.compile_refused({"common_event": 2.9})
+        self.compile_refused({"common_event": 2.9}, "common_event")
 
     def test_a_call_common_event_id_is_not_a_boolean(self):
-        self.compile_refused({"common_event": True})
+        self.compile_refused({"common_event": True}, "common_event")
 
     def test_a_transfer_destination_map_is_not_coerced(self):
-        self.compile_refused({"transfer": {"map_id": 2.9, "x": 1, "y": 1}})
+        self.compile_refused({"transfer": {"map_id": 2.9, "x": 1, "y": 1}},
+                             "map_id")
 
     def test_a_transfer_destination_x_is_not_coerced(self):
-        self.compile_refused({"transfer": {"map_id": 1, "x": 2.9, "y": 1}})
+        self.compile_refused({"transfer": {"map_id": 1, "x": 2.9, "y": 1}},
+                             "x")
 
     def test_a_transfer_destination_y_is_not_coerced(self):
-        self.compile_refused({"transfer": {"map_id": 1, "x": 1, "y": 2.9}})
+        self.compile_refused({"transfer": {"map_id": 1, "x": 1, "y": 2.9}},
+                             "y")
 
     def test_a_condition_operand_variable_is_not_coerced(self):
         """The one in the same statement as a `_needs_int` call."""
         self.compile_refused(
-            {"if": {"variable": 3, "from_variable": 2.9}, "then": []})
+            {"if": {"variable": 3, "from_variable": 2.9}, "then": []},
+            "from_variable")
 
     def test_an_ordinary_transfer_still_compiles(self):
         out = self.call("event_edit", map_id=1, ops=[{
@@ -1672,7 +1689,7 @@ class TestADeclaredCharacterCeilingIsEnforced(ToolTest):
         schema_def = {"properties": {"q": {"type": "string", "maxLength": 4}}}
         with self.assertRaises(TE) as caught:
             check_args(schema_def, {"q": "abcde"}, "this tool")
-        self.assertIn("4", str(caught.exception))
+        self.assertIn("q takes at most 4 characters", str(caught.exception))
 
     def test_a_string_within_it_is_accepted(self):
         from rpgvxace_mcp.tools.registry import check_args

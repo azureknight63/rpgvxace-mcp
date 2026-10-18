@@ -484,6 +484,36 @@ class TestCommandReferenceSaysWhoseLayoutsTheseAre(ToolTest):
         self.assertTrue(out["layouts_are_this_engines"])
         self.assertNotIn("engine_warning", out)
 
+    def unmodelled(self):
+        """The project reporting an engine the server has no profile for."""
+        from unittest import mock
+        patcher = mock.patch.object(self.ctx.project, "engine", "mv")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_an_unmodelled_engine_says_no_and_warns(self):
+        """The other side of every test above, which only ever saw True.
+
+        With the answer hard-coded to True this whole class stayed green.
+        """
+        self.unmodelled()
+        out = self.call("command_reference", search="text")
+        self.assertFalse(out["layouts_are_this_engines"])
+        self.assertIn("mv", out["engine_warning"])
+
+    def test_an_unmodelled_engine_says_no_for_one_code(self):
+        self.unmodelled()
+        out = self.call("command_reference", code=101)
+        self.assertFalse(out["layouts_are_this_engines"])
+        self.assertTrue(any("mv" in note for note in out["layout_notes"]),
+                        "no note names the engine whose layout is borrowed: "
+                        "%s" % out.get("layout_notes"))
+
+    def test_an_unmodelled_engine_says_no_for_the_move_listing(self):
+        self.unmodelled()
+        out = self.call("command_reference", move_commands=True)
+        self.assertFalse(out["layouts_are_this_engines"])
+
     def test_one_code_says_it_too(self):
         out = self.call("command_reference", code=101)
         self.assertTrue(out["layouts_are_this_engines"])
@@ -899,7 +929,7 @@ class TestACraftedNameIsBoundedInAReplyToo(ToolTest):
     def test_map_get_caps_it_too(self):
         map_id = self.name_map_one("B" * self.HUGE)
         out = self.call("map_get", map_id=map_id)
-        self.assertLess(len(str(out.get("name", ""))), self.HUGE)
+        self.assertLess(len(str(out["name"])), self.HUGE)
 
     def test_a_capped_name_says_it_was_capped(self):
         """Silently truncating a name is how a caller looks for the wrong map."""
@@ -1051,14 +1081,21 @@ class TestAScriptSlotIdIsCalledAnId(ToolTest):
     def test_the_documented_shape_agrees(self):
         """The two descriptions the model reads before calling."""
         from rpgvxace_mcp.schema import ACE_DATA_FILES
-        self.assertIn("id", ACE_DATA_FILES["scripts"].description.lower())
+        # The row layout itself, not the two letters "id" (which "provide"
+        # also holds).
+        self.assertIn("[id, name",
+                      ACE_DATA_FILES["scripts"].description.lower())
 
     def test_the_value_is_still_the_slot_id(self):
         """Renaming must not change what is reported."""
         rows = self.call("scripts", op="list")["scripts"]
+        self.assertTrue(rows, "no script slots to read")
+        slots = self.project.load_data("scripts")
         for row in rows:
             got = self.call("scripts", op="get", index=row["index"])
             self.assertEqual(got["index"], row["index"])
+            # The renamed field, against the slot's own id in the file.
+            self.assertEqual(got["id"], slots[row["index"]][0])
 
 
 class TestATruncatedSummarySaysSoOnEveryPath(ToolTest):
@@ -1168,6 +1205,10 @@ class TestAListedNameIsCappedLikeEveryOtherName(ToolTest):
         rows = self.call("db_list", table="items")["entries"]
         self.assertTrue(any(r["name"] for r in rows),
                         "capping removed every name in the table")
+        # And left the short ones exactly as they were.
+        names = {r["id"]: r["name"] for r in rows}
+        self.assertEqual(names.get(1), "Potion")
+        self.assertEqual(names.get(2), "Hi-Potion")
 
     def test_the_filter_still_finds_an_ordinary_name(self):
         rows = self.call("db_list", table="items")["entries"]
@@ -1777,8 +1818,15 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
         """So an exemption cannot outlive the function it was written for."""
         from rpgvxace_mcp.analysis import ReferencePreview
         from rpgvxace_mcp.tools import registry
-        self.assertTrue(callable(registry.partial))
-        self.assertTrue(callable(ReferencePreview.as_reply))
+        homes = {"partial": registry, "as_reply": ReferencePreview}
+        # `OWNERS` itself, which this used to leave unread: renaming one of
+        # its entries left the test green and the exemption covering any
+        # function of the old name.
+        self.assertEqual(sorted(homes), sorted(self.OWNERS))
+        for name, home in homes.items():
+            self.assertTrue(callable(getattr(home, name, None)),
+                            "%s is exempt as an owner and does not exist"
+                            % name)
 
     def test_a_reported_omission_forces_a_partial_key(self):
         """The rule the whole vocabulary exists for.
@@ -1802,6 +1850,29 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
                 silent.append("%s reports %s and says nothing"
                               % (name, omitted))
         self.assertEqual(silent, [], "; ".join(silent))
+
+    def test_a_reply_that_omits_tile_ids_says_so_in_a_partial_key(self):
+        """The case the sampled replies never reach.
+
+        Every sample above reports `tile_ids_not_shown: 0`, so the rule that
+        an omission forces a partial key was checked against nothing. A map
+        with more distinct tile ids than are listed makes the counter
+        positive.
+        """
+        from rpgvxace_mcp.tools import map_read_tools
+        table = self.ctx.project.load_map(1).get("data")
+        for number in range(map_read_tools.TOP_TILE_IDS + 5):
+            table.set(number % table.xsize, number // table.xsize, 0,
+                      2816 + number)
+        reply = self.call("map_get", map_id=1, tiles="counts")
+        hidden = [value for key, value in self.keys_of(reply)
+                  if key == "tile_ids_not_shown" and value > 0]
+        self.assertTrue(hidden, "the crafted map hid no tile ids: %s"
+                        % self.keys_of(reply))
+        said = [key for key, _ in self.keys_of(reply)
+                if any(key.endswith(s) for s in self.TYPES)]
+        self.assertTrue(said, "tile ids were left out and no partial key "
+                              "says so: %s" % hidden)
 
     def test_every_op_taking_tool_says_which_op_answered(self):
         """`op` selects the branch, so a reply cannot be read without it."""
@@ -1873,20 +1944,32 @@ class TestTwoClaimsAreChecked(ToolTest):
         200,000-entry list built 1.3 MB to return 224 characters -- a cap
         on the result and not on the work.
 
-        Asserted by *time*, because that is the property: a bound that
-        only cuts the answer scales with the input and one that stops the
-        building does not.
+        Asserted by *work done*, which is the property and not a race: the
+        entries count how often they are rendered, so a bound that only cuts
+        the answer renders all of them and one that stops the building does
+        not. (This timed the call, with the list's own construction inside the
+        timed region and a 0.5 s ceiling a slow machine could cross -- and a
+        repr of the whole list takes less than that on a fast one.)
         """
-        import time
         from rpgvxace_mcp.convert import brief
-        small = brief(list(range(100)))
-        start = time.perf_counter()
-        large = brief(list(range(2_000_000)))
-        elapsed = time.perf_counter() - start
+
+        class Entry:
+            rendered = 0
+
+            def __repr__(self):
+                Entry.rendered += 1
+                return "e"
+
+        entries = [Entry() for _ in range(200_000)]
+        small = brief(entries[:100])
+        Entry.rendered = 0
+        large = brief(entries)
+        self.assertLess(Entry.rendered, 1000,
+                        "%d of 200,000 entries were rendered to describe a "
+                        "list, so the whole thing was built first"
+                        % Entry.rendered)
+        self.assertGreater(Entry.rendered, 0, "nothing was rendered")
         self.assertLess(len(large), 1000)
-        self.assertLess(elapsed, 0.5,
-                        "a two-million-entry list took %.2fs to describe, "
-                        "so the whole thing was built first" % elapsed)
         self.assertLess(abs(len(large) - len(small)), 200,
                         "the description grew with the input")
 

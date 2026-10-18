@@ -136,6 +136,29 @@ class TestRoundTrip(Scratch):
     def test_version_3_round_trips(self):
         self.assertEqual(self.check(encode_v3(SAMPLE), "Game.rgss3a").version, 3)
 
+    def test_a_body_larger_than_a_chunk_is_read_whole(self):
+        """The key steps between chunks, and the last chunk may be short.
+
+        Every sample body is under a kilobyte and a chunk is a megabyte, so
+        the step between chunks never ran: a wrong step corrupts every
+        graphic and audio file over a megabyte and these tests stayed green.
+        The chunk is patched to 8 bytes (a multiple of 4, as the reader
+        requires) so the same path runs on small bodies -- one that ends
+        short of a chunk, one that is exactly two, one of a single byte.
+        """
+        from unittest import mock
+        from rpgvxace_mcp import rgss_archive
+        files = [("Data/Long.bin", bytes(range(50))),
+                 ("Data/Exact.bin", bytes(range(16))),
+                 ("Data/One.bin", b"")]
+        for version, encode in ((1, encode_v1), (3, encode_v3)):
+            with self.subTest(version=version):
+                with mock.patch.object(rgss_archive, "CHUNK_BYTES", 8):
+                    archive = RgssArchive.open(self.write(
+                        encode(files), "Chunks%d.rgss%da" % (version, version)))
+                    for name, data in files:
+                        self.assertEqual(archive.read(name), data, name)
+
     def test_read_by_name_ignores_case_and_separator(self):
         archive = RgssArchive.open(self.write(encode_v3(SAMPLE)))
         self.assertEqual(archive.read("data\\actors.RVDATA2"), SAMPLE[0][1])

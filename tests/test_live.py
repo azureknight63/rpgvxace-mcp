@@ -162,6 +162,18 @@ class TestTheBridgeText(unittest.TestCase):
         for line in self.source().splitlines():
             self.assertNotRegex(line.strip(), r"^(require|load)\b", line)
 
+    def test_a_step_of_no_frames_is_refused_not_left_pending(self):
+        """A step that never finishes answers nothing, and `poll` then
+        returns early for every later request, ping and quit included."""
+        self.assertIn("frames must be at least 1", self.source())
+
+    def test_a_request_that_is_not_a_hash_is_answered_not_fatal(self):
+        """`request["seq"]` in the rescue raised again for an Array, and the
+        game went into the crash loop over a stray file."""
+        source = self.source()
+        self.assertIn("a request is a Hash", source)
+        self.assertIn("request.is_a?(Hash) ? request", source)
+
     def test_it_serves_every_op_the_tool_sends_it(self):
         for op in bridge.BRIDGE_OPS:
             with self.subTest(op=op):
@@ -182,6 +194,23 @@ class TestTheBridgeText(unittest.TestCase):
         for key in bridge.KEYS:
             with self.subTest(key=key):
                 self.assertIn(":%s" % key, self.source())
+
+    def test_eval_is_refused_in_ruby_unless_the_session_allowed_it(self):
+        """The Ruby half of the eval gate: the one a request file can reach.
+
+        The tool refuses first, on the server flag and the session's own, but
+        the request file is plain data in a folder the game polls, so a
+        request written by hand never passes through the tool. The bridge
+        has to check what it was started with before it evaluates anything.
+        """
+        method = self.source().split("def self.evaluate(", 1)[1]
+        method = method.split("\n  def ", 1)[0]
+        self.assertIn('@config["allow_eval"]', method,
+                      "the bridge evaluates without checking that this "
+                      "session was started with allow_eval")
+        self.assertLess(method.index('@config["allow_eval"]'),
+                        method.index("eval("),
+                        "the bridge evaluates before it checks allow_eval")
 
     def test_it_is_ascii(self):
         """So no source-encoding comment is needed in a 1.9 script slot."""
@@ -287,6 +316,20 @@ class LiveTest(ToolTest):
             REGISTRY["live"].run(self.ctx, {"op": "stop"})
         except ToolError:
             pass
+
+    def refused_before_the_game(self, op, **arguments):
+        """The refusal, and proof that the request never reached the game.
+
+        The fake game also refuses what it is sent with a ToolError, so a
+        bare `assertRaises` was satisfied by the game's refusal when the
+        Python-side check was gone.
+        """
+        self.live("start")
+        with mock.patch.object(session.Session, "request",
+                               side_effect=AssertionError("reached the game")):
+            with self.assertRaises(ToolError) as caught:
+                self.live(op, **arguments)
+        return str(caught.exception)
 
     def live(self, op, **arguments):
         return self.call("live", op=op, **arguments)
@@ -438,10 +481,10 @@ class TestTheGameIsDriven(LiveTest):
         self.assertEqual(out["queued"], 1)
 
     def test_an_unknown_key_is_refused_before_it_is_sent(self):
-        self.live("start")
-        with self.assertRaises(ToolError) as caught:
-            self.live("input", keys=["ENTER"])
-        self.assertIn("C", str(caught.exception))
+        message = self.refused_before_the_game("input", keys=["ENTER"])
+        # The offending name and the keys it could have been.
+        self.assertIn("'ENTER'", message)
+        self.assertIn("DOWN", message)
 
     def test_teleport(self):
         self.live("start")
@@ -585,15 +628,17 @@ class TestAScreenshotReachesTheClientAsAnImage(LiveTest):
                                lambda _: (picture, {"width": 1, "height": 1})):
             result = self.call_over_the_server()["result"]
         self.assertTrue(result["isError"])
+        # Refused for its size, and not by some other failure on the path.
+        self.assertIn(str(MAX_TOOL_RESULT_CHARS), result["content"][0]["text"])
         self.assertEqual(len(result["content"]), 1)
 
 
 class TestAnArgumentIsCheckedBeforeTheGameSeesIt(LiveTest):
 
     def test_step_is_bounded(self):
-        self.live("start")
-        with self.assertRaises(ToolError):
-            self.live("step", frames=live_tools.MAX_STEP_FRAMES + 1)
+        message = self.refused_before_the_game(
+            "step", frames=live_tools.MAX_STEP_FRAMES + 1)
+        self.assertIn("at most %d" % live_tools.MAX_STEP_FRAMES, message)
 
     def test_a_switch_id_must_be_a_number(self):
         self.live("start")
@@ -602,14 +647,12 @@ class TestAnArgumentIsCheckedBeforeTheGameSeesIt(LiveTest):
         self.assertIn("five", str(caught.exception))
 
     def test_a_switch_value_must_be_a_boolean(self):
-        self.live("start")
-        with self.assertRaises(ToolError):
-            self.live("set", switches={"5": 1})
+        message = self.refused_before_the_game("set", switches={"5": 1})
+        self.assertIn("true or false", message)
 
     def test_set_needs_something_to_set(self):
-        self.live("start")
-        with self.assertRaises(ToolError):
-            self.live("set")
+        message = self.refused_before_the_game("set")
+        self.assertIn("at least one of", message)
 
     def test_an_argument_another_op_reads_is_refused(self):
         with self.assertRaises(ToolError) as caught:
@@ -744,12 +787,18 @@ class TestTheServerNeverWaitsForever(LiveTest):
     def test_a_ruby_exception_is_reported_not_hung_on(self):
         self.relaunch({"crash_at_frame": 3})
         self.live("start")
-        deadline = time.monotonic() + 5
+        # Long: the loop leaves on the first status that carries the crash,
+        # so a generous deadline costs nothing when the machine is quick, and
+        # a loaded one no longer ends in a KeyError that names nothing.
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             status = self.live("status")
             if status.get("crash"):
                 break
             time.sleep(0.05)
+        self.assertTrue(status.get("crash"),
+                        "no crash was reported within the deadline: %s"
+                        % status)
         self.assertEqual(status["crash"]["class"], "NoMethodError")
         self.assertIn("Fake_Script", status["crash"]["backtrace"][0])
         # The crash loop still answers state, so a post-mortem is possible.

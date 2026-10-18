@@ -176,6 +176,10 @@ class TestOneBlankLineConvention(unittest.TestCase):
         return python_files(PACKAGE, HERE, ROOT / "scripts")
 
     def blanks_above(self, path):
+        """`blanks_in` over one file."""
+        return self.blanks_in(path.read_text(encoding="utf-8"))
+
+    def blanks_in(self, source):
         """How many blank lines sit above each top-level definition.
 
         Read with `ast` rather than a regular expression. The expression
@@ -190,8 +194,8 @@ class TestOneBlankLineConvention(unittest.TestCase):
         A comment block immediately above a definition belongs to it, so
         the count is taken above the comment.
         """
-        lines = path.read_text(encoding="utf-8").split("\n")
-        tree = _parse("\n".join(lines))
+        lines = source.split("\n")
+        tree = _parse(source)
         out = []
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
@@ -216,6 +220,30 @@ class TestOneBlankLineConvention(unittest.TestCase):
                 blank += 1
             out.append((top, blank))
         return out
+
+    def test_the_blank_line_scan_can_tell_the_counts_apart(self):
+        """The instrument, fed sources it must judge. Without this a scan
+        that always answered `[]` kept the convention test below green."""
+        def counts(source):
+            return [blank for _, blank in self.blanks_in(source)]
+
+        body = "import os\n"
+        for blanks, expected in ((0, 0), (1, 1), (2, 2), (3, 3)):
+            with self.subTest(blanks=blanks):
+                self.assertEqual(
+                    counts(body + "\n" * blanks + "def f():\n    pass\n"),
+                    [expected])
+        # A comment block belongs to the definition under it, so the count
+        # is taken above the comment; a decorator likewise.
+        self.assertEqual(
+            counts(body + "\n\n# why\n# more\ndef f():\n    pass\n"), [2])
+        self.assertEqual(
+            counts(body + "\n@decorator\ndef f():\n    pass\n"), [1])
+        self.assertEqual(counts(body + "\n\nclass C:\n    pass\n"), [2])
+
+    def test_the_blank_line_scan_sees_many_definitions(self):
+        seen = sum(len(self.blanks_above(path)) for path in self.modules())
+        self.assertGreater(seen, 500, "the scan found almost nothing to judge")
 
     def test_every_top_level_definition_has_two_blank_lines_above_it(self):
         # Constants as well as definitions: four constants placed after a
@@ -410,6 +438,21 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
                     if alias.name in table:
                         out.add(alias.name)
         return out
+
+    def test_the_import_scan_finds_edges_to_judge(self):
+        """The instrument, observed. `reached - allowed` is empty for a scan
+        that finds nothing, so the two tests below stayed green when
+        `sibling_imports` was changed to the wrong level or to `set()`."""
+        for label, table, where in self.tables():
+            modules = self.found(where)
+            edges = sum(
+                len(self.sibling_imports(table, where, modules[name])
+                    - {name})
+                for name in table)
+            with self.subTest(package=label):
+                self.assertGreater(
+                    edges, 2, "%s: the scan found almost no imports between "
+                    "its modules, so nothing below was judged" % label)
 
     def test_no_module_imports_a_layer_above_itself(self):
         for label, table, where in self.tables():
@@ -856,8 +899,11 @@ class TestImportBlocksAreInOrder(unittest.TestCase):
         return found
 
     def blocks(self, path):
+        """`blocks_in` over one file."""
+        return self.blocks_in(path.read_text(encoding="utf-8"))
+
+    def blocks_in(self, text):
         """Every `from X import (a, b, c)` written one name per line."""
-        text = path.read_text(encoding="utf-8")
         lines = text.split("\n")
         for node in _parse(text).body:
             if not isinstance(node, ast.ImportFrom):
@@ -875,6 +921,19 @@ class TestImportBlocksAreInOrder(unittest.TestCase):
             # comment is there to group, which is a reason to be unsorted.
             if names:
                 yield node.lineno, names
+
+    def test_the_block_scan_finds_blocks_and_their_order(self):
+        """The instrument, fed sources it must judge, and the tree it must
+        find blocks in: a scan whose pattern stopped matching read as every
+        block being sorted."""
+        unsorted = "from x import (\n    b,\n    a,\n)\n"
+        self.assertEqual(list(self.blocks_in(unsorted)), [(1, ["b", "a"])])
+        self.assertEqual(list(self.blocks_in(
+            "from x import (\n    a,\n    b,\n)\n")), [(1, ["a", "b"])])
+        self.assertEqual(list(self.blocks_in(
+            "from x import (\n    a as z,\n    b,\n)\n")), [])
+        found = sum(len(list(self.blocks(path))) for path in self.modules())
+        self.assertGreater(found, 20, "the scan found almost no blocks")
 
     def test_every_multiline_import_block_is_sorted(self):
         out = []
@@ -1200,12 +1259,14 @@ class TestNoSuiteRewritesAFieldList(unittest.TestCase):
                   '    def one(self):\n'
                   '        page = RubyObject("RPG::Event::Page")\n'
                   '        page.set("a", 1)\n'
-                  '    def two(self):\n'
-                  '        page = RubyObject("RPG::Event::Page")\n'
+                  '    def two(self, page):\n'
                   '        page.set("b", 2)\n')
-        self.assertEqual(sorted(sorted(fields) for _, _, fields
-                                in self.hand_built_in(source)),
-                         [["a"], ["b"]])
+        # `two` only writes through a parameter that merely shares the name:
+        # one site with one field. In one merged scope the parameter would be
+        # the object `one` built, and the answer would be one site of two.
+        self.assertEqual([sorted(fields) for _, _, fields
+                          in self.hand_built_in(source)],
+                         [["a"]])
 
     def test_the_scan_keeps_counting_after_an_unrelated_assignment(self):
         source = ('page = RubyObject("RPG::Event::Page")\n'

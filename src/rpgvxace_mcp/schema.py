@@ -451,7 +451,7 @@ VX_CLASS_FIELDS: dict[str, dict[str, str]] = {
         "map_id": "The map the area belongs to",
         "rect": "Rect covering the area",
         "encounter_list": "Array of troop ids encountered inside the area",
-        "order": "Position in the map tree (editor bookkeeping)",
+        "order": "Position in the editor's area list (editor bookkeeping)",
     },
 }
 
@@ -1557,14 +1557,18 @@ def _observe(value: Any, fields: dict[str, dict[str, int]], depth: int,
     # `project.collect_strings` was converted and this one was not, so the
     # two walks still disagreed (no `tuple` here, and a RubyString's ivar
     # record is a container there and was not here).
+    # The memo is asked before the children are built: `ruby_children`
+    # copies the container, so one Array linking to itself N times copied N
+    # elements per link -- N squared work, charged to the budget as N visits.
+    # `seen` holds only containers, so a leaf never matches.
+    #
+    # Before the tally too: Marshal resolves a link to the same Python
+    # object, so a value reachable by many paths would otherwise be counted
+    # once per path -- which is what `test_shared_object_is_tallied_once` asks.
+    if id(value) in seen:
+        return
     children = ruby_children(value)
     if children:
-        # The memo comes before the tally, not after: Marshal resolves a
-        # link to the same Python object, so a value reachable by many
-        # paths would otherwise be counted once per path -- which is what
-        # `test_shared_object_is_tallied_once` asks.
-        if id(value) in seen:
-            return
         seen.add(id(value))
 
     if isinstance(value, RubyObject):

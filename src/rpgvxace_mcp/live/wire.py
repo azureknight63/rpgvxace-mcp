@@ -71,15 +71,26 @@ def to_ruby(value: Any) -> Any:
     raise TypeError("cannot send a %s to the game" % type(value).__name__)
 
 
-def from_ruby(value: Any, depth: int = 0) -> Any:
+# Marshal links share one object between many references, so a reply of a few
+# hundred bytes can name 2**32 nodes by nesting `[x, x]`. Counted, not just
+# depth-limited.
+_WIRE_NODE_BUDGET = 100_000
+
+
+def from_ruby(value: Any, depth: int = 0, budget: "list[int] | None" = None) -> Any:
     """A reply from the game as JSON-ready Python, sanitised and bounded.
 
     Hash keys come back as strings, because the next stop is a JSON reply
     and JSON has no other kind. Text is passed through `printable_text`:
     a switch name or a message line is text this server did not write.
     """
+    if budget is None:
+        budget = [_WIRE_NODE_BUDGET]
     if depth > MAX_WIRE_DEPTH:
         return "(nested too deep to show; ask for less)"
+    budget[0] -= 1
+    if budget[0] < 0:
+        return "(too large to show; ask for less)"
     if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, RubyFloat):
@@ -92,13 +103,13 @@ def from_ruby(value: Any, depth: int = 0) -> Any:
         text = value.data.decode("utf-8", "replace")
         return printable_text(text[:MAX_WIRE_TEXT])
     if isinstance(value, (list, tuple)):
-        return [from_ruby(item, depth + 1) for item in value]
+        return [from_ruby(item, depth + 1, budget) for item in value]
     if isinstance(value, RubyHash):
         out = {}
         for key, item in value.pairs:
-            name = from_ruby(key, depth + 1)
+            name = from_ruby(key, depth + 1, budget)
             out[name if isinstance(name, str) else str(name)] = from_ruby(
-                item, depth + 1)
+                item, depth + 1, budget)
         return out
     return printable_text(repr(value)[:200])
 

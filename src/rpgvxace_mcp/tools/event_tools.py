@@ -176,6 +176,17 @@ def _one_target(args: dict[str, Any], verb: str) -> "tuple[int | None, int | Non
     return common_id, map_id
 
 
+def _trigger_name(names: dict[int, str], trigger: Any, converted: Any) -> Any:
+    """A trigger's name when it is a number the table knows, else its value.
+
+    `dict.get` hashes its key: an `@trigger` holding an Array raised
+    TypeError, and one crafted page failed the read of the whole map.
+    """
+    if isinstance(trigger, int) and not isinstance(trigger, bool):
+        return names.get(trigger, converted)
+    return converted
+
+
 def _page_view(ctx: Context, page: RubyObject, index: int,
                include_raw: bool, walk: Any,
                budget: "WalkBudget | None" = None) -> dict[str, Any]:
@@ -196,6 +207,9 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
     # whether or not it is used, so `TRIGGER_NAMES.get(page.get(...),
     # page.get(...))` read the ivar twice and the line below read it again.
     trigger = page.get("trigger")
+    # Converted once, through the shared budget: `walk` is the fourth
+    # parameter of `to_json`, and passed third it was read as the table mode.
+    trigger_code = to_json(trigger, ctx.codec, TABLE_MODES[0], walk)
     view: dict[str, Any] = {
         "page": index,
         # The trigger twice: the name for a reader and the code for a
@@ -205,9 +219,8 @@ def _page_view(ctx: Context, page: RubyObject, index: int,
         # documented page field -- so an `@trigger` holding an Array of a million
         # links to 0 is a few kilobytes on disk, serialises fine, and was
         # emitted twice per page against a charge of one.
-        "trigger": TRIGGER_NAMES.get(trigger, to_json(trigger, ctx.codec,
-                                                      walk)),
-        "trigger_code": to_json(trigger, ctx.codec, walk),
+        "trigger": _trigger_name(TRIGGER_NAMES, trigger, trigger_code),
+        "trigger_code": trigger_code,
         "command_count": len(commands),
         "script": render_script(commands, ctx.codec, ctx.project.engine),
     }
@@ -343,8 +356,9 @@ def _common_event_view(ctx: Context, args: dict[str, Any], common_id: int,
     result: dict[str, Any] = {
         "common_event_id": common_id,
         "name": decoded(ctx, common.get("name")),
-        "trigger": COMMON_EVENT_TRIGGER_NAMES.get(
-            common.get("trigger"), common.get("trigger")),
+        "trigger": _trigger_name(
+            COMMON_EVENT_TRIGGER_NAMES, common.get("trigger"),
+            to_json(common.get("trigger"), ctx.codec, TABLE_MODES[0], walk)),
         "switch_id": common.get("switch_id"),
         "command_count": len(commands),
         "script": render_script(shown, ctx.codec, ctx.project.engine),
@@ -431,7 +445,8 @@ def _map_events_view(ctx: Context, args: dict[str, Any], map_id: int,
                                         command_budget))
         out.append({
             "id": event_id, "name": name,
-            "x": event.get("x"), "y": event.get("y"),
+            "x": to_json(event.get("x"), ctx.codec, TABLE_MODES[0], walk),
+            "y": to_json(event.get("y"), ctx.codec, TABLE_MODES[0], walk),
             "page_count": len(as_list(event.get("pages"))),
             "pages": pages,
         })
@@ -1057,6 +1072,14 @@ def _appended(ctx: Context, existing: Any, entries: list[Any]) -> list[Any]:
     unreachable. Written once, because the two append paths that need it would
     otherwise have to be fixed together whenever the convention changes.
     """
+    if existing is not None and not isinstance(existing, list):
+        # `list("abc")` is three characters and `list(5)` raises: a damaged
+        # @list was written back in front of the new commands, or failed with
+        # a bare TypeError. `pages()` refuses the same shape for @pages.
+        raise ToolError(
+            "this page's command list is not an Array in the file, so "
+            "commands cannot be added to it. Run validate to see what is "
+            "wrong, or replace the list with set_commands.")
     kept = list(existing or [])
     while kept and isinstance(kept[-1], RubyObject) and \
             (kept[-1].get("code", CODE_BLANK) or CODE_BLANK) == CODE_BLANK:

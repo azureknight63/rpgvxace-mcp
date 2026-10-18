@@ -223,7 +223,11 @@ class TestHandshake(ProtocolTest):
         # A notification must not produce output, so the next request's reply is
         # the very next line on stdout.
         self.server.notify("notifications/cancelled", {"requestId": 99})
-        self.assertEqual(self.server.request("ping")["result"], {})
+        reply = self.server.request("ping")
+        self.assertEqual(reply["result"], {})
+        # Whose answer it is: a stray reply to the notification would be the
+        # line read here, and `{}` is also what it would carry.
+        self.assertEqual(reply["id"], self.server._next_id)
 
 
 class TestToolsOverProtocol(ProtocolTest):

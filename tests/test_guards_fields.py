@@ -368,6 +368,32 @@ class TestAnInventedFieldCannotHideInAContainer(ToolTest):
             replacement = RubyHash([(1, replacement)])
         self.assertIsNone(self.refuse(existing, replacement))
 
+    def test_the_depth_limit_is_where_the_walk_stops(self):
+        """Observed, not assumed.
+
+        The test above builds hashes ending in nil, which return None whether
+        or not the guard is there (the walk is only ~114 frames deep). A typo
+        at the bottom makes the limit visible: the same invented field is
+        refused near the top and not refused past the limit -- which fails if
+        the limit is removed (both refused) or the walk never descends
+        (neither is).
+        """
+        def nested(levels, leaf):
+            for _ in range(levels):
+                leaf = RubyHash([(1, leaf)])
+            return leaf
+
+        limit = convert.MAX_JSON_DEPTH
+        near = limit - 5
+        with self.assertRaises(ConversionError) as caught:
+            self.refuse(nested(near, self.event_like(id=1)),
+                        nested(near, self.event_like(id=1, naem="A")))
+        self.assertIn("naem", str(caught.exception))
+        far = limit + 5
+        self.assertIsNone(self.refuse(
+            nested(far, self.event_like(id=1)),
+            nested(far, self.event_like(id=1, naem="A"))))
+
 
 class TestEveryConversionBranchIsCallable(unittest.TestCase):
     """A branch that raises TypeError when reached is not a handled case.
