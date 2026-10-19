@@ -29,6 +29,7 @@ from .tools import (  # noqa: F401
     map_paint_tools,
     map_read_tools,
     map_render_tools,
+    map_stamp_tools,
     map_tile_tools,
     misc_tools,
     raw_tools,
