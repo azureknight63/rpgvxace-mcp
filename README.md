@@ -173,6 +173,7 @@ each of those takes `dry_run` and backs the file up before changing it.
 | `backups` ✏️ | Snapshot, list, restore, prune. |
 | `undo` ✏️ | Take back recent edits one change at a time: a bounded journal keeps each file's previous bytes (200 entries / 256 MB), `list` shows it, `revert` undoes the last N changes or everything after an entry id, `dry_run` previews, and a file the editor saved since is refused unless `force`. See [docs/undo.md](docs/undo.md). |
 | `raw_data` ✏️ | Escape hatch: get or set any field by path. |
+| `text` ✏️ | Export every player-visible string (dialogue, choices, scrolling text, names, descriptions, terms, titles) to a JSON file, edit it, and import it back: only edited entries are written, each only if its hash still matches; dialogue is re-wrapped as the editor writes it. Unedited entries leave the files byte-identical. VX Ace and VX; see [docs/text.md](docs/text.md). |
 | `live` | Run a scratch copy of the game and drive it: state, virtual keys, frame stepping, test setup, screenshots, crash capture. See [Live play-testing](#live-play-testing). |
 
 Three reference documents are served as MCP resources — the data format, the

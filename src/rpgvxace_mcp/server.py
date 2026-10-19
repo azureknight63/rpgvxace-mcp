@@ -36,6 +36,7 @@ from .tools import (  # noqa: F401
     raw_tools,
     reference_tools,
     search_tools,
+    text_tools,
     undo_tools,
 )
 # Imported for the side effect: each module's @tool decorators register its
