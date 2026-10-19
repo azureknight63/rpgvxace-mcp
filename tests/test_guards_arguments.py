@@ -45,6 +45,7 @@ from rpgvxace_mcp.tools.registry import (  # noqa: E402
 # here because the tests below read their op tables.
 from rpgvxace_mcp.tools import (  # noqa: E402
     db_tools,
+    event_template_tools,
     event_tools,
     live_tools,
     map_edit_tools,
@@ -569,6 +570,7 @@ class TestEveryOpSelectingToolHasATable(unittest.TestCase):
         ("map_paint", None): map_paint_tools.PAINT_OP_ARGS,
         ("db_edit", "ops"): db_tools.DB_OP_ARGS,
         ("event_edit", "ops"): event_tools.EVENT_OP_ARGS,
+        ("event_template", None): event_template_tools.TEMPLATE_OP_ARGS,
         ("raw_data", None): raw_tools.RAW_OP_ARGS,
         ("scripts", None): misc_tools.SCRIPT_OP_ARGS,
         ("backups", None): misc_tools.BACKUP_OP_ARGS,
@@ -753,6 +755,7 @@ class TestNoOpSlipsPastTheGate(ToolTest):
         ("map_paint", None): map_paint_tools.PAINT_OP_ARGS,
         ("db_edit", "ops"): db_tools.DB_OP_ARGS,
         ("event_edit", "ops"): event_tools.EVENT_OP_ARGS,
+        ("event_template", None): event_template_tools.TEMPLATE_OP_ARGS,
         ("raw_data", None): raw_tools.RAW_OP_ARGS,
         ("scripts", None): misc_tools.SCRIPT_OP_ARGS,
         ("backups", None): misc_tools.BACKUP_OP_ARGS,

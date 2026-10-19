@@ -161,6 +161,7 @@ each of those takes `dry_run` and backs the file up before changing it.
 | `map_render` | Draw a VX Ace map as a PNG you can look at: autotiles, the three tile layers, shadows, event graphics from the project and RTP, optional regions and grid, crop and scale. Returned as an image (up to 1,000,000 bytes of PNG) and always written to a file whose path is returned, for clients that show no images. VX maps are refused. |
 | `event_get` | Events and their command lists, rendered as readable indented script. Lists at most 2000 events per call; `events_truncated` says there are more and `offset` pages to them. |
 | `event_edit` ✏️ | Author events and command lists from a compact DSL (see below). |
+| `event_template` ✏️ | Build a whole event from a built-in template — treasure chest, door (and both sides of a doorway on two maps), sign, NPC, shop, save point, inn, lever — from a few parameters. `describe` shows a template's parameters and command table, `preview` the exact pages it would write, `create` writes them the way `event_edit` would. See [docs/event_template.md](docs/event_template.md). |
 | `command_reference` | The event command codes this engine dispatches, and their confirmed parameter layouts. |
 | `search` | Find text or a command code anywhere: dialogue, comments, entry names, map names, scripts. |
 | `validate` | Lint the project for broken references and event-logic traps. |

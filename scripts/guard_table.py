@@ -185,6 +185,13 @@ HOSTILEINFO = _at("test_hostile_input", "TestProjectInfoRefreshRereadsTheScripts
 HOSTILERAW = _at("test_hostile_input", "TestRawDataRefusesBeforeItLoadsAndKeepsItsShapeGuard")
 VOCABTILES = _at("test_guards_replies", "TestOneVocabularyForAPartialAnswer")
 HOSTILERE = _at("test_hostile_input", "TestTheRereviewOfTheScrubFixes")
+# test_event_template_tools
+ETPLACE = _at("test_event_template_tools", "TestPlacement")
+ETPARAMS = _at("test_event_template_tools", "TestParametersAreRefusedByName")
+ETASSETS = _at("test_event_template_tools", "TestAssetsAreCheckedAgainstTheProject")
+ETXP = _at("test_event_template_tools", "TestXPMatrix")
+ETSCAN = _at("test_event_template_tools", "TestAMapWithTooManyEventsIsRefusedNotWalkedForever")
+ETWRITES = _at("test_event_template_tools", "TestEachTemplateWritesItsPages")
 HOSTILEZ = _at("test_hostile_input", "TestAFloatKeepsItsSign")
 HOSTILEID = _at("test_hostile_input", "TestAnEntryIdBelowZeroIsRefused")
 CONVBYTES = _at("test_convert_input", "TestAStringThatDoesNotComeBackTravelsAsBytes")
@@ -4032,5 +4039,176 @@ GUARDS = [
         '''                   if p.is_file()),''',
         [HOSTILERENDER + 'test_only_its_own_pictures_are_trimmed'],
         'the glob wildcard ? matches any character: a map-0001-holidaypic.png kept in a shared --render-dir counted as ours and was trimmed',
+    ),
+    Guard(
+        "a template event is refused on another event's tile", _SRC + "tools/event_template_tools.py",
+        '''        if taken is not None and not self.allow_overlap:''',
+        '''        if False:''',
+        [ETPLACE + 'test_another_events_tile_is_refused_naming_it'],
+        'event_template stacked a new event on an existing one without being asked to',
+    ),
+    Guard(
+        'a template event must be on the map', _SRC + "tools/event_template_tools.py",
+        '''        if not on_map(x, y, self.width, self.height):''',
+        '''        if False:''',
+        [ETPLACE + 'test_a_tile_outside_the_map_is_refused_and_nothing_is_written'],
+        'an event placed outside the map cannot be selected in the editor',
+    ),
+    Guard(
+        'a template dry run does not write', _SRC + "tools/event_template_tools.py",
+        '''                    filename, dry_run=dry_run, tool="event_template",''',
+        '''                    filename, dry_run=False, tool="event_template",''',
+        [ETPLACE + 'test_a_dry_run_writes_nothing_and_reuses_the_id'],
+        'a dry run that saved would add the event while reporting only a preview',
+    ),
+    Guard(
+        'a template preview cannot write', _SRC + "tools/event_template_tools.py",
+        '''    dry_run = True if preview else opt_bool(args, "dry_run")''',
+        '''    dry_run = opt_bool(args, "dry_run")''',
+        [ETPLACE + 'test_a_preview_is_a_dry_run_that_shows_the_pages'],
+        'op=preview without a dry_run argument wrote the event it was asked only to show',
+    ),
+    Guard(
+        'a template refuses control characters in text', _SRC + "tools/event_template_tools.py",
+        '''        if unicodedata.category(character) in ("Cc", "Cs", "Zl", "Zp"):''',
+        '''        if False:''',
+        [ETPARAMS + 'test_control_characters_are_refused_not_stripped', ETPARAMS + 'test_a_lone_surrogate_is_refused'],
+        'a newline inside a line is split by the DSL into two lines, and a control character draws as nothing',
+    ),
+    Guard(
+        'template lines are bounded in count', _SRC + "tools/event_template_tools.py",
+        '''    if not 1 <= len(value) <= limit:''',
+        '''    if False:''',
+        [ETPARAMS + 'test_lines_are_bounded_in_count_and_length'],
+        'a list of lines of any length was compiled into a message of any length',
+    ),
+    Guard(
+        'a template integer is a whole number, not a bool', _SRC + "tools/event_template_tools.py",
+        '''    if isinstance(value, bool) or not isinstance(value, int):''',
+        '''    if not isinstance(value, int):''',
+        [ETPARAMS + 'test_what_an_integer_parameter_will_not_take'],
+        'True is an int to Python, so a bool passed for an id or an amount was read as 1',
+    ),
+    Guard(
+        'a graphic the project cannot have is refused', _SRC + "tools/event_template_tools.py",
+        '''    if project.assets_complete:''',
+        '''    if False:''',
+        [ETASSETS + 'test_a_missing_graphic_is_refused_naming_the_parameter'],
+        'with every asset visible, a missing sprite was written and validate then reported it',
+    ),
+    Guard(
+        'an unknown template parameter is refused', _SRC + "tools/event_template_tools.py",
+        '''    unknown = sorted((key for key in given if key not in known), key=str)
+    if unknown:''',
+        '''    unknown = sorted((key for key in given if key not in known), key=str)
+    if False:''',
+        [ETPARAMS + 'test_an_unknown_parameter_is_named_with_the_real_ones'],
+        'a misspelt parameter was dropped and the event was written with its default',
+    ),
+    Guard(
+        'shop goods must exist in the database', _SRC + "tools/event_template_tools.py",
+        '''        _database_name(reading, kind, entry_id, "%s.%s" % (label, kind))''',
+        '''        pass''',
+        [ETPARAMS + 'test_goods_shapes'],
+        'a shop was written selling an item id the database does not have',
+    ),
+    Guard(
+        'shop goods name exactly one kind', _SRC + "tools/event_template_tools.py",
+        '''        if len(kinds) != 1:''',
+        '''        if False:''',
+        [ETPARAMS + 'test_goods_shapes'],
+        'a goods entry naming an item and a weapon sold the first and dropped the second',
+    ),
+    Guard(
+        'shop goods are bounded in count', _SRC + "tools/event_template_tools.py",
+        '''    if not 1 <= len(value) <= MAX_SHOP_GOODS:''',
+        '''    if False:''',
+        [ETPARAMS + 'test_goods_shapes'],
+        'a goods list was walked and database-checked at whatever length the caller sent',
+    ),
+    Guard(
+        "a template's required parameter is required", _SRC + "tools/event_template_tools.py",
+        '''            if spec["required"]:''',
+        '''            if False:''',
+        [ETPARAMS + 'test_a_missing_required_parameter_is_named'],
+        'a template without its one essential parameter was written with a hole in it',
+    ),
+    Guard(
+        'a template choice must be one of its choices', _SRC + "tools/event_template_tools.py",
+        '''    if not isinstance(value, str) or value not in spec["choices"]:''',
+        '''    if False:''',
+        [ETPARAMS + 'test_a_choice_must_be_one_of_its_choices'],
+        'a choice parameter was looked up in a table by whatever the caller sent',
+    ),
+    Guard(
+        'XP has no character index to give a template', _SRC + "tools/event_template_tools.py",
+        '''def _read_index(value: Any, spec: dict[str, Any], reading: _Reading) -> int:
+    if reading.engine == "xp":''',
+        '''def _read_index(value: Any, spec: dict[str, Any], reading: _Reading) -> int:
+    if False:''',
+        [ETXP + 'test_what_xp_has_no_field_for_is_refused_by_name'],
+        "XP's graphic has no character_index, and patching one in made a field the editor rejects",
+    ),
+    Guard(
+        "a map's event scan is budgeted", _SRC + "tools/event_template_tools.py",
+        '''            if not budget.spend(1):''',
+        '''            if False:''',
+        [ETSCAN + 'test_the_scan_stops_and_says_so'],
+        'a crafted map with millions of events was walked in full to find a free id',
+    ),
+    Guard(
+        "a template will not discard a map's malformed events", _SRC + "tools/event_template_tools.py",
+        '''            if events is not None:''',
+        '''            if False:''',
+        [ETPLACE + 'test_a_map_holding_its_events_in_a_non_hash_is_refused_whole'],
+        'events stored as something other than a Hash were replaced by an empty one',
+    ),
+    Guard(
+        'a door must arrive on the map it names', _SRC + "tools/event_template_tools.py",
+        '''            or not on_map(values[x_key], values[y_key], width, height)):''',
+        '''            or False):''',
+        [ETPARAMS + 'test_a_door_must_arrive_on_its_map'],
+        'a door transferring the player off the target map was written',
+    ),
+    Guard(
+        'an event placed is remembered as used', _SRC + "tools/event_template_tools.py",
+        '''            state.used.add(event_id)''',
+        '''            pass''',
+        [ETWRITES + 'test_a_door_pair_on_one_map_writes_one_file_two_events'],
+        'both doors of a pair on one map were given the same event id',
+    ),
+    Guard(
+        'an event placed is remembered as standing on its tile', _SRC + "tools/event_template_tools.py",
+        '''            state.at.setdefault((event["x"], event["y"]), event_id)''',
+        '''            pass''',
+        [ETPLACE + 'test_two_events_of_one_door_pair_cannot_share_a_tile'],
+        "the second door of a pair could be put on the first door's tile",
+    ),
+    Guard(
+        "a bounded integer's bound is refused above", _SRC + "tools/registry.py",
+        '''        raise ToolError("%s must be at most %d, got %s"
+                        % (what, maximum, echo(value)))''',
+        '''        raise ToolError("%s must be at most %d, got %d"
+                        % (what, maximum, value))''',
+        [ETPARAMS + 'test_the_arguments_of_the_call_are_read_strictly'],
+        'an integer of more than 4300 digits made the refusal itself raise a bare ValueError instead of a ToolError',
+    ),
+    Guard(
+        "a bounded integer's bound is refused below", _SRC + "tools/registry.py",
+        '''        raise ToolError("%s must be at least %d, got %s"
+                        % (what, minimum, echo(value)))''',
+        '''        raise ToolError("%s must be at least %d, got %d"
+                        % (what, minimum, value))''',
+        [ETPARAMS + 'test_the_arguments_of_the_call_are_read_strictly'],
+        'a negative integer of more than 4300 digits made the refusal itself raise a bare ValueError',
+    ),
+    Guard(
+        'a template write that lands half says which half', _SRC + "tools/event_template_tools.py",
+        '''                if not writes:
+                    raise''',
+        '''                if True:
+                    raise''',
+        [ETWRITES + 'test_a_second_file_that_cannot_be_written_says_what_landed'],
+        'a door pair whose second map was refused after the first landed reported the bare disk error, as though nothing had been written',
     ),
 ]

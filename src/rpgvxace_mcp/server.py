@@ -21,6 +21,7 @@ from .project import Project, ProjectError, ReadOnlyError, StaleFileError
 from .tools import (  # noqa: F401
     command_docs_tools,
     db_tools,
+    event_template_tools,
     event_tools,
     live_tools,
     map_common,
