@@ -185,6 +185,18 @@ HOSTILEINFO = _at("test_hostile_input", "TestProjectInfoRefreshRereadsTheScripts
 HOSTILERAW = _at("test_hostile_input", "TestRawDataRefusesBeforeItLoadsAndKeepsItsShapeGuard")
 VOCABTILES = _at("test_guards_replies", "TestOneVocabularyForAPartialAnswer")
 HOSTILERE = _at("test_hostile_input", "TestTheRereviewOfTheScrubFixes")
+# test_undo_tools
+UNDOTAKE = _at("test_undo_tools", "TestAnEditCanBeTakenBack")
+UNDOSTEP = _at("test_undo_tools", "TestOneToolCallIsOneChange")
+UNDOSTALE = _at("test_undo_tools", "TestAStaleFileIsNotOverwritten")
+UNDORO = _at("test_undo_tools", "TestReadOnly")
+UNDOSEQ = _at("test_undo_tools", "TestSequenceNumbersLiveOnDisk")
+UNDOBACKUPS = _at("test_undo_tools", "TestBackupsAndTheJournal")
+UNDOBOUND = _at("test_undo_tools", "TestTheJournalIsBounded")
+UNDOCLOSED = _at(
+    "test_undo_tools", "TestAWriteTheJournalCannotRecordIsNotMade")
+UNDOHOSTILE = _at("test_undo_tools", "TestAHandEditedJournalIsNotTrusted")
+UNDOARGS = _at("test_undo_tools", "TestArgumentsAreStrict")
 HOSTILEZ = _at("test_hostile_input", "TestAFloatKeepsItsSign")
 HOSTILEID = _at("test_hostile_input", "TestAnEntryIdBelowZeroIsRefused")
 CONVBYTES = _at("test_convert_input", "TestAStringThatDoesNotComeBackTravelsAsBytes")
@@ -4032,5 +4044,215 @@ GUARDS = [
         '''                   if p.is_file()),''',
         [HOSTILERENDER + 'test_only_its_own_pictures_are_trimmed'],
         'the glob wildcard ? matches any character: a map-0001-holidaypic.png kept in a shared --render-dir counted as ours and was trimmed',
+    ),
+    Guard(
+        'a write the journal cannot keep is refused, not made', _SRC + "undo_journal.py",
+        '        except OSError as exc:\n            raise ProjectError(_NOT_JOURNALLED % (exc, folder_text)) from exc',
+        '        except OSError as exc:\n            return None  # journal unavailable',
+        [UNDOCLOSED + 'test_a_save_is_refused_and_says_why'],
+        'an edit made while the undo journal could not be written would have left the user unable to take it back, and not told them',
+    ),
+    Guard(
+        'one change bigger than the journal can hold is refused', _SRC + "undo_journal.py",
+        '            if (self._step_bytes + size > MAX_UNDO_BYTES',
+        '            if (False and self._step_bytes + size > MAX_UNDO_BYTES',
+        [UNDOBOUND + 'test_a_change_too_big_for_the_journal_is_refused_not_made'],
+        'a single change larger than the byte ceiling was journalled anyway, so the advertised ceiling was not one',
+    ),
+    Guard(
+        'a write that changes nothing is not journalled', _SRC + "undo_journal.py",
+        '            if old == new:\n                return None',
+        '            if False:\n                return None',
+        [UNDOCLOSED + 'test_a_write_that_changes_nothing_is_not_journalled'],
+        'no-op saves filled the bounded journal and pushed real history out',
+    ),
+    Guard(
+        "a journal entry's file name is judged like a backup restore's", _SRC + "undo_journal.py",
+        '            safe_component(name, "journalled file name")\n            self._p.path_for(name)',
+        '            pass',
+        [UNDOHOSTILE + 'test_every_hostile_file_name_is_refused'],
+        'a hand-edited entry naming ..\\\\outside or an absolute path would have made undo write wherever it pointed',
+    ),
+    Guard(
+        'a journal entry must name a data file of this engine', _SRC + "undo_journal.py",
+        '        if not name.endswith(self._p.extension) or name.endswith(TMP_SUFFIX):',
+        '        if False:',
+        [UNDOHOSTILE + 'test_every_hostile_file_name_is_refused', UNDOHOSTILE + 'test_a_file_name_in_a_good_looking_entry_for_another_engine_is_refused'],
+        'a safe-looking name such as Game.ini passed the name check, so a hand-edited entry could write any file in Data/',
+    ),
+    Guard(
+        "an entry's numbers are bounded and whole", _SRC + "undo_journal.py",
+        '                    or not low <= value <= high:',
+        '                    or False:',
+        [UNDOHOSTILE + 'test_absurd_and_wrongly_typed_numbers_are_refused'],
+        'an entry claiming a 10**30-byte previous file, a negative step or a bool sequence was trusted',
+    ),
+    Guard(
+        "an entry's hashes must be hashes", _SRC + "undo_journal.py",
+        '        elif not isinstance(before_hash, str) or not _HASH.match(before_hash):',
+        '        elif False:',
+        [UNDOHOSTILE + 'test_bad_hashes_and_states_are_refused'],
+        'a present file with a made-up before_hash was accepted, so the blob check compared against nothing',
+    ),
+    Guard(
+        "a saved file's bytes must match the hash recorded for them", _SRC + "undo_journal.py",
+        '        if len(data) != entry.before_size or hash_hex(data) != entry.before_hash:',
+        '        if False:',
+        [UNDOHOSTILE + 'test_a_blob_of_the_wrong_size_or_hash_is_refused'],
+        'a blob replaced by other bytes of the same length was written back into the project as if it were the old file',
+    ),
+    Guard(
+        'saved bytes that are a link are not followed', _SRC + "undo_journal.py",
+        '        if _is_reparse_point(blob) or not os.path.isfile(blob):',
+        '        if False:',
+        [UNDOHOSTILE + 'test_a_blob_that_is_a_link_is_refused_even_where_links_cannot_be_made'],
+        'a symlink planted as eN.bin would have copied whatever it points at into a data file',
+    ),
+    Guard(
+        'a data file that is a link is not written through', _SRC + "undo_journal.py",
+        '        if _is_reparse_point(path) or not path.is_file():',
+        '        if False:',
+        [UNDOHOSTILE + 'test_a_data_file_that_is_a_link_is_refused_even_where_links_cannot_be_made'],
+        'an undo replaced or read through a data file that was a link out of the project',
+    ),
+    Guard(
+        'a journal folder that is a link is refused', _SRC + "undo_journal.py",
+        '            if part.exists() and _is_reparse_point(part):',
+        '            if False:',
+        [UNDOHOSTILE + 'test_a_journal_folder_that_is_a_link_is_refused_on_read_and_write'],
+        'a junction at .rpgvxace-mcp/undo would have put previous file contents wherever it pointed',
+    ),
+    Guard(
+        'the journal folder is scanned boundedly', _SRC + "undo_journal.py",
+        '                if number >= _MAX_SCAN:',
+        '                if False:',
+        [UNDOBOUND + 'test_a_folder_stuffed_with_junk_is_scanned_boundedly'],
+        'a folder with a million junk names made every write and every list walk all of them',
+    ),
+    Guard(
+        'a sequence number is claimed exclusively', _SRC + "undo_journal.py",
+        '        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)',
+        '        flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_BINARY", 0)',
+        [UNDOSEQ + 'test_a_number_taken_since_the_scan_is_not_reused'],
+        "two servers on one folder that picked the same next number overwrote each other's previous bytes",
+    ),
+    Guard(
+        'sequence numbers run out loudly', _SRC + "undo_journal.py",
+        '            if seq > _MAX_SEQ:',
+        '            if False:',
+        [UNDOSEQ + 'test_numbers_that_have_run_out_refuse_the_write'],
+        'past the twelve digits the name pattern reads, an entry would have been written that nothing could ever list',
+    ),
+    Guard(
+        'the journal drops the oldest entries past its ceiling', _SRC + "undo_journal.py",
+        '        if len(jsons) <= MAX_UNDO_ENTRIES and total <= MAX_UNDO_BYTES:\n            return',
+        '        if True:\n            return',
+        [UNDOBOUND + 'test_the_oldest_entries_are_dropped_and_the_drop_is_reported', UNDOBOUND + 'test_the_byte_ceiling_drops_oldest_first_too'],
+        'the journal grew for the life of the project',
+    ),
+    Guard(
+        'a dropped entry is reported, not hidden', _SRC + "undo_journal.py",
+        '        if dropped:\n            before, before_through',
+        '        if False:\n            before, before_through',
+        [UNDOBOUND + 'test_the_oldest_entries_are_dropped_and_the_drop_is_reported', UNDOBOUND + 'test_a_revert_further_back_than_the_journal_says_what_was_dropped'],
+        'history trimmed to stay inside the ceiling vanished without a word, and a revert past it failed with no explanation',
+    ),
+    Guard(
+        'a step is dropped whole', _SRC + "undo_journal.py",
+        '                key = self._parse(folder, seq, jsons[seq][0]).step',
+        '                key = seq',
+        [UNDOBOUND + 'test_a_steps_entries_are_dropped_together_never_half'],
+        'trimming one file of a two-file change left half of it undoable',
+    ),
+    Guard(
+        'a revert refuses before writing when the file changed since', _SRC + "undo_journal.py",
+        '        if hash_hex(now) != newest.after_hash:',
+        '        if False:',
+        [UNDOSTALE + 'test_a_file_the_editor_saved_since_is_refused_and_named', UNDOSTEP + 'test_a_multi_file_revert_is_all_or_nothing'],
+        "an undo overwrote work the RPG Maker editor had saved since the server's last write",
+    ),
+    Guard(
+        'an outside change between two journalled ones blocks a longer undo', _SRC + "undo_journal.py",
+        '                if later.before_hash != earlier.after_hash:',
+        '                if False:',
+        [UNDOSTALE + 'test_an_outside_change_between_two_journalled_ones_blocks_a_longer_undo'],
+        'undoing several changes silently discarded an editor save that sat between two of them',
+    ),
+    Guard(
+        'a revert is all or nothing', _SRC + "undo_journal.py",
+        '        if conflicts and not force:\n            raise ProjectError(\n                "undo refused',
+        '        if False:\n            raise ProjectError(\n                "undo refused',
+        [UNDOSTEP + 'test_a_multi_file_revert_is_all_or_nothing'],
+        'one conflicting file was skipped and the others put back, leaving a half-undone change',
+    ),
+    Guard(
+        'a revert that fails midway puts the written files back', _SRC + "undo_journal.py",
+        '                for name in done:',
+        '                for name in []:',
+        [UNDOSTEP + 'test_a_write_that_fails_midway_puts_the_first_file_back'],
+        'a disk error on the second of two files left the first undone and the second not',
+    ),
+    Guard(
+        'an undo is itself journalled', _SRC + "undo_journal.py",
+        '                    receipts.append(self.record(name, target, "undo", summary))',
+        '                    receipts.append(None)',
+        [UNDOTAKE + 'test_an_undo_can_itself_be_undone', UNDOSTALE + 'test_force_overwrites_and_the_overwrite_is_journalled'],
+        "an undo, and a forced overwrite of the editor's save, could not be taken back",
+    ),
+    Guard(
+        'a revert cannot pass an entry that cannot be trusted', _SRC + "undo_journal.py",
+        '        blocked = sorted(seq for seq in shot.problems if seq > floor)',
+        '        blocked = []',
+        [UNDOHOSTILE + 'test_a_bad_entry_newer_than_the_target_blocks_the_revert'],
+        'an undo walked past a corrupted entry and reverted state it could not describe',
+    ),
+    Guard(
+        'a revert is refused on a read-only server', _SRC + "undo_journal.py",
+        '            self._p._assert_writable("undoing changes")',
+        '            pass',
+        [UNDORO + 'test_a_read_only_server_refuses_to_revert'],
+        "--read-only still let undo rewrite the project's data files",
+    ),
+    Guard(
+        'a save keeps the previous bytes before it writes', PROJECT,
+        '        receipt = self.journal.record(filename, encoded, tool, summary)',
+        '        receipt = None',
+        [UNDOTAKE + 'test_a_revert_puts_back_the_exact_bytes'],
+        'an edit was made and nothing was kept to undo it with',
+    ),
+    Guard(
+        'a failed save takes its journal entry back', PROJECT,
+        '            temp_path.unlink(missing_ok=True)\n            self.journal.discard(receipt)',
+        '            temp_path.unlink(missing_ok=True)',
+        [UNDOCLOSED + 'test_a_failed_data_write_takes_its_entry_back'],
+        'a save that failed left a journal entry for a change that never happened',
+    ),
+    Guard(
+        'a delete keeps the previous bytes before it unlinks', PROJECT,
+        '        receipt = self.journal.record(filename, None, tool, "deleted")',
+        '        receipt = None',
+        [UNDOSTEP + 'test_a_deleted_map_comes_back'],
+        'map_edit delete removed a map file and nothing could bring it back',
+    ),
+    Guard(
+        'a restore keeps what it overwrites', BACKUPS,
+        '                receipt = self.journal.record(',
+        '                receipt = (lambda *a: None)(',
+        [UNDOBACKUPS + 'test_a_restore_can_be_undone', UNDOBACKUPS + 'test_undo_works_after_the_snapshot_it_came_from_is_pruned'],
+        'a restore replaced files whose pre-restore contents lived only in a snapshot a prune could delete',
+    ),
+    Guard(
+        'one tool call is one undoable change', REGISTRY,
+        '        with ctx.project.journal.step():',
+        '        if True:',
+        [UNDOSTEP + 'test_creating_a_map_is_reverted_in_both_files_at_once'],
+        'map_edit create wrote the map and MapInfos as two changes, so one undo left the tree pointing at a map that was gone',
+    ),
+    Guard(
+        'a number too large to print is still a refusal', REGISTRY,
+        '                        % (what, maximum, echo(value)))',
+        '                        % (what, maximum, value))',
+        [UNDOARGS + 'test_a_huge_limit_is_refused'],
+        'a 5,000-digit integer for a bounded argument raised a bare ValueError while formatting its own refusal',
     ),
 ]

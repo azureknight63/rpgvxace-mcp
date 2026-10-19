@@ -167,6 +167,7 @@ each of those takes `dry_run` and backs the file up before changing it.
 | `map_critique` | Design-quality analysis validate does not run — reachability (which maps nobody can reach, and which of those are just blank), dead_ends (reachable maps the party cannot leave), switch_usage (switches and variables read but never set, or set but never read) and a ranked summary of everything worth a look by default; dead_space (how much of each map's ground layer is empty), tile_variety (Shannon entropy of each tile layer's ids; Ace's region and shadow layer counted apart) and stat_outliers (database entries that are statistical outliers within their own table) return their full tables when named. |
 | `scripts` ✏️ | Read and replace script editor slots. |
 | `backups` ✏️ | Snapshot, list, restore, prune. |
+| `undo` ✏️ | Take back recent edits one change at a time: a bounded journal keeps each file's previous bytes (200 entries / 256 MB), `list` shows it, `revert` undoes the last N changes or everything after an entry id, `dry_run` previews, and a file the editor saved since is refused unless `force`. See [docs/undo.md](docs/undo.md). |
 | `raw_data` ✏️ | Escape hatch: get or set any field by path. |
 | `live` | Run a scratch copy of the game and drive it: state, virtual keys, frame stepping, test setup, screenshots, crash capture. See [Live play-testing](#live-play-testing). |
 

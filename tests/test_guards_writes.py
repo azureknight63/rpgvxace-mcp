@@ -791,6 +791,12 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
         "raw_data op=get": "reads one value by path",
         "scripts op=list": "lists the script slots",
         "scripts op=get": "reads one slot's code",
+        "undo op=list": "lists the journal of previous file contents",
+        # A revert preview needs a journal to preview, which this table's
+        # one-call-per-op shape cannot set up (an empty journal is a
+        # refusal). `TestAnEditCanBeTakenBack` in test_undo_tools makes
+        # real edits first and checks the preview leads with `dry_run`.
+        "undo op=revert": "previewed in test_undo_tools, after real edits",
         # `live` changes a running scratch copy of the game, never a project
         # file, so there is no write to preview. Each op still needs its own
         # line: an excuse names one op, so a new op is not excused by these.

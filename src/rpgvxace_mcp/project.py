@@ -51,6 +51,7 @@ from .paths import (  # noqa: F401
 )
 from .convert import TextCodec, decoded_text, detect_encoding
 from .rgss_archive import RgssArchive, find_archive
+from .undo_journal import UndoJournal
 from .rubytypes import RubyHash, RubyObject, RubyString, ruby_children
 from .schema import (
     ARRAY,
@@ -241,6 +242,8 @@ class Project(BackupStore):
         self.archive: RgssArchive | None = None
         self._archive_cache: Path | None = None
         self._session = datetime.now().strftime(BACKUP_STAMP_FORMAT)
+        # The previous bytes of every file written, for the `undo` tool.
+        self.journal = UndoJournal(self)
 
         if not self.root.is_dir():
             raise ProjectError("no such directory: %s" % self.root)
@@ -820,6 +823,9 @@ class Project(BackupStore):
         backup = self.backup_file(filename)
         if backup:
             result["backup"] = backup
+        # Before anything is written, and refusing the write if it cannot be
+        # kept: see `undo_journal` for why the journal fails closed.
+        receipt = self.journal.record(filename, encoded, tool, summary)
 
         # A unique temp name, opened exclusively: a predictable one in a
         # directory someone else can write is a way to redirect this write.
@@ -828,6 +834,7 @@ class Project(BackupStore):
                                                  prefix=path.name + ".",
                                                  suffix=TMP_SUFFIX)
         except OSError as exc:
+            self.journal.discard(receipt)
             # A folder that refuses a new file: a message, not a traceback.
             raise ProjectError("could not write %s: %s" % (filename, exc)) from exc
         temp_path = Path(temp_name)
@@ -848,6 +855,7 @@ class Project(BackupStore):
             os.replace(temp_path, path)
         except OSError as exc:
             temp_path.unlink(missing_ok=True)
+            self.journal.discard(receipt)
             raise ProjectError("could not write %s: %s" % (filename, exc)) from exc
 
         info = path.stat()
@@ -939,9 +947,11 @@ class Project(BackupStore):
         if cached is not None:
             self._assert_not_stale(filename, path, cached)
         backup = self.backup_file(filename)
+        receipt = self.journal.record(filename, None, tool, "deleted")
         try:
             path.unlink()
         except OSError as exc:
+            self.journal.discard(receipt)
             raise ProjectError("could not delete %s: %s" % (filename, exc)) from exc
         self._cache.pop(filename, None)
         self._forget_map_ids()
