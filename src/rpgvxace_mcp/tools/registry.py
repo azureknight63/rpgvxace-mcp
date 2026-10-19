@@ -755,10 +755,15 @@ def as_int(value: Any, what: str, minimum: int | None = None,
         value = int(value)
     if not isinstance(value, int):
         raise ToolError("%s must be a whole number, got %s" % (what, echo(value)))
+    # The caller's number is quoted through `echo`, not `%d`: CPython 3.11
+    # refuses to render an integer past 4300 digits, so a 5,000-digit id
+    # raised a bare ValueError here instead of this refusal.
     if minimum is not None and value < minimum:
-        raise ToolError("%s must be at least %d, got %d" % (what, minimum, value))
+        raise ToolError("%s must be at least %d, got %s"
+                        % (what, minimum, echo(value)))
     if maximum is not None and value > maximum:
-        raise ToolError("%s must be at most %d, got %d" % (what, maximum, value))
+        raise ToolError("%s must be at most %d, got %s"
+                        % (what, maximum, echo(value)))
     return value
 
 

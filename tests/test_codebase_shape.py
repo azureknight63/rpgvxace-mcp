@@ -328,6 +328,10 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         # nothing: it reads the replies the other scopes built.
         "summary": {"stat_outliers"},
         "switch_usage": {"walk"},
+        # The wider reference scan behind `references` and `refactor`: it
+        # reuses `references`' command rules and `switch_usage`' operand
+        # tables rather than keeping a second copy of either.
+        "ref_sites": {"walk", "references", "switch_usage"},
         "lint": {"walk", "references"},
     }
     LINT = {
@@ -627,7 +631,7 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         # `annotations` is the future import.
         modules = {"walk", "references", "reachability", "dead_ends",
                    "map_shape", "tile_variety", "stat_outliers",
-                   "summary", "switch_usage", "lint"}
+                   "summary", "switch_usage", "ref_sites", "lint"}
         exported = {name for name in vars(analysis)
                     if not name.startswith("__")}
         dangling = sorted(exported - self.defined_below() - modules

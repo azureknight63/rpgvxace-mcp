@@ -71,6 +71,7 @@ from rpgvxace_mcp.tools import (  # noqa: E402,F401
     map_tile_tools,
     misc_tools,
     raw_tools,
+    reference_tools,
     search_tools,
 )
 
