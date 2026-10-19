@@ -251,23 +251,34 @@ actual}, and `results` for every step run (cut at 120,000 characters in total,
 with `results_truncated`). `max_frames` (default 3000) and `max_seconds`
 (default 90) bound the whole scenario; a walk inside gets what is left.
 
-**What was not verified without a real game.** The three Ruby methods
-(`passability`, `locate`, `face`) and the bridge's `when` branches for them
-are checked as text only. Run once against a scratch copy of a real game:
+**Checked against a real game.** All seven checks below were run on a scratch
+copy of a real VX Ace game (the project and its saves were byte-identical
+afterwards):
 
-1. `start` (default options), `walk_to` to a tile two steps away on open
-   floor: expect `arrived`, `steps_taken` 2, and a `state` that agrees.
-2. `walk_to` through a wall tile you can see: expect `no_path` or a route
-   around it, never `blocked`.
-3. `walk_to` toward a spot with an NPC standing in the way: expect the route
-   to go around it (the NPC is in `passability`).
-4. `interact` with `event_id` of a visible NPC: expect a walk, `message_open`
-   true, the text, and `changes` for anything the event flips; then `input`
-   C + `step` to close the message.
-5. `walk_to` onto a transfer tile: expect `moved_elsewhere` and the new map.
-6. `scenario` of the above with `expect` on x, y, a switch and a variable,
-   once passing and once with a wrong value to see `failed_expect`.
-7. In a scenario, a step with `op: "eval"`: refused before the game moves.
+1. `walk_to` two tiles away: `arrived`, `steps_taken` 2, `state` agrees.
+2. `walk_to` onto a tile the game's passability blocks: `no_path`, nothing
+   pressed.
+3. A chest standing in a column: walking from two tiles below it to two
+   tiles above took the 6-step route around it, not the 4-step one through.
+4. `interact` with a chest (`event_id`): walked 2 tiles, faced it, the
+   message opened with its text; further `input` C presses closed it. One C
+   does not always close a message (the text may still be printing).
+5. `walk_to` onto an exit tile: `moved_elsewhere` with `transfer_pending`
+   true. The transfer happens on the frames after the step, so the player
+   is still on the old map in that reply; `step` a few frames and read
+   `state` for the new one.
+6. A `scenario` with `expect` on position, a switch and a variable: passed,
+   and with a wrong value gave `expectation_failed` with `failed_expect`.
+7. An `eval` step in a scenario is refused before the game moves.
+
+Two things came out of the real run. `interact` reports `interacted: true`
+when the key was pressed, which is not the same as the target having run:
+walking 24 tiles across a field, an enemy event touched the player, and the C
+went to its balloon wait. The reply now carries a `note` naming the event
+that was running when it was not the target. And a game kept in git copied
+its `.git` folder into the scratch copy; the read-only objects then stopped
+the copy being deleted, so version-control folders are no longer copied and a
+read-only file no longer blocks the cleanup.
 
 ## Tests
 

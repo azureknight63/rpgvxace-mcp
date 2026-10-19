@@ -488,6 +488,13 @@ def summary(run: Run, reason: str, route: "list[tuple[int, int]]", walked: int,
         "seconds": round(run.seconds(), 2)}
     if run.frame is not None:
         out["frame"] = run.frame
+    if reason == "moved_elsewhere" and player_of(state).get("transferring"):
+        # Seen on a real game: the player stops on the exit tile, still on
+        # the old map, because the transfer happens on the next frames.
+        out["transfer_pending"] = True
+        out["note"] += (" A transfer has been ordered but not yet made: "
+                        "`step` a few frames, then read `state` for the new "
+                        "map.")
     message = message_of(state)
     if message:
         out["message"] = message
@@ -643,6 +650,17 @@ def interact(driver: Any, direction: "int | None", event_id: "int | None",
     running = after.get("interpreter")
     if isinstance(running, dict) and running.get("running"):
         out["event_running"] = running.get("event_id")
+        other = running.get("event_id")
+        if (event_id is not None and isinstance(other, int)
+                and other not in (0, event_id)):
+            # Seen on a real game: an enemy event touched the player on the
+            # walk, and the key press went to its wait, not to the target.
+            out["note"] = (
+                "event %d was running, not event %d, so the key press may "
+                "not have reached event %d (an enemy that touched the player "
+                "on the way, or a parallel event). Check `message` and "
+                "`changes`; call interact again once it has finished."
+                % (other, event_id, event_id))
     if walked:
         out["walked"] = walked
     out.update(diff_states(before, after))

@@ -313,7 +313,8 @@ class FakeGame:
             switches={k: v for k, v in self.switches.items() if v},
             variables={k: v for k, v in self.variables.items() if v},
             gold=self.gold,
-            interpreter={"running": False, "event_id": 0,
+            interpreter={"running": "interpreter_event" in self.behaviour,
+                         "event_id": self.behaviour.get("interpreter_event", 0),
                          "in_battle": self.scene == "Scene_Battle"},
             message=self.message or {"busy": False, "visible": False,
                                      "texts": [], "choices": []})

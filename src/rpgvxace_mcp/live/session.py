@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,9 @@ MARKER_FILE = "rpgvxace-live-session.json"
 # `BOOT_SECONDS` and `REPLY_SECONDS` are in `limits`, read back above, so the
 # tool can quote them without loading this module. They are still names here,
 # which is what a test shortens.
+# Folders a scratch copy leaves out, at any depth.
+_NOT_COPIED = frozenset({".rpgvxace-mcp", ".git", ".hg", ".svn"})
+
 QUIT_SECONDS = 3.0
 POLL_SECONDS = 0.01
 
@@ -113,10 +117,24 @@ def _job() -> KillOnClose:
     return _JOB
 
 
+def _make_writable(function, name, _error) -> None:
+    """`rmtree`'s answer to a file it may not delete: clear the flag, retry.
+
+    Windows refuses to delete a read-only file, and `copy2` copies the flag
+    along. A game kept in git has a `.git` folder of read-only objects; with
+    `ignore_errors` alone the copy of one could never be removed.
+    """
+    try:
+        os.chmod(name, stat.S_IWRITE | stat.S_IREAD)
+        function(name)
+    except OSError:
+        pass
+
+
 def _remove_tree(path: Path) -> bool:
     """Delete a scratch folder, retrying while Windows releases the files."""
     for _ in range(25):
-        shutil.rmtree(path, ignore_errors=True)
+        shutil.rmtree(path, onerror=_make_writable)
         if not path.exists():
             return True
         time.sleep(0.2)
@@ -149,7 +167,9 @@ def sweep_orphans() -> "list[str]":
 def _copy_project(source: Path, target: Path) -> "tuple[int, int]":
     """Copy a project for a test run; return (files, bytes) copied.
 
-    Skipped: save files, this server's own work folder, and links -- a
+    Skipped: save files, this server's own work folder, version-control
+    folders (history, not game data, and often the largest thing in the
+    project), and links -- a
     junction inside a project could otherwise pull in a folder from
     anywhere on the disk. Bounded by `MAX_SCRATCH_BYTES` and
     `MAX_SCRATCH_FILES`, counted before anything is written.
@@ -161,7 +181,7 @@ def _copy_project(source: Path, target: Path) -> "tuple[int, int]":
         folder = stack.pop()
         with os.scandir(folder) as entries:
             for entry in entries:
-                if entry.is_symlink() or entry.name == ".rpgvxace-mcp":
+                if entry.is_symlink() or entry.name in _NOT_COPIED:
                     continue
                 path = Path(entry.path)
                 if entry.is_dir(follow_symlinks=False):

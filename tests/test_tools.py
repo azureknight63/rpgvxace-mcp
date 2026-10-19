@@ -2888,7 +2888,12 @@ class TestRealProject(unittest.TestCase):
         thorny = detail[39]
         self.assertFalse(thorny["blank"])
         self.assertEqual((thorny["width"], thorny["height"]), (38, 30))
-        self.assertEqual(thorny["nonzero_cells"], 1359)
+        # Counted from the file, not a figure copied out of it: the author keeps
+        # painting this map, and a pinned count failed the day they did.
+        table = self.project.load_map(39).get("data")
+        tile_cells = 3 * table.xsize * table.ysize
+        self.assertEqual(thorny["nonzero_cells"],
+                         sum(1 for tile in table.data[:tile_cells] if tile))
         self.assertEqual(thorny["event_count"], 0)
 
     def test_the_default_critique_of_the_fixture_game_is_a_short_summary(self):

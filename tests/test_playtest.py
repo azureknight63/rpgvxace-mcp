@@ -374,12 +374,17 @@ class TestWhyAWalkStops(PlaytestTest):
         out = self.walk(4, 0, frames_per_step=6)
         self.assertEqual(out["stop_reason"], "moved_elsewhere")
         self.assertEqual(out["steps_taken"], 1)
+        # The reply says the new map is not there yet, and how to get it: on
+        # a real game the player is still on the old map, on the exit tile.
+        self.assertIs(out["transfer_pending"], True)
+        self.assertIn("step", out["note"])
 
     def test_moved_elsewhere_to_another_map(self):
         self.play(["....."], map_extra={"teleports": [
             {"x": 2, "y": 0, "map_id": 2, "to_x": 0, "to_y": 0}]})
         out = self.walk(4, 0, frames_per_step=12)
         self.assertEqual(out["stop_reason"], "moved_elsewhere")
+        self.assertNotIn("transfer_pending", out)
         self.assertEqual(out["player"]["map_id"], 2)
         self.assertEqual((out["player"]["x"], out["player"]["y"]), (0, 0))
 
@@ -630,6 +635,25 @@ class TestInteracting(PlaytestTest):
         state = self.live("state")
         self.assertEqual(state["switches"], {"7": True})
         self.assertEqual(state["variables"], {"3": 1})
+
+    def test_another_event_running_is_said_not_taken_for_the_target(self):
+        """Seen on a real game: an enemy touched the player on the way, and
+        the key press went to its balloon wait, not to the chest.
+
+        `interacted` only ever meant the key was pressed. The reply must not
+        let the running event 9 pass for the target 1.
+        """
+        self.play(["....."], map_extra=self.SHRINE, interpreter_event=9)
+        out = self.live("interact", event_id=1)
+        self.assertEqual(out["event_running"], 9)
+        self.assertIn("event 9", out["note"])
+        self.assertIn("event 1", out["note"])
+
+    def test_the_target_itself_running_needs_no_warning(self):
+        self.play(["....."], map_extra=self.SHRINE, interpreter_event=1)
+        out = self.live("interact", event_id=1)
+        self.assertEqual(out["event_running"], 1)
+        self.assertNotIn("note", out)
 
     def test_it_never_walks_onto_the_event(self):
         self.play(["....."], map_extra=self.SHRINE)

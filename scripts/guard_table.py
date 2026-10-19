@@ -5685,4 +5685,32 @@ GUARDS = [
         [PARXSCENE + 'test_a_layout_that_cannot_judge_passability_refuses_the_overlay'],
         'the scene is also called by code that is not the tool: Ace\'s passage rules over XP\'s priorities would draw a plausible wrong picture',
     ),
+    Guard(
+        'a version-control folder is not copied into the scratch game', LIVE_SESSION,
+        '''_NOT_COPIED = frozenset({".rpgvxace-mcp", ".git", ".hg", ".svn"})''',
+        '''_NOT_COPIED = frozenset({".rpgvxace-mcp"})''',
+        [LIVESTART + 'test_a_version_control_folder_is_not_copied'],
+        'a game kept in git copied its whole history into every session, and its read-only objects kept the copy from ever being deleted',
+    ),
+    Guard(
+        'a read-only file does not keep the scratch copy from being deleted', LIVE_SESSION,
+        '''        shutil.rmtree(path, onerror=_make_writable)''',
+        '''        shutil.rmtree(path, ignore_errors=True)''',
+        [LIVESTART + 'test_a_read_only_file_does_not_keep_the_copy_from_being_deleted'],
+        'Windows will not delete a read-only file: stop reported scratch_removed false and left the copy, and its game files, in the temp folder',
+    ),
+    Guard(
+        'a walk that ends on a pending transfer says so', PLAYTEST,
+        '''        out["transfer_pending"] = True''',
+        '''        out["transfer_pending"] = False''',
+        [PTSTOP + 'test_moved_elsewhere_by_a_transfer_in_progress'],
+        'on a real game the walk stopped on the exit tile, still on the old map, and the reply gave no sign that the new one was a few frames away',
+    ),
+    Guard(
+        'an interaction says when another event was running', PLAYTEST,
+        '''                and other not in (0, event_id)):''',
+        '''                and other not in (0, event_id, other)):''',
+        [PTINTERACT + 'test_another_event_running_is_said_not_taken_for_the_target'],
+        'an enemy touched the player on the walk and the key press went to its balloon wait: the reply said interacted, and nothing said the chest never opened',
+    ),
 ]

@@ -18,7 +18,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
+sys.path.insert(0, str(HERE))
 
+import real_project  # noqa: E402
 from build_project import build  # noqa: E402
 
 from rpgvxace_mcp import marshal_rb  # noqa: E402
@@ -467,10 +469,13 @@ class TestNewObjectsMatchARealProject(unittest.TestCase):
         templates = self.templates()
         compared = {cls: 0 for cls in templates}
         values = [project.load_map(map_id)
-                  for map_id in project.map_ids_on_disk()]
-        values += [project.load_data(key) for key in
-                   ("map_infos", "common_events", "troops", "system",
-                    "animations")]
+                  for map_id in real_project.editor_written_map_ids(project)]
+        values += [project.load_data(key) for key, name in
+                   (("map_infos", "MapInfos"), ("common_events", "CommonEvents"),
+                    ("troops", "Troops"), ("system", "System"),
+                    ("animations", "Animations"))
+                   if real_project.editor_written(
+                       project, name + project.profile.extension)]
         seen = set()
         stack = list(values)
         while stack:
