@@ -8,6 +8,7 @@ changed underneath us; containment keeps every path inside the project; and
 """
 
 import ast
+import json
 import shutil
 import sys
 import tempfile
@@ -791,6 +792,9 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
         "raw_data op=get": "reads one value by path",
         "scripts op=list": "lists the script slots",
         "scripts op=get": "reads one slot's code",
+        # Writes one file under .rpgvxace-mcp/exports, which is a cache
+        # like a render and no project data; op=import is the write.
+        "text op=export": "writes a cache file, not project data",
         # `live` changes a running scratch copy of the game, never a project
         # file, so there is no write to preview. Each op still needs its own
         # line: an excuse names one op, so a new op is not excused by these.
@@ -815,6 +819,15 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
         self.slot = self.call("scripts", op="list")["scripts"][0]["index"]
         self.backup = self.call("backups", op="create",
                                 label="fixture")["backup"]
+        # An edited export for the text import's preview: one item renamed.
+        exported = self.call("text", op="export", scopes=["database"],
+                             preview=0)
+        document = json.loads(Path(exported["path"]).read_text("utf-8"))
+        for entry in document["entries"]:
+            if entry["key"] == "items:1/name":
+                entry["text"] = "Zap"
+        self.text_file = Path(exported["path"]).with_name("edited.json")
+        self.text_file.write_text(json.dumps(document), "utf-8")
 
     def previews(self):
         """One dry-run call per writing op, as (label, tool, arguments).
@@ -910,6 +923,8 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
             ("backups op=prune", "backups", dict(op="prune", dry_run=True)),
             ("backups op=restore", "backups",
              dict(op="restore", backup=self.backup, dry_run=True)),
+            ("text op=import", "text",
+             dict(op="import", path=str(self.text_file), dry_run=True)),
         ]
 
     # Words that mean "this happened". A preview must not use them at the top

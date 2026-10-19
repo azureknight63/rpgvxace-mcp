@@ -72,6 +72,7 @@ from rpgvxace_mcp.tools import (  # noqa: E402,F401
     misc_tools,
     raw_tools,
     search_tools,
+    text_tools,
 )
 
 

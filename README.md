@@ -168,6 +168,7 @@ each of those takes `dry_run` and backs the file up before changing it.
 | `scripts` ✏️ | Read and replace script editor slots. |
 | `backups` ✏️ | Snapshot, list, restore, prune. |
 | `raw_data` ✏️ | Escape hatch: get or set any field by path. |
+| `text` ✏️ | Export every player-visible string (dialogue, choices, scrolling text, names, descriptions, terms, titles) to a JSON file, edit it, and import it back: only edited entries are written, each only if its hash still matches; dialogue is re-wrapped as the editor writes it. Unedited entries leave the files byte-identical. VX Ace and VX; see [docs/text.md](docs/text.md). |
 | `live` | Run a scratch copy of the game and drive it: state, virtual keys, frame stepping, test setup, screenshots, crash capture. See [Live play-testing](#live-play-testing). |
 
 Three reference documents are served as MCP resources — the data format, the

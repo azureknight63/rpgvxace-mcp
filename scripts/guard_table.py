@@ -84,6 +84,7 @@ SAFETY = _SRC + "tools/pattern_safety.py"
 RAW_TOOLS = _SRC + "tools/raw_tools.py"
 REGISTRY = _SRC + "tools/registry.py"
 SEARCH_TOOLS = _SRC + "tools/search_tools.py"
+TEXT_TOOLS = _SRC + "tools/text_tools.py"
 
 
 class Guard:
@@ -185,6 +186,31 @@ HOSTILEINFO = _at("test_hostile_input", "TestProjectInfoRefreshRereadsTheScripts
 HOSTILERAW = _at("test_hostile_input", "TestRawDataRefusesBeforeItLoadsAndKeepsItsShapeGuard")
 VOCABTILES = _at("test_guards_replies", "TestOneVocabularyForAPartialAnswer")
 HOSTILERE = _at("test_hostile_input", "TestTheRereviewOfTheScrubFixes")
+# test_text_tools
+TEXTLISTS = _at("test_text_tools", "TestExportListsWhatThePlayerReads")
+TEXTKEEP = _at("test_text_tools",
+               "TestAnExportFolderKeepsItsNewestAndOnlyItsOwn")
+TEXTBOUND = _at("test_text_tools", "TestAnExportIsBounded")
+TEXTROUND = _at("test_text_tools",
+                "TestAnImportThatChangesNothingTouchesNothing")
+TEXTWRAP = _at("test_text_tools",
+               "TestShowTextIsRewrappedAsTheEditorWritesIt")
+TEXTCHOICE = _at("test_text_tools", "TestChoicesKeepBothCopiesOfTheirText")
+TEXTSTALE = _at("test_text_tools", "TestAStaleEntryIsReportedAndSkipped")
+TEXTKEYS = _at("test_text_tools", "TestAKeyThatIsNotTextWritesNothing")
+TEXTRULES = _at("test_text_tools",
+                "TestAnEditThatBreaksARuleIsSkippedWithItsReason")
+TEXTLIES = _at("test_text_tools", "TestAnImportFileThatLies")
+TEXTPATH = _at("test_text_tools", "TestAnImportOnlyReadsInsideTheProject")
+TEXTBEFORE = _at("test_text_tools",
+                 "TestTheExportFolderIsCheckedBeforeItIsMade")
+TEXTDRY = _at("test_text_tools",
+              "TestADryRunWritesNothingAndShowsBeforeAndAfter")
+TEXTSTAGE = _at("test_text_tools", "TestWritesAreStagedAcrossFiles")
+TEXTREPLY = _at("test_text_tools", "TestAnImportReplyIsBounded")
+TEXTSHARE = _at("test_text_tools", "TestAProjectThatSharesObjects")
+TEXTCODEC = _at("test_text_tools", "TestAnEncodingThatIsNotUtf8")
+TEXTENGINE = _at("test_text_tools", "TestVXAndXP")
 HOSTILEZ = _at("test_hostile_input", "TestAFloatKeepsItsSign")
 HOSTILEID = _at("test_hostile_input", "TestAnEntryIdBelowZeroIsRefused")
 CONVBYTES = _at("test_convert_input", "TestAStringThatDoesNotComeBackTravelsAsBytes")
@@ -4032,5 +4058,266 @@ GUARDS = [
         '''                   if p.is_file()),''',
         [HOSTILERENDER + 'test_only_its_own_pictures_are_trimmed'],
         'the glob wildcard ? matches any character: a map-0001-holidaypic.png kept in a shared --render-dir counted as ours and was trimmed',
+    ),
+    Guard(
+        'an import file is read only from inside the project', TEXT_TOOLS,
+        '''    if not real.is_relative_to(root):''',
+        '''    if False:''',
+        [TEXTPATH + 'test_a_file_outside_the_project_is_refused', TEXTPATH + 'test_a_dotdot_that_leaves_the_project_is_refused'],
+        "an import path outside the project, or a .. or a link leading out, was opened and read as the caller's export file",
+    ),
+    Guard(
+        'the exports folder is checked before it is made', TEXT_TOOLS,
+        '''    _contained(folder, ctx.project.root, "the exports folder")''',
+        '''    pass''',
+        [TEXTBEFORE + 'test_a_work_folder_that_is_a_link_out_of_the_project', TEXTBEFORE + 'test_an_exports_folder_that_is_a_link_out_of_the_project'],
+        'a link planted as the work folder carried the mkdir of the exports folder outside the project before any check refused',
+    ),
+    Guard(
+        'a stale entry is skipped unless forced', TEXT_TOOLS,
+        '''        if entry["original_hash"] != item.digest:''',
+        '''        if False:''',
+        [TEXTSTALE + 'test_it_is_not_written', TEXTSTALE + 'test_a_group_changed_underneath_is_stale_too'],
+        "an edited export imported after the project changed overwrote the newer text with the old export's wording",
+    ),
+    Guard(
+        'force does not cross kinds of text', TEXT_TOOLS,
+        '''        if entry["kind"] != item.kind:''',
+        '''        if False:''',
+        [TEXTKEYS + 'test_a_key_now_holding_a_different_kind_of_text_is_not_written'],
+        "a key whose command had become a scrolling text was overwritten with a Show Text's edit when forced",
+    ),
+    Guard(
+        'a read-only entry is never written', TEXT_TOOLS,
+        '''        if item.reason:''',
+        '''        if False:''',
+        [TEXTCODEC + 'test_bytes_that_decode_but_do_not_encode_back_are_read_only', TEXTSHARE + 'test_editing_through_a_shared_list_is_refused_and_writes_nothing'],
+        'a string whose bytes do not survive the codec, or a list shared by two pages, was rewritten from an edited export',
+    ),
+    Guard(
+        'control characters are refused in edited text', TEXT_TOOLS,
+        '''    bad = pattern.search(text)''',
+        '''    bad = None''',
+        [TEXTRULES + 'test_control_characters_are_refused', TEXTRULES + 'test_a_lone_surrogate_is_refused'],
+        "NUL, ESC, CR and a lone surrogate went into a game's strings from an import file",
+    ),
+    Guard(
+        'edited text is encoded strictly', TEXT_TOOLS,
+        '''        encoded = codec.encode_strict(text)''',
+        '''        encoded = text.encode(codec.name, "replace")''',
+        [TEXTCODEC + 'test_a_character_the_codec_lacks_is_refused_not_replaced'],
+        "a character the project's code page lacks was silently written as a question mark",
+    ),
+    Guard(
+        'a message may not exceed the message window', TEXT_TOOLS,
+        '''        if len(lines) > allowed:''',
+        '''        if False:''',
+        [TEXTWRAP + 'test_more_lines_than_the_message_window_holds_are_refused'],
+        'a translation with five lines wrote five 401 commands under one 101, which the message window cannot show',
+    ),
+    Guard(
+        'edits are written from the highest command index down', TEXT_TOOLS,
+        '''                                     -edit[0].where''',
+        '''                                     edit[0].where''',
+        [TEXTWRAP + 'test_two_messages_in_one_list_both_land_when_the_first_grows', TEXTWRAP + 'test_two_messages_in_one_list_both_land_when_the_first_shrinks'],
+        "a message that gained a line moved the next message's command index, so its edit hit a command that was no longer there",
+    ),
+    Guard(
+        "a choice's When-branch copy is updated with it", TEXT_TOOLS,
+        '''                commands[follow] = _copy_command(''',
+        '''                _ignored = _copy_command(''',
+        [TEXTCHOICE + 'test_the_list_and_the_when_branch_are_both_updated'],
+        'the editor shows the 402 copy of a choice, so a rewording left the old wording beside the new',
+    ),
+    Guard(
+        'a command is copied, not edited in place', TEXT_TOOLS,
+        '''    clone = RubyObject(command.cls, dict(command.ivars))''',
+        '''    clone = command''',
+        [TEXTSHARE + 'test_a_command_object_in_many_slots_is_edited_in_one_slot_only'],
+        'one command object linked from fifty slots was edited in place, so an edit to one line changed all fifty',
+    ),
+    Guard(
+        'a list reached twice is read-only', TEXT_TOOLS,
+        '''            item.reason = item.reason or _SHARED''',
+        '''            pass''',
+        [TEXTSHARE + 'test_a_list_shared_by_two_pages_is_read_only_at_its_one_key', TEXTSHARE + 'test_a_database_entry_in_two_slots_is_read_only'],
+        'a command list shared by two pages was exported as editable at one key, and the edit changed the other page too',
+    ),
+    Guard(
+        'two strings with one key are not both addressable', TEXT_TOOLS,
+        '''        if prior is not None:''',
+        '''        if False:''',
+        [TEXTSHARE + 'test_two_events_with_one_id_cannot_both_be_addressed'],
+        'two events under one id exported the same key twice, so an edit chose between them by luck',
+    ),
+    Guard(
+        'an import file naming a key twice is refused', TEXT_TOOLS,
+        '''        if key in seen:''',
+        '''        if False:''',
+        [TEXTLIES + 'test_a_repeated_key_is_a_refusal_not_a_choice'],
+        'two entries with one key applied in file order, the last silently winning',
+    ),
+    Guard(
+        'a JSON object repeating a member is refused', TEXT_TOOLS,
+        '''        if key in out:''',
+        '''        if False:''',
+        [TEXTLIES + 'test_a_repeated_json_member_is_a_refusal'],
+        'json.loads keeps the last of a repeated member, so what the caller read was not what was imported',
+    ),
+    Guard(
+        'an import file is size-checked before and after it is read', TEXT_TOOLS,
+        ['''        if on_disk > MAX_EXPORT_FILE_BYTES:''',
+         '''    if len(data) > MAX_EXPORT_FILE_BYTES:'''],
+        ['''        if False:''',
+         '''    if False:'''],
+        [TEXTLIES + 'test_a_file_past_the_size_ceiling_is_not_read'],
+        'a multi-gigabyte file named as the import path was read into memory',
+    ),
+    Guard(
+        "a document nested past the parser's stack is a refusal", TEXT_TOOLS,
+        '''    except (ValueError, RecursionError) as exc:''',
+        '''    except ValueError as exc:''',
+        [TEXTLIES + 'test_a_document_nested_far_past_the_parsers_stack'],
+        '200,000 open brackets raised RecursionError out of the tool',
+    ),
+    Guard(
+        'an export stops at its entry ceiling and says so', TEXT_TOOLS,
+        '''        if self.limit is not None and len(self.items) >= self.limit:''',
+        '''        if False:''',
+        [TEXTBOUND + 'test_the_entry_ceiling_cuts_and_says_so'],
+        'a project with a million lines of dialogue produced a file no model could read, with no sign it was whole',
+    ),
+    Guard(
+        'an export stops at its file ceiling and says so', TEXT_TOOLS,
+        '''        if size > MAX_EXPORT_FILE_BYTES:''',
+        '''        if False:''',
+        [TEXTBOUND + 'test_the_file_ceiling_cuts_and_says_so_and_the_file_fits'],
+        'an export larger than the size import reads was written, so it could never be imported',
+    ),
+    Guard(
+        'the text read in one call is budgeted by bytes', TEXT_TOOLS,
+        '''        if self.bytes_left < 0:''',
+        '''        if False:''',
+        [TEXTBOUND + 'test_the_byte_budget_stops_the_walk_and_says_so', TEXTSHARE + 'test_an_enormous_string_linked_from_many_places_is_charged_each_time'],
+        'a Marshal link repeated a megabyte string a million times, and every repeat was decoded and hashed',
+    ),
+    Guard(
+        'a database string over the entry ceiling is not decoded', TEXT_TOOLS,
+        '''        if len(raw) > MAX_TEXT_ENTRY_BYTES:''',
+        '''        if False:''',
+        [TEXTBOUND + 'test_a_database_field_over_its_byte_ceiling_is_read_only_too'],
+        'a field of several megabytes was decoded into the export file',
+    ),
+    Guard(
+        'a message over the entry ceiling is not decoded', TEXT_TOOLS,
+        '''        if total > MAX_TEXT_ENTRY_BYTES:''',
+        '''        if False:''',
+        [TEXTBOUND + 'test_an_entry_over_its_byte_ceiling_is_listed_without_its_text', TEXTBOUND + 'test_a_string_of_a_few_megabytes_is_not_decoded_into_the_file'],
+        'a three-megabyte dialogue line was decoded and written into the export file',
+    ),
+    Guard(
+        'the exports trim only touches its own files', TEXT_TOOLS,
+        '''                   if p.is_file() and _OWN_EXPORT.fullmatch(p.name)),''',
+        '''                   if p.is_file()),''',
+        [TEXTKEEP + 'test_the_oldest_of_its_own_files_go_and_a_lookalike_stays'],
+        'the glob wildcard ? matches any character: a text-notes-1.json kept in the exports folder counted as ours and was trimmed',
+    ),
+    Guard(
+        'a text in a reply is made safe to print', TEXT_TOOLS,
+        '''        return printable_text(text)''',
+        '''        return text''',
+        [TEXTREPLY + 'test_a_control_character_in_a_stored_text_is_not_echoed_raw'],
+        'an ESC in a description out of a file this server did not write went into the reply a terminal renders',
+    ),
+    Guard(
+        'a text in a reply is clipped', TEXT_TOOLS,
+        '''    if len(text) <= limit:''',
+        '''    if True:''',
+        [TEXTREPLY + 'test_long_texts_are_clipped_in_the_reply_not_in_the_write'],
+        'a 50,000-character description was quoted whole, twice, in every row of the reply',
+    ),
+    Guard(
+        'XP is refused with its reason', TEXT_TOOLS,
+        '''    if not ctx.project.command_layouts_modelled:''',
+        '''    if False:''',
+        [TEXTENGINE + 'test_xp_is_refused_with_the_reason'],
+        'XP keeps its first line in the 101 itself, so rewrapping as VX does would have dropped or doubled it',
+    ),
+    Guard(
+        'an import dry run writes nothing', TEXT_TOOLS,
+        '''                filename, dry_run=dry_run, tool="text",''',
+        '''                filename, dry_run=False, tool="text",''',
+        [TEXTDRY + 'test_nothing_reaches_the_disk'],
+        'a preview of a translation wrote the translation',
+    ),
+    Guard(
+        'every file is marshalled before the first is written', TEXT_TOOLS,
+        '''            landed.save(filename, dry_run=True, tool="text")''',
+        '''            pass''',
+        [TEXTSTAGE + 'test_a_value_that_cannot_be_marshalled_is_found_before_any_write'],
+        'a value that could not be marshalled was found after the first file had already replaced the one on disk',
+    ),
+    Guard(
+        'a half-landed import says which files landed', TEXT_TOOLS,
+        '''            if not writes or dry_run:''',
+        '''            if True:''',
+        [TEXTSTAGE + 'test_a_failure_on_the_second_says_which_file_already_landed'],
+        'a failure on the second file reported plain failure although the first was already on disk, so the caller redid it',
+    ),
+    Guard(
+        'an event id that is not an id is skipped', TEXT_TOOLS,
+        '''    return number is not None and 0 <= number < 1_000_000''',
+        '''    return number is not None''',
+        [TEXTSHARE + 'test_ids_that_are_not_ids_are_skipped'],
+        'a 5,000-digit event id was formatted into a key and raised out of the export',
+    ),
+    Guard(
+        "a choice list is read to the editor's limit", TEXT_TOOLS,
+        '''        for choice, value in enumerate(texts[:MAX_CHOICES]):''',
+        '''        for choice, value in enumerate(texts):''',
+        [TEXTLISTS + 'test_a_choice_list_longer_than_the_editor_allows_is_cut'],
+        'a 102 whose list held a hundred thousand strings produced a hundred thousand entries',
+    ),
+    Guard(
+        'the event walk is budgeted per event and page', TEXT_TOOLS,
+        '''        if not self.budget.spend(count):''',
+        '''        if False:''',
+        [TEXTBOUND + 'test_a_walk_that_cannot_finish_says_so'],
+        'four million (event, page) pairs from a few kilobytes were walked in full',
+    ),
+    Guard(
+        'a command list is charged by its length', TEXT_TOOLS,
+        '''        affordable = self.budget.take(len(commands))''',
+        '''        affordable = len(commands)''',
+        [TEXTBOUND + 'test_one_enormous_command_list_is_charged_and_cut'],
+        'a list of a million links to one command was scanned to the end with no stop signal',
+    ),
+    Guard(
+        'a name cannot be blanked', TEXT_TOOLS,
+        '''    if text == "" and item.kind in _NEEDS_TEXT:''',
+        '''    if False:''',
+        [TEXTRULES + 'test_a_name_cannot_be_blanked'],
+        'an item named the empty string cannot be picked out of the menu it appears in',
+    ),
+    Guard(
+        'a single-line kind refuses a line break', TEXT_TOOLS,
+        '''    pattern = _BAD_MULTILINE if item.kind in _MULTILINE else _BAD_SINGLE''',
+        '''    pattern = _BAD_MULTILINE''',
+        [TEXTRULES + 'test_a_name_is_one_line', TEXTCHOICE + 'test_a_choice_is_one_line'],
+        'a name or a choice with a line break in it was written as one string the menu draws over two lines',
+    ),
+    Guard(
+        'an unedited entry is left alone', TEXT_TOOLS,
+        '''        if text == item.text:''',
+        '''        if False:''',
+        [TEXTROUND + 'test_an_unedited_export_round_trips_byte_for_byte'],
+        'importing an unedited export rewrote every data file and changed its bytes',
+    ),
+    Guard(
+        'a file from another engine or encoding is refused', TEXT_TOOLS,
+        '''        if document.get(field) != expected:''',
+        '''        if False:''',
+        [TEXTLIES + 'test_a_document_that_is_not_ours', TEXTLIES + 'test_a_file_from_another_encoding_is_not_written_into_this_one'],
+        'text exported from a Shift_JIS project was written into a UTF-8 one as different bytes',
     ),
 ]

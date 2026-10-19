@@ -52,6 +52,7 @@ from rpgvxace_mcp.tools import (  # noqa: E402
     map_tile_tools,
     misc_tools,
     raw_tools,
+    text_tools,
 )
 
 from tool_case import (  # noqa: E402
@@ -573,6 +574,7 @@ class TestEveryOpSelectingToolHasATable(unittest.TestCase):
         ("scripts", None): misc_tools.SCRIPT_OP_ARGS,
         ("backups", None): misc_tools.BACKUP_OP_ARGS,
         ("live", None): live_tools.LIVE_OP_ARGS,
+        ("text", None): text_tools.TEXT_OP_ARGS,
     }
 
     def op_selecting_tools(self):
@@ -757,6 +759,7 @@ class TestNoOpSlipsPastTheGate(ToolTest):
         ("scripts", None): misc_tools.SCRIPT_OP_ARGS,
         ("backups", None): misc_tools.BACKUP_OP_ARGS,
         ("live", None): live_tools.LIVE_OP_ARGS,
+        ("text", None): text_tools.TEXT_OP_ARGS,
     }
 
     def ops_one_of_accepts(self, tool_name, key):
