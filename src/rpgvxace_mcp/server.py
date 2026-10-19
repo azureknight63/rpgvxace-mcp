@@ -33,6 +33,7 @@ from .tools import (  # noqa: F401
     misc_tools,
     raw_tools,
     search_tools,
+    undo_tools,
 )
 # Imported for the side effect: each module's @tool decorators register its
 # tools in REGISTRY, which all_tools() then reads. Removing these as unused

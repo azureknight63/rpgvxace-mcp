@@ -373,10 +373,14 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
     ROOT_MODULES = {
         "paths": set(),
         "backups": {"paths"},
+        # The journal of previous file contents: reads `paths` for the
+        # error type, the name rules and the link check, and is held by
+        # `Project` and `backups` (which names it in its contract).
+        "undo_journal": {"paths"},
         # Reads `paths` for its error type and containment check, and
         # nothing else: it is a format reader, not a project.
         "rgss_archive": {"paths"},
-        "project": {"paths", "backups", "rgss_archive"},
+        "project": {"paths", "backups", "rgss_archive", "undo_journal"},
     }
 
     # The rest of the package root, listed rather than passed over. These

@@ -60,6 +60,7 @@ class BackupStore:
         "data_dir", "extension", "backup_keep",
         "_session", "_cache", "_backed_up", "_forget_map_ids",
         "work_dir", "path_for", "_assert_writable", "_assert_not_stale",
+        "journal",
     )
 
     # -- backups --------------------------------------------------------------
@@ -266,17 +267,29 @@ class BackupStore:
             cached = self._cache.get(name)
             if cached is not None:
                 self._assert_not_stale(name, self.path_for(name), cached)
-        for name in wanted:
-            # The snapshot being restored from, not the backup root: with the
-            # root as the boundary a symlink planted in one snapshot could
-            # resolve into another and be restored from there.
-            source = _contained(source_dir / name, source_dir,
-                                "backup file %r" % name)
-            shutil.copy2(source, self.path_for(name))
-            self._cache.pop(name, None)
-            # With the cache entry gone, the per-run backup flag has to go too,
-            # or the next save of a restored file skips its own backup.
-            self._backed_up.discard(name)
+        # One undoable change, however many files: the journal keeps what
+        # each file held just before the copy, so a restore can be undone
+        # even after `prune` has removed the snapshot it came from.
+        with self.journal.step():
+            for name in wanted:
+                # The snapshot being restored from, not the backup root: with
+                # the root as the boundary a symlink planted in one snapshot
+                # could resolve into another and be restored from there.
+                source = _contained(source_dir / name, source_dir,
+                                    "backup file %r" % name)
+                receipt = self.journal.record(
+                    name, source.read_bytes(), "backups",
+                    "restored from %s" % stamp)
+                try:
+                    shutil.copy2(source, self.path_for(name))
+                except OSError:
+                    self.journal.discard(receipt)
+                    raise
+                self._cache.pop(name, None)
+                # With the cache entry gone, the per-run backup flag has to
+                # go too, or the next save of a restored file skips its own
+                # backup.
+                self._backed_up.discard(name)
         self._forget_map_ids()
         self._log_change("backups", ",".join(wanted), "restored from %s" % stamp)
         return {"backup": stamp, "restored": wanted, "safety_backup": pre["backup"]}
