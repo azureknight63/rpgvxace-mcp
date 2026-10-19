@@ -42,6 +42,7 @@ LINT_REPORT = _SRC + "analysis/lint/report.py"
 
 
 REFERENCES = _SRC + "analysis/references.py"
+REF_SITES = _SRC + "analysis/ref_sites.py"
 STAT_OUTLIERS = _SRC + "analysis/stat_outliers.py"
 SWITCH_USAGE = _SRC + "analysis/switch_usage.py"
 WALK = _SRC + "analysis/walk.py"
@@ -82,6 +83,7 @@ MAP_TILE = _SRC + "tools/map_tile_tools.py"
 MISC_TOOLS = _SRC + "tools/misc_tools.py"
 SAFETY = _SRC + "tools/pattern_safety.py"
 RAW_TOOLS = _SRC + "tools/raw_tools.py"
+REFERENCE_TOOLS = _SRC + "tools/reference_tools.py"
 REGISTRY = _SRC + "tools/registry.py"
 SEARCH_TOOLS = _SRC + "tools/search_tools.py"
 
@@ -437,6 +439,21 @@ UNMOD = _at("test_schema", "TestUnmodelledEngine")
 STATSXP = _at("test_stat_outliers", "TestStatOutliersOnXP")
 
 
+# test_references_tools
+REFSARGS = _at("test_references_tools", "TestTheArgumentsAreStrictlyRead")
+REFSATOMIC = _at("test_references_tools", "TestItIsAtomic")
+REFSBLOCK = _at("test_references_tools", "TestWhatBlocksARenumber")
+REFSHOSTILE = _at("test_references_tools", "TestAHostileProjectCannotHurtEitherTool")
+REFSMAP = _at("test_references_tools", "TestRenumberingAMap")
+REFSMENTION = _at("test_references_tools", "TestScriptsAreMentionsNotReferences")
+REFSNUMBER = _at("test_references_tools", "TestRenumberingAnEntry")
+REFSRENAME = _at("test_references_tools", "TestNamingASwitchOrVariable")
+REFSREADONLY = _at("test_references_tools", "TestAReadOnlyServer")
+REFSREFUSE = _at("test_references_tools", "TestSomeTablesAreRefusedBecauseTheyAreNotDeclaredComplete")
+REFSSWAP = _at("test_references_tools", "TestASwap")
+REFSUNREAD = _at("test_references_tools", "TestAnUnreadableFileIsNotAnEmptyAnswerOnTheDeletePaths")
+REFSUSED = _at("test_references_tools", "TestWhereAnEntryIsUsed")
+REFSXP = _at("test_references_tools", "TestOtherEnginesCannotRenumber")
 # test_tools
 XPREF = _at("test_tools", "TestCommandReferenceXP")
 DATABASE = _at("test_tools", "TestDatabase")
@@ -4032,5 +4049,273 @@ GUARDS = [
         '''                   if p.is_file()),''',
         [HOSTILERENDER + 'test_only_its_own_pictures_are_trimmed'],
         'the glob wildcard ? matches any character: a map-0001-holidaypic.png kept in a shared --render-dir counted as ours and was trimmed',
+    ),
+    # -- references / refactor ------------------------------------------------
+    Guard(
+        'renumber is refused for a table the declaration does not list', REFERENCE_TOOLS,
+        '''    if not supported:
+        raise ToolError(why)''',
+        '''    if False:
+        raise ToolError(why)''',
+        [REFSREFUSE + 'test_weapons_have_rules_and_are_refused_all_the_same'],
+        'a table with reference rules but an incomplete rule set would be renumbered, and whatever the rules do not see would point at the wrong entry',
+    ),
+    Guard(
+        'support is read from the declaration, not from having rules', REF_SITES,
+        '''    if table in declared:
+        return True, ""''',
+        '''    if table in declared or table in RENUMBER_UNCOVERED:
+        return True, ""''',
+        [REFSREFUSE + 'test_the_refusal_is_by_declaration_not_by_having_rules'],
+        'inferring "complete" from "has rules" is the fail-open reading; the reviewed list is the only thing that makes a table renumberable',
+    ),
+    Guard(
+        'another engine is refused whole', REF_SITES,
+        '''    if engine not in RENUMBER_COMPLETE:''',
+        '''    if False:''',
+        [REFSXP + 'test_xp_is_refused_with_the_reason'],
+        'the field rules are written against VX Ace classes; on XP or VX a renumber would rewrite what it recognises and miss the rest',
+    ),
+    Guard(
+        'skills 1 and 2 cannot move', REFERENCE_TOOLS,
+        '''    if taken:''',
+        '''    if False:''',
+        [REFSREFUSE + 'test_skills_one_and_two_cannot_move'],
+        'the engine addresses Attack and Guard by number, so renumbering them breaks something no scan can see',
+    ),
+    Guard(
+        'a preview writes nothing', REFERENCE_TOOLS,
+        '''    if dry_run:
+        return write_reply(_reply(ctx, plan, limit, offset, dry_run=True),''',
+        '''    if False:
+        return write_reply(_reply(ctx, plan, limit, offset, dry_run=True),''',
+        [REFSNUMBER + 'test_a_preview_lists_every_site_and_writes_nothing'],
+        'a renumber preview that falls through renumbers: the dry_run flag is the whole difference between reading and rewriting a project',
+    ),
+    Guard(
+        'a renumber target must be free', REFERENCE_TOOLS,
+        '''        if project.get_entry(table, plan.to_id) is not None:''',
+        '''        if False:''',
+        [REFSNUMBER + 'test_an_occupied_target_is_refused_and_nothing_changes'],
+        'moving an entry onto an occupied id overwrites the entry that was there',
+    ),
+    Guard(
+        'a map target must be free', REFERENCE_TOOLS,
+        '''        if plan.to_id in on_disk or infos.get(plan.to_id) is not None:''',
+        '''        if False:''',
+        [REFSMAP + 'test_a_taken_map_id_is_refused'],
+        'a map moved onto an id that has a file or a tree entry replaces it',
+    ),
+    Guard(
+        'a map to move needs both its file and its tree entry', REFERENCE_TOOLS,
+        '''        if not (has_file and has_entry):''',
+        '''        if False:''',
+        [REFSMAP + 'test_a_map_with_a_file_and_no_tree_entry_is_refused'],
+        'half a map cannot be renumbered consistently: the file or the tree entry would be left under the old id',
+    ),
+    Guard(
+        'an entry that disagrees with its slot is not renumbered', REFERENCE_TOOLS,
+        '''        if entry.has("id") and entry.get("id") != entry_id:''',
+        '''        if False:''',
+        [REFSNUMBER + 'test_an_entry_that_is_not_where_its_own_id_says_is_refused'],
+        'an entry whose id is not its slot is already damaged, and a renumber would rewrite references to the wrong number',
+    ),
+    Guard(
+        'a renumber target cannot pad a table', REFERENCE_TOOLS,
+        '''        if plan.to_id > ceiling:''',
+        '''        if False:''',
+        [REFSNUMBER + 'test_a_target_far_past_the_end_is_refused'],
+        'one call could pad a table with a thousand empty slots, which db_edit refuses for the same reason',
+    ),
+    Guard(
+        'the scan looks for the free target too', REFERENCE_TOOLS,
+        '''    scan = scan_sites(project, table, {from_id, to_id}, budget)''',
+        '''    scan = scan_sites(project, table, {from_id}, budget)''',
+        [REFSBLOCK + 'test_a_reference_already_naming_the_free_id_blocks_it'],
+        'something that already names the free id would silently start pointing at the moved entry',
+    ),
+    Guard(
+        'an unfinished scan blocks a renumber', REFERENCE_TOOLS,
+        '''    if budget.exhausted:
+        plan.blockers.append(''',
+        '''    if False:
+        plan.blockers.append(''',
+        [REFSBLOCK + 'test_an_unfinished_scan_blocks_it'],
+        'a rewrite built on a walk that gave up misses references, and reports the rest as the whole',
+    ),
+    Guard(
+        'an unreadable file blocks a renumber', REFERENCE_TOOLS,
+        '''    if scan.unread:
+        plan.blockers.append(''',
+        '''    if False:
+        plan.blockers.append(''',
+        [REFSBLOCK + 'test_a_file_that_cannot_be_read_blocks_it'],
+        'iter_command_lists skips a map it cannot parse, so a reference inside it would be left behind',
+    ),
+    Guard(
+        'a script mention blocks a renumber unless allowed', REFERENCE_TOOLS,
+        '''    if scan.mention_total and not allow_scripts:''',
+        '''    if False:''',
+        [REFSBLOCK + 'test_a_script_mention_blocks_it_until_it_is_allowed'],
+        'scripts are never rewritten, so a script naming the number would keep naming the old one',
+    ),
+    Guard(
+        'a shared number is rewritten once', REF_SITES,
+        '''    for hit in unique_hits(hits):
+        if hit.holder is None:''',
+        '''    for hit in hits:
+        if hit.holder is None:''',
+        [REFSSWAP + 'test_a_list_shared_by_two_pages_is_rewritten_once_not_twice'],
+        'Marshal links one command list onto several pages; rewriting it once per page maps a swap straight back',
+    ),
+    Guard(
+        'the preview counts a shared number once', REFERENCE_TOOLS,
+        '''    plan.unique = unique_hits(scan.hits)''',
+        '''    plan.unique = list(scan.hits)''',
+        [REFSSWAP + 'test_the_preview_counts_a_shared_number_once_and_says_it_is_shared'],
+        'the preview would list a number twice that the act changes once',
+    ),
+    Guard(
+        'the entry carries its own new id', REFERENCE_TOOLS,
+        '''            entry.set("id", slot)''',
+        '''            pass''',
+        [REFSNUMBER + 'test_the_entry_its_own_id_and_every_reference_move'],
+        'the engine subscripts a table by id and each entry repeats it: a moved entry with its old id is one the engine cannot find',
+    ),
+    Guard(
+        'the map tree key moves with the map', REFERENCE_TOOLS,
+        '''        keyed = [(plan.mapping.get(key, key) if type(key) is int else key,''',
+        '''        keyed = [(key,''',
+        [REFSMAP + 'test_the_file_the_tree_key_and_every_transfer_follow'],
+        'a map file renamed under a tree entry that still has the old key is a map the editor shows nowhere',
+    ),
+    Guard(
+        'a map swap exchanges the files', REFERENCE_TOOLS,
+        '''            project.exchange_cached(project.map_file(plan.from_id),
+                                    project.map_file(plan.to_id))''',
+        '''            pass''',
+        [REFSMAP + 'test_two_maps_swap_files_tree_entries_and_transfers'],
+        'swapping the tree entries and the transfers but not the map files leaves every map under the wrong name',
+    ),
+    Guard(
+        'children follow a renumbered map', REF_SITES,
+        '''    FieldRule(_L_TREE, ("map_infos",), ("parent_id",), "maps"),''',
+        '''    FieldRule(_L_TREE, ("map_infos",), ("parent_id_",), "maps"),''',
+        [REFSMAP + 'test_the_parent_the_system_and_the_vehicles_follow_map_1'],
+        'a child whose parent_id is not rewritten hangs off a map that no longer exists, and the editor drops it from the tree',
+    ),
+    Guard(
+        'a failed write puts the earlier files back', REFERENCE_TOOLS,
+        '''        failed = _roll_back(project, done, originals)''',
+        '''        failed = []''',
+        [REFSATOMIC + 'test_a_failure_on_the_last_file_puts_the_earlier_ones_back'],
+        'a renumber that stops half way leaves the entry moved in one file and not referenced from the next',
+    ),
+    Guard(
+        'every file is checked for staleness before the first write', REFERENCE_TOOLS,
+        '''    project.check_fresh(*in_place, *([old] if old else []))''',
+        '''    pass''',
+        [REFSATOMIC + 'test_a_file_changed_by_the_editor_is_noticed_before_a_write'],
+        'the cheapest failure is the one before anything is written; discovering the editor holds the sixth file after writing five is a rollback that did not need to happen',
+    ),
+    Guard(
+        'a renumber on a read-only server is refused before any work', REFERENCE_TOOLS,
+        '''    project.require_writable("renumbering %s %d" % (plan.table, plan.from_id))''',
+        '''    pass''',
+        [REFSREADONLY + 'test_a_renumber_is_refused_before_anything_is_prepared'],
+        'the refusal came from the first save, after a project-wide scan, wrapped in a claim that files were "put back" which were never written',
+    ),
+    Guard(
+        'references does not count script mentions as references', REFERENCE_TOOLS,
+        '''        "kind": kind, "id": ident, "total": scan.total,''',
+        '''        "kind": kind, "id": ident, "total": scan.total + scan.mention_total,''',
+        [REFSMENTION + 'test_a_script_naming_the_number_is_counted_apart'],
+        'a text match in Ruby is a guess; folding it into total makes the guess look like a reference a rewrite would change',
+    ),
+    Guard(
+        'a script mention takes at most nine digits', REF_SITES,
+        '''_NUM = r"\\s*([0-9]{1,9})\\s*"''',
+        '''_NUM = r"\\s*([0-9]+)\\s*"''',
+        [REFSHOSTILE + 'test_a_script_mention_scan_ignores_a_run_of_digits_past_the_limit'],
+        'int() of a 5,000-digit run in a script raises past 4300 digits and ended the whole scan',
+    ),
+    Guard(
+        'references lists at most 200 sites', REFERENCE_TOOLS,
+        '''MAX_SITES = 200''',
+        '''MAX_SITES = 2000''',
+        [REFSARGS + 'test_the_ceilings_are_the_advertised_numbers'],
+        'the advertised ceiling on a reply is a number a caller plans around',
+    ),
+    Guard(
+        'references pages at most 100,000 deep', REFERENCE_TOOLS,
+        '''MAX_OFFSET = 100_000''',
+        '''MAX_OFFSET = 1_000_000''',
+        [REFSARGS + 'test_the_ceilings_are_the_advertised_numbers'],
+        'the advertised ceiling on a reply is a number a caller plans around',
+    ),
+    Guard(
+        'an inactive page condition is not a reference', REF_SITES,
+        '''            if target != self.kind or cond.get(valid) is not True:''',
+        '''            if target != self.kind:''',
+        [REFSUSED + 'test_an_inactive_page_condition_is_not_a_reference'],
+        'every new page carries switch 1, variable 1, item 1 and actor 1 in fields whose flag is off; counting them makes everything look used everywhere and a renumber rewrite every page',
+    ),
+    Guard(
+        'a list inside an entry is charged per element', REF_SITES,
+        '''                if not self.budget.spend(1):
+                    return
+                shown = "%s[%d]" % (rendered, position)''',
+        '''                shown = "%s[%d]" % (rendered, position)''',
+        [REFSHOSTILE + 'test_a_list_of_a_million_links_is_stopped_not_walked'],
+        'a Marshal link to a million-element list inside one class is a product of the owner count and the list length, both from the file',
+    ),
+    Guard(
+        'a hash key that is not a small integer is never formatted', REF_SITES,
+        '''                    if _int(entry_id) is None \\
+                            or not isinstance(entry, RubyObject):''',
+        '''                    if not isinstance(entry, RubyObject):''',
+        [REFSHOSTILE + 'test_a_map_tree_key_that_is_a_bignum_is_not_formatted'],
+        'str() of a Bignum key raises past 4300 digits, out of the location the key is formatted into',
+    ),
+    Guard(
+        'a delete preview says when it skipped a file it could not read', REFERENCES,
+        '''    unread = unreadable_sources(project)
+    if unread:''',
+        '''    unread = unreadable_sources(project)
+    if False:''',
+        [REFSUNREAD + 'test_a_db_delete_preview_says_a_map_was_not_read'],
+        'iter_command_lists skips an unparseable map silently, so "nothing points at this" was said about a project nobody finished reading',
+    ),
+    Guard(
+        'an id above the maximum is refused without formatting it', REGISTRY,
+        '''        raise ToolError("%s must be at most %d, got %s"
+                        % (what, maximum, echo(value)))''',
+        '''        raise ToolError("%s must be at most %d, got %d"
+                        % (what, maximum, value))''',
+        [REFSARGS + 'test_each_wrong_id_is_a_clean_refusal'],
+        '%d of a 5,000-digit integer raises a bare ValueError past 4300 digits instead of the refusal the schema promises',
+    ),
+    Guard(
+        'an id below the minimum is refused without formatting it', REGISTRY,
+        '''        raise ToolError("%s must be at least %d, got %s"
+                        % (what, minimum, echo(value)))''',
+        '''        raise ToolError("%s must be at least %d, got %d"
+                        % (what, minimum, value))''',
+        [REFSARGS + 'test_each_wrong_id_is_a_clean_refusal'],
+        '%d of a -5,000-digit integer raises a bare ValueError past 4300 digits instead of the refusal the schema promises',
+    ),
+    Guard(
+        'a name is not set to what it already is', REFERENCE_TOOLS,
+        '''        if before == name:''',
+        '''        if False:''',
+        [REFSRENAME + 'test_the_same_name_is_refused'],
+        'a rename that changes nothing reports a write and logs a change that never happened',
+    ),
+    Guard(
+        'a name is one line of text', REFERENCE_TOOLS,
+        '''    if any(ord(char) < 32 or ord(char) == 127 for char in name):''',
+        '''    if False:''',
+        [REFSRENAME + 'test_a_name_is_one_line_of_text'],
+        'a newline or an escape in a switch name is shown raw by every tool that lists System',
     ),
 ]

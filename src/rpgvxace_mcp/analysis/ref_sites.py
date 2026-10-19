@@ -946,7 +946,8 @@ class _Scanner:
                         return
                     # A Hash key is whatever the file put there, and it is
                     # about to be formatted into a location.
-                    if _int(entry_id) is None                             or not isinstance(entry, RubyObject):
+                    if _int(entry_id) is None \
+                            or not isinstance(entry, RubyObject):
                         continue
                     self._apply_rule(
                         rule, entry, file,
