@@ -813,6 +813,13 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
         "live op=teleport": "moves the player in the running game",
         "live op=screenshot": "captures the scratch game's window",
         "live op=eval": "runs Ruby in the scratch game",
+        # `event_template` writes only through op=create, which has its own
+        # preview below. The other three never reach a file: list and
+        # describe read the built-in table, and preview is create with the
+        # write switched off.
+        "event_template op=list": "lists the built-in templates",
+        "event_template op=describe": "describes one built-in template",
+        "event_template op=preview": "shows what create would write",
     }
 
     def setUp(self):
@@ -843,6 +850,9 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
             ("db_edit op=delete", "db_edit",
              dict(table="items", dry_run=True,
                   ops=[{"op": "delete", "id": 1}])),
+            ("event_template op=create", "event_template",
+             dict(op="create", template="sign", map_id=1, x=1, y=1,
+                  parameters={"lines": ["Hi"]}, dry_run=True)),
             ("event_edit op=update", "event_edit",
              dict(map_id=1, dry_run=True,
                   ops=[{"op": "update", "event_id": 1, "name": "Renamed"}])),

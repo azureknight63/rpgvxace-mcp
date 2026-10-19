@@ -60,6 +60,7 @@ from rpgvxace_mcp.tools.registry import (  # noqa: E402
 from rpgvxace_mcp.tools import (  # noqa: E402,F401
     command_docs_tools,
     db_tools,
+    event_template_tools,
     event_tools,
     live_tools,
     map_common,
