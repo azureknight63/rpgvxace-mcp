@@ -791,6 +791,7 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
         "raw_data op=get": "reads one value by path",
         "scripts op=list": "lists the script slots",
         "scripts op=get": "reads one slot's code",
+        "map_stamp op=list": "lists the stamps kept in the work folder",
         # `live` changes a running scratch copy of the game, never a project
         # file, so there is no write to preview. Each op still needs its own
         # line: an excuse names one op, so a new op is not excused by these.
@@ -815,6 +816,9 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
         self.slot = self.call("scripts", op="list")["scripts"][0]["index"]
         self.backup = self.call("backups", op="create",
                                 label="fixture")["backup"]
+        # A stamp to paste and to delete.
+        self.call("map_stamp", op="copy", name="fixture", map_id=1, x=0, y=0,
+                  width=2, height=2)
 
     def previews(self):
         """One dry-run call per writing op, as (label, tool, arguments).
@@ -900,6 +904,14 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
             ("map_paint op=dungeon", "map_paint",
              dict(op="dungeon", map_id=2, floor="A2:0", wall="A4:8",
                   room_min=2, room_max=3, rooms=2, dry_run=True)),
+            ("map_stamp op=copy", "map_stamp",
+             dict(op="copy", name="preview", map_id=1, x=4, y=3, width=4,
+                  height=3, dry_run=True)),
+            ("map_stamp op=paste", "map_stamp",
+             dict(op="paste", name="fixture", map_id=2, x=2, y=2,
+                  dry_run=True)),
+            ("map_stamp op=delete", "map_stamp",
+             dict(op="delete", name="fixture", dry_run=True)),
             ("scripts op=set", "scripts",
              dict(op="set", index=self.slot, name="Renamed", dry_run=True)),
             ("raw_data op=set", "raw_data",

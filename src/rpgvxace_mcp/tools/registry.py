@@ -755,10 +755,14 @@ def as_int(value: Any, what: str, minimum: int | None = None,
         value = int(value)
     if not isinstance(value, int):
         raise ToolError("%s must be a whole number, got %s" % (what, echo(value)))
+    # `echo`, not `%d`: an Integer past 4300 digits raises ValueError when
+    # formatted, so the refusal of a huge value was itself the crash.
     if minimum is not None and value < minimum:
-        raise ToolError("%s must be at least %d, got %d" % (what, minimum, value))
+        raise ToolError("%s must be at least %d, got %s"
+                        % (what, minimum, echo(value)))
     if maximum is not None and value > maximum:
-        raise ToolError("%s must be at most %d, got %d" % (what, maximum, value))
+        raise ToolError("%s must be at most %d, got %s"
+                        % (what, maximum, echo(value)))
     return value
 
 

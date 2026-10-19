@@ -185,6 +185,21 @@ HOSTILEINFO = _at("test_hostile_input", "TestProjectInfoRefreshRereadsTheScripts
 HOSTILERAW = _at("test_hostile_input", "TestRawDataRefusesBeforeItLoadsAndKeepsItsShapeGuard")
 VOCABTILES = _at("test_guards_replies", "TestOneVocabularyForAPartialAnswer")
 HOSTILERE = _at("test_hostile_input", "TestTheRereviewOfTheScrubFixes")
+# test_map_stamp_tools
+MAP_STAMP = _SRC + "tools/map_stamp_tools.py"
+STAMPGEOM = _at("test_map_stamp_tools", "TestTheGeometry")
+STAMPCOPY = _at("test_map_stamp_tools", "TestCopyListDelete")
+STAMPNAMES = _at("test_map_stamp_tools", "TestNames")
+STAMPPASTE = _at("test_map_stamp_tools", "TestPasteTiles")
+STAMPAUTO = _at("test_map_stamp_tools", "TestAutotilesFollowTheTurn")
+STAMPEVENTS = _at("test_map_stamp_tools", "TestEvents")
+STAMPFLAGS = _at("test_map_stamp_tools", "TestPositionDependentCommands")
+STAMPENGINE = _at("test_map_stamp_tools", "TestAnotherEngine")
+STAMPVX = _at("test_map_stamp_tools", "TestOnVX")
+STAMPHOSTILE = _at("test_map_stamp_tools", "TestAStampIsUntrustedInput")
+STAMPBUDGET = _at("test_map_stamp_tools", "TestTheWalksAreBudgeted")
+STAMPCEIL = _at("test_map_stamp_tools", "TestTheCeilingsAreEnforcedAndAdvertised")
+STAMPARGS = _at("test_map_stamp_tools", "TestArgumentsAreStrict")
 HOSTILEZ = _at("test_hostile_input", "TestAFloatKeepsItsSign")
 HOSTILEID = _at("test_hostile_input", "TestAnEntryIdBelowZeroIsRefused")
 CONVBYTES = _at("test_convert_input", "TestAStringThatDoesNotComeBackTravelsAsBytes")
@@ -4032,5 +4047,279 @@ GUARDS = [
         '''                   if p.is_file()),''',
         [HOSTILERENDER + 'test_only_its_own_pictures_are_trimmed'],
         'the glob wildcard ? matches any character: a map-0001-holidaypic.png kept in a shared --render-dir counted as ours and was trimmed',
+    ),
+    Guard(
+        'a stamp name is judged before anything touches the disk', MAP_STAMP,
+        '''    if len(name) > MAX_STAMP_NAME or not _NAME.match(name):''',
+        '''    if False:''',
+        [STAMPNAMES + 'test_only_plain_names_are_taken'],
+        'a stamp name reaches the filesystem: a separator, a drive letter or a dot would carry the write out of the stamp folder',
+    ),
+    Guard(
+        'a stamp may not be named for a Windows device', MAP_STAMP,
+        '''    if name.lower() in _RESERVED:''',
+        '''    if False:''',
+        [STAMPNAMES + 'test_a_windows_device_name_is_refused'],
+        'CON.json is the console on Windows: a stamp so named opens a device rather than a file',
+    ),
+    Guard(
+        'the stamp folder is judged to lie in the project before it is made', MAP_STAMP,
+        '''    _contained(folder, ctx.project.root, "the stamp folder")''',
+        '''    pass''',
+        [STAMPNAMES + 'test_a_work_folder_that_leads_outside_is_refused_before_anything_is_made',
+         STAMPNAMES + 'test_a_stamps_folder_that_leads_outside_is_refused_before_anything_is_made'],
+        'a link planted as .rpgvxace-mcp or stamps carried the mkdir, and then the stamp, to wherever it pointed',
+    ),
+    Guard(
+        'a stamp file that is a link is not followed', MAP_STAMP,
+        '''    if _is_reparse_point(path):
+        raise ToolError(
+            "stamp '%s' is a link,''',
+        '''    if False:
+        raise ToolError(
+            "stamp '%s' is a link,''',
+        [STAMPNAMES + 'test_a_stamp_file_that_reads_as_a_link_is_refused_on_paste'],
+        'a link planted as NAME.json would read whatever file it points at as a stamp',
+    ),
+    Guard(
+        'a listing does not open a link', MAP_STAMP,
+        '''            if _is_reparse_point(path):
+                not_read[name] =''',
+        '''            if False:
+                not_read[name] =''',
+        [STAMPNAMES + 'test_a_listed_stamp_that_reads_as_a_link_is_not_opened'],
+        'list parsed every file it found, so a link planted in the stamp folder was read by it too',
+    ),
+    Guard(
+        'a stamp file over the byte ceiling is refused before it is parsed', MAP_STAMP,
+        ['''    if size > MAX_STAMP_FILE_BYTES:
+        raise ToolError(''',
+         '''    if len(raw) > MAX_STAMP_FILE_BYTES:'''],
+        ['''    if False:
+        raise ToolError(''',
+         '''    if False:'''],
+        [STAMPHOSTILE + 'test_a_file_over_the_byte_ceiling_is_refused_before_it_is_parsed'],
+        'a stamp file is the one input here whose size nothing else bounds: it was read and parsed whole, whatever it held',
+    ),
+    Guard(
+        'a stamp from another engine is refused', MAP_STAMP,
+        '''    if data["engine"] != engine:''',
+        '''    if False:''',
+        [STAMPENGINE + 'test_a_stamp_from_another_engine_is_refused'],
+        'tile ids, autotile layouts and event commands differ between VX Ace, VX and XP: a stamp pasted across them is wrong in ways nothing reports',
+    ),
+    Guard(
+        'a stamp cell is held to the tile ceiling', MAP_STAMP,
+        '''        if not 0 <= value <= ceiling:''',
+        '''        if False:''',
+        [STAMPHOSTILE + 'test_every_cell_is_checked_against_the_tile_ceiling'],
+        'Table cells are masked to 16 bits when stored: an out-of-range id in a hand-edited stamp was written as some other tile',
+    ),
+    Guard(
+        'a layer-3 stamp word may set only region and shadow bits', MAP_STAMP,
+        '''        if z == META_LAYER and value & ~META_LAYER_BITS:''',
+        '''        if False:''',
+        [STAMPHOSTILE + 'test_a_layer_three_word_may_set_only_region_and_shadow_bits'],
+        'a tile id in layer 3 sets bits nothing reads: it is a cell written to the wrong layer, not a region',
+    ),
+    Guard(
+        'a stamp layer holds exactly width times height cells', MAP_STAMP,
+        '''    if not isinstance(cells, list) or len(cells) != expected:''',
+        '''    if False:''',
+        [STAMPHOSTILE + 'test_the_dimensions_must_agree_with_the_cells'],
+        'a layer shorter or longer than its dimensions shifted every row after it, or wrote past the rectangle',
+    ),
+    Guard(
+        'a stamp file holds at most MAX_STAMP_EVENTS events', MAP_STAMP,
+        '''    if len(events) > MAX_STAMP_EVENTS:
+        raise _bad(''',
+        '''    if False:
+        raise _bad(''',
+        [STAMPHOSTILE + 'test_events_are_bounded_by_count_and_position'],
+        'each stamped event is built through the command compiler: the count of them in a hand-edited file was unbounded',
+    ),
+    Guard(
+        'a stamp file holds at most MAX_STAMP_CELLS cells', MAP_STAMP,
+        '''    if count > MAX_STAMP_CELLS:''',
+        '''    if False:''',
+        [STAMPHOSTILE + 'test_dimensions_are_bounded'],
+        'width and height are each bounded and their product is the work: 5000 by 5000 is 25 million cells declared by 20 bytes',
+    ),
+    Guard(
+        'a copy keeps at most MAX_STAMP_CELLS cells', MAP_STAMP,
+        '''    if width * height > MAX_STAMP_CELLS:''',
+        '''    if False:''',
+        [STAMPCEIL + 'test_too_many_cells_is_refused_on_copy'],
+        'every cell kept is a Python-level read, a number in the file and a cell to turn and check on every paste',
+    ),
+    Guard(
+        'a copy refuses a rectangle holding more events than a stamp keeps', MAP_STAMP,
+        '''    if len(found) > MAX_STAMP_EVENTS:''',
+        '''    if False:''',
+        [STAMPEVENTS + 'test_a_stamp_with_more_events_than_the_ceiling_is_refused'],
+        'copying only the first events of a rectangle would be a stamp that pastes a room with its chests missing and says nothing',
+    ),
+    Guard(
+        'a stamp that would not fit its file is refused on copy', MAP_STAMP,
+        '''    if len(body) > MAX_STAMP_FILE_BYTES:''',
+        '''    if False:''',
+        [STAMPCEIL + 'test_a_stamp_too_big_for_its_file_is_refused_on_copy'],
+        'a stamp written over the ceiling is one this server then refuses to read back',
+    ),
+    Guard(
+        'the folder keeps at most MAX_STAMPS stamps', MAP_STAMP,
+        '''    if len(kept) >= MAX_STAMPS:''',
+        '''    if False:''',
+        [STAMPCEIL + 'test_too_many_stamps_is_refused_on_copy'],
+        'every copy adds a file to the project folder, and list opens them all',
+    ),
+    Guard(
+        'a copy never overwrites an existing stamp', MAP_STAMP,
+        '''    if path.exists():
+        raise ToolError("a stamp named''',
+        '''    if False:
+        raise ToolError("a stamp named''',
+        [STAMPCOPY + 'test_copying_over_a_name_is_refused'],
+        'a second copy under a name silently replaced the stamp the caller had been pasting from',
+    ),
+    Guard(
+        'a dry-run copy writes nothing', MAP_STAMP,
+        '''    if not dry_run:
+        _write_stamp(folder, path, name, body)''',
+        '''    if True:
+        _write_stamp(folder, path, name, body)''',
+        [STAMPCOPY + 'test_a_dry_run_copy_stores_nothing_and_makes_no_folder'],
+        'a preview that stores the stamp is not a preview',
+    ),
+    Guard(
+        'a turn is refused where the autotile shapes cannot be re-derived', MAP_STAMP,
+        '''    if not turn.identity and engine != "vx_ace":''',
+        '''    if False:''',
+        [STAMPVX + 'test_a_plain_stamp_works_and_a_turn_is_refused'],
+        'a mirrored or rotated stamp on VX or XP kept shape numbers chosen for the old orientation, and nothing could say they were wrong',
+    ),
+    Guard(
+        'a paste writes only the cells that lie on the map', MAP_STAMP,
+        ['''    inside_width = min(new_width, data.xsize - x)''',
+         '''    inside_height = min(new_height, data.ysize - y)'''],
+        ['''    inside_width = new_width''',
+         '''    inside_height = new_height'''],
+        [STAMPPASTE + 'test_a_paste_that_runs_past_the_edge_is_clipped_and_says_so'],
+        'a row slice assigned past the right edge of the map lands in the next row, and one past the bottom is not a cell at all',
+    ),
+    Guard(
+        'the ring around a paste is re-shaped to join it', MAP_STAMP,
+        '''            around = neighbourhood(layer, rectangle)''',
+        '''            around = rectangle''',
+        [STAMPAUTO + 'test_the_ring_around_a_paste_joins_it',
+         STAMPAUTO + 'test_every_turn_matches_the_layout_painted_in_that_turn'],
+        'a stamp pasted beside a different tile left that tile showing an edge toward a neighbour that was no longer there',
+    ),
+    Guard(
+        'a turned stamp re-shapes its own cells even with reshape_edges off', MAP_STAMP,
+        '''        elif not turn.identity:
+            changed += reshape(layer, rectangle)''',
+        '''        elif False:
+            changed += reshape(layer, rectangle)''',
+        [STAMPAUTO + 'test_without_reshape_edges_a_turned_stamp_still_reshapes_its_own_cells'],
+        'the shape an autotile carries was chosen for the orientation it was copied in: kept after a turn it is a valid id that draws the wrong edge',
+    ),
+    Guard(
+        'a turn moves the shadow quarters of a layer-3 word', MAP_STAMP,
+        '''                value = (value & ~MAX_SHADOW) | turn.shadow(value)''',
+        '''                value = value''',
+        [STAMPGEOM + 'test_a_shadow_word_moves_its_quarters_and_keeps_its_region',
+         STAMPPASTE + 'test_mirror_horizontal_pastes_the_columns_reversed'],
+        'the shadow in a cell is drawn in four quarters: mirrored with its cell and not within it, a wall shadow fell on the wrong side',
+    ),
+    Guard(
+        'a pasted event never lands on another event', MAP_STAMP,
+        '''        if at in occupied:''',
+        '''        if False:''',
+        [STAMPEVENTS + 'test_an_event_landing_on_another_is_skipped_and_never_overwrites'],
+        'two events on one tile: the editor cannot select the lower one, and the interpreter runs both',
+    ),
+    Guard(
+        'a pasted event off the map is skipped with a reason', MAP_STAMP,
+        '''        if not on_map(at[0], at[1], width, height):''',
+        '''        if False:''',
+        [STAMPEVENTS + 'test_an_event_past_the_edge_is_skipped_with_the_reason'],
+        'an event placed outside the map cannot be selected in the editor, and its stamp cell was clipped away with it',
+    ),
+    Guard(
+        'pasted events take the lowest free ids', MAP_STAMP,
+        '''        while next_id in used:''',
+        '''        while False:''',
+        [STAMPEVENTS + 'test_new_ids_fill_the_lowest_free_slots_in_order'],
+        'an id already in use replaced the event that held it in the map: the paste deleted an event without saying so',
+    ),
+    Guard(
+        'a pasted event faces the way the turn sends it', MAP_STAMP,
+        '''                                turn.facing(graphic.get("direction")))''',
+        '''                                graphic.get("direction"))''',
+        [STAMPEVENTS + 'test_a_mirror_turns_the_way_the_event_faces'],
+        'a mirrored room kept every character looking the way they faced before the mirror',
+    ),
+    Guard(
+        'a copy that cannot see every event is refused rather than short', MAP_STAMP,
+        '''        if not budget.spend(1):
+            raise ToolError(budget.note("a stamp") or "the walk stopped")
+        if (type(key) is int and isinstance(event, RubyObject)''',
+        '''        if False:
+            raise ToolError(budget.note("a stamp") or "the walk stopped")
+        if (type(key) is int and isinstance(event, RubyObject)''',
+        [STAMPBUDGET + 'test_a_copy_that_cannot_see_every_event_is_refused_not_short'],
+        'the events hash is as long as the file says: walking it unbudgeted let a crafted map hold the server',
+    ),
+    Guard(
+        'a paste that cannot see every event is refused and writes nothing', MAP_STAMP,
+        '''        if not budget.spend(1):
+            raise ToolError(budget.note("a stamp") or "the walk stopped")
+        if type(key) is int:''',
+        '''        if False:
+            raise ToolError(budget.note("a stamp") or "the walk stopped")
+        if type(key) is int:''',
+        [STAMPBUDGET + 'test_a_paste_that_cannot_see_every_event_is_refused_and_writes_nothing'],
+        'a partial view of the occupied cells and used ids is how an event gets overwritten',
+    ),
+    Guard(
+        'a paste re-shapes at most MAX_STAMP_RESHAPE_CELLS cells', MAP_STAMP,
+        '''            if len(around) > MAX_STAMP_RESHAPE_CELLS:''',
+        '''            if False:''',
+        [STAMPBUDGET + 'test_a_paste_that_would_reshape_too_much_is_refused_whole'],
+        'every wall run beside a paste is walked in full: the cell count is the work, and wall runs make it larger than the stamp',
+    ),
+    Guard(
+        'Set Event Location is reported as position dependent', MAP_STAMP,
+        '''        elif code == codes["locate"]:''',
+        '''        elif False:''',
+        [STAMPFLAGS + 'test_set_event_location_is_always_flagged'],
+        'a Set Event Location to absolute coordinates sends the event to the old place once the stamp moves, and nothing says so until it is played',
+    ),
+    Guard(
+        'a transfer to the map a stamp is pasted into is reported', MAP_STAMP,
+        '''            if where:''',
+        '''            if False:''',
+        [STAMPFLAGS + 'test_a_transfer_to_another_map_is_not_flagged_but_to_the_same_one_is',
+         STAMPFLAGS + 'test_a_transfer_to_the_map_the_stamp_came_from_is_flagged_on_copy'],
+        'a door pasted onto the map it leads to sends the player to coordinates that were chosen for another place',
+    ),
+    Guard(
+        'a directional move route is reported when the stamp is turned', MAP_STAMP,
+        '''        if self.turned and directional:''',
+        '''        if False:''',
+        [STAMPFLAGS + 'test_a_directional_move_route_is_flagged_only_when_the_stamp_is_turned'],
+        'a mirrored stamp kept moves that walk the old way: an NPC pacing into a wall',
+    ),
+    Guard(
+        'a refused integer is described without formatting it', REGISTRY,
+        ['''        raise ToolError("%s must be at least %d, got %s"
+                        % (what, minimum, echo(value)))''',
+         '''        raise ToolError("%s must be at most %d, got %s"
+                        % (what, maximum, echo(value)))'''],
+        ['''        raise ToolError("%s must be at least %d, got %d" % (what, minimum, value))''',
+         '''        raise ToolError("%s must be at most %d, got %d" % (what, maximum, value))'''],
+        [STAMPARGS + 'test_hostile_values_are_refused_not_crashed'],
+        'an Integer past 4300 digits raises ValueError when formatted with %d: the refusal of a huge argument was itself the failure, with CPython\'s text instead of the argument\'s name',
     ),
 ]
