@@ -361,8 +361,14 @@ def _start(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
             "live session runs a copy and never writes the project, but "
             "--read-only means nothing is launched either.")
     if ctx.project.engine != "vx_ace":
-        raise ToolError("live sessions drive RPG Maker VX Ace games; this "
-                        "project is %s" % ctx.project.profile.label)
+        raise ToolError(
+            "live sessions drive RPG Maker VX Ace games, and this project "
+            "is %s. The bridge a session injects is written for RGSS3 "
+            "(Ruby 1.9.2, VX Ace's window and Input) and has not been "
+            "written or tried for RGSS1 or RGSS2, whose scripts, Ruby 1.8 "
+            "and engine libraries differ; no VX or XP engine exists here to "
+            "build and test one against. See docs/engine_parity.md."
+            % ctx.project.profile.label)
     allow_eval = opt_bool(args, "allow_eval")
     if allow_eval and not ctx.project.allow_live_eval:
         raise ToolError(_EVAL_NOT_ALLOWED + " No game was started; start "

@@ -20,15 +20,16 @@ import re
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..project import MAX_MAP_ID, _contained
 from ..render import overlays as marks, png
 from ..render.canvas import resize_nearest, to_rgb
+from ..render.layouts import ACE_LAYOUT, VX_LAYOUT, Layout, xp_layout
 from ..render.scene import Sprite, TileGrid, render_map
-from ..render.tiles import SHEET_NAMES, TILE, sheet_needed
+from ..render.tiles import SHEET_NAMES, TILE
 from ..rubytypes import RubyHash, RubyObject, Table, as_list
-from ..schema import TILE_LAYER_COUNT, on_map
+from ..schema import TILE_LAYER_COUNT, XP_AUTOTILES, on_map
 from .map_common import _check_budget
 from .registry import (
     ARR,
@@ -137,6 +138,102 @@ def _load_graphic(ctx: Context, kind: str, name: str) -> png.Image:
         raise ToolError("%s: %s" % (path.name, exc)) from exc
 
 
+# Why VX is refused unless the call asks for the remembered numbering, and what
+# is and is not established. The facts are in docs/engine_parity.md.
+_VX_REFUSAL = (
+    "map_render does not draw RPG Maker VX maps unless you pass "
+    "unverified_formats=true. What is established: VX keeps its tile graphics "
+    "in Graphics/System as TileA1 to TileA5 and TileB to TileE, in the same "
+    "sizes as VX Ace's. What is not: how VX numbers its tile ids and "
+    "autotile shapes in map data (no VX project exists to check this "
+    "server's table against) and what its flag table holds, so a picture "
+    "could be wrong in ways nobody could tell from a right one. With "
+    "unverified_formats=true it is drawn with VX Ace's numbering and the "
+    "reply carries an engine_warning; map_tiles reads the tile ids without "
+    "guessing. See docs/engine_parity.md.")
+
+
+class _Plan(NamedTuple):
+    """How one call draws, decided before the map is read."""
+
+    layout: Layout
+    engine: str
+    unverified: bool
+
+
+def _plan(ctx: Context, args: dict[str, Any], overlays: list[str]) -> _Plan:
+    """The layout for this project, or the refusal that says what is missing."""
+    project = ctx.project
+    engine = project.engine
+    unverified = opt_bool(args, "unverified_formats")
+    if engine == "vx_ace":
+        return _Plan(ACE_LAYOUT, engine, unverified)
+    if engine not in ("vx", "xp"):
+        raise ToolError(
+            "map_render draws VX Ace maps (and, with its caveats, VX and "
+            "XP), and this is an %s project. Use map_tiles to read the "
+            "tile ids instead." % project.profile.label)
+    short = "XP" if engine == "xp" else "VX"
+    if engine == "vx" and not unverified:
+        raise ToolError(_VX_REFUSAL)
+    layout = VX_LAYOUT if engine == "vx" \
+        else xp_layout(autotiles=unverified, characters=unverified)
+    if opt_bool(args, "regions"):
+        raise ToolError("%s has no region layer, so regions has nothing to "
+                        "draw." % short)
+    missing = [name for name in overlays if name not in layout.overlays]
+    if missing:
+        if engine == "xp":
+            why = ("XP keeps three tables (passages, priorities and "
+                   "terrain_tags) where VX Ace has one flag word, and how "
+                   "its Game_Map combines them is not established here; "
+                   "unverified_formats does not change that")
+        else:
+            why = ("VX's flag table (the System file's passages) is not "
+                   "modelled here")
+        raise ToolError(
+            "the %s overlay is not drawn for %s: %s. event_ids can be "
+            "drawn; map_tiles and db_get read the tables themselves. See "
+            "docs/engine_parity.md." % (", ".join(missing), short, why))
+    return _Plan(layout, engine, unverified)
+
+
+def _engine_warning(plan: _Plan, flag_entries: int) -> str:
+    """What a reader of an XP or VX picture must not take for granted."""
+    if plan.engine == "xp" and not plan.unverified:
+        return (
+            "RPG Maker XP map, drawn from the facts this server has on "
+            "record (docs/engine_parity.md): tileset tiles, above or below "
+            "characters by whether their priority is 0. Not drawn: autotile "
+            "cells (their 48-pattern table is the engine's and is not "
+            "verified; the ground is often autotiles), character graphics "
+            "(numbered markers instead), passability and terrain tags, "
+            "animation, panorama and fog. Pass unverified_formats=true to "
+            "draw autotiles and characters from remembered formats; the "
+            "picture may then be wrong.")
+    if plan.engine == "xp":
+        return (
+            "RPG Maker XP map drawn with unverified_formats: autotiles use a "
+            "48-pattern table and 96 x 128 graphic layout that were "
+            "remembered, not read from XP (frame 0 of an animated one), and "
+            "characters a remembered 4 x 4 sheet layout. Tiles go above "
+            "characters when their priority is not 0, whatever the number. "
+            "Not drawn: passability, terrain tags, animation, panorama, fog. "
+            "The picture may be wrong; docs/engine_parity.md says where.")
+    return (
+        "RPG Maker VX map drawn with unverified_formats: VX Ace's tile id "
+        "bands, autotile shape numbering and block layout applied to "
+        "Graphics/System/TileA1..TileE. The sheet names and sizes were "
+        "measured on VX tile packs; the numbering was not checked against "
+        "any VX map. VX's flag table is read from the System file's "
+        "passages, %s. The picture may be wrong; "
+        "docs/engine_parity.md says where."
+        % ("and tiles with its star bit are drawn above characters "
+           "(%d entries)" % flag_entries
+           if flag_entries else "which this project does not have, so no "
+                                "tile is drawn above characters"))
+
+
 def _tileset_of(ctx: Context, game_map: RubyObject, refresh: bool
                 ) -> tuple[int, RubyObject]:
     tileset_id = game_map.get("tileset_id")
@@ -149,6 +246,30 @@ def _tileset_of(ctx: Context, game_map: RubyObject, refresh: bool
                         "have, so its tiles have no sheets to be cut from"
                         % tileset_id)
     return tileset_id, entry
+
+
+def _sheet_files(ctx: Context, plan: _Plan, tileset: RubyObject
+                 ) -> "list[tuple[str, str, str]]":
+    """``(sheet key, file name, asset kind)`` for every sheet the layout cuts.
+
+    Ace: the nine names a tileset lists, in Graphics/Tilesets. VX: the same
+    nine sheets as ``Tile`` plus their letter, in Graphics/System. XP: the one
+    tileset graphic and seven autotile graphics (Graphics/Autotiles).
+    """
+    if plan.engine == "vx_ace":
+        names = as_list(tileset.get("tileset_names"))
+        return [(sheet, decoded(ctx, names[index]) if index < len(names)
+                 else "", "tilesets")
+                for index, sheet in enumerate(SHEET_NAMES)]
+    if plan.engine == "vx":
+        return [(sheet, "Tile" + sheet, "system") for sheet in SHEET_NAMES]
+    autotiles = as_list(tileset.get("autotile_names"))
+    out = [("tileset", decoded(ctx, tileset.get("tileset_name")), "tilesets")]
+    for number in range(1, XP_AUTOTILES + 1):
+        out.append(("autotile %d" % number,
+                    decoded(ctx, autotiles[number - 1])
+                    if number <= len(autotiles) else "", "autotiles"))
+    return out
 
 
 def _window(args: dict[str, Any], width: int, height: int
@@ -302,7 +423,8 @@ def _write_picture(ctx: Context, data: bytes, map_id: int) -> Path:
 @tool(
     "map_render",
     "Render a map to a PNG",
-    "Draw a VX Ace map as a picture you can look at: the tile layers with "
+    "Draw a map as a picture you can look at -- VX Ace fully, XP and VX "
+    "only as far as they are established (see engine_warning): the tile layers with "
     "autotiles joined as the editor stored them, the shadows (the low bits of "
     "layer 3), and every "
     "event as its first page's graphic (a coloured box with the event id "
@@ -331,7 +453,12 @@ def _write_picture(ctx: Context, data: bytes, map_id: int) -> Path:
     "and overlay_cells counts them. Digits are skipped below tile_size %d "
     "(counted, with overlays_note saying so). Not drawn: animation, "
     "parallax, weather, tint, counter-table fronts, later event pages (the "
-    "overlays also judge events by page 1). VX maps are refused."
+    "overlays also judge events by page 1). XP: tileset tiles are drawn, "
+    "autotiles and characters (markers instead) only with "
+    "unverified_formats; passability and terrain_tags are refused. VX: "
+    "refused unless unverified_formats, which draws with VX Ace's "
+    "numbering. Every XP or VX reply carries engine_warning. "
+    "docs/engine_parity.md has what is and is not known."
     % ("{:,}".format(MAX_INLINE_IMAGE_BYTES), MAX_KEPT_RENDERS, TILE, "{:,}".format(MAX_NATIVE_PIXELS),
        "{:,}".format(MAX_OUTPUT_PIXELS), "{:,}".format(png.MAX_PNG_BYTES),
        png.MAX_PNG_SIDE, "{:,}".format(png.MAX_PNG_PIXELS), MAX_OVERLAYS,
@@ -371,6 +498,12 @@ def _write_picture(ctx: Context, data: bytes, map_id: int) -> Path:
                          % (", ".join(marks.OVERLAY_NAMES), MAX_OVERLAYS),
                          items={"type": STR, "enum": list(marks.OVERLAY_NAMES)},
                          maxItems=MAX_OVERLAYS),
+        "unverified_formats": prop(
+            BOOL, "XP and VX only, default false, no effect on VX Ace. true "
+                  "draws what was remembered rather than verified: for XP "
+                  "its autotile pieces and character sheets, for VX the "
+                  "whole map with VX Ace's tile numbering. The picture may "
+                  "be wrong, and the reply says so in engine_warning."),
         "refresh": REFRESH,
     }, ["map_id"]),
 )
@@ -383,15 +516,8 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
     events = one_of(args, "events", list(RENDER_EVENTS), RENDER_EVENTS[0])
     overlays = scopes_arg(args, "overlays", marks.OVERLAY_NAMES, default=())
     project = ctx.project
-    if project.profile.tileset_layout != "ace":
-        raise ToolError(
-            "map_render draws VX Ace maps, and this is an %s project. VX "
-            "(RGSS2) has one global tileset in Graphics/System with a "
-            "different autotile layout; XP (RGSS1) has one tileset graphic and "
-            "seven autotiles whose 48 patterns its built-in Tilemap chooses, "
-            "and draws by a per-tile priority. This renderer models neither, "
-            "so drawing one would be a guess. Use map_tiles to read the tile "
-            "ids instead." % project.profile.label)
+    plan = _plan(ctx, args, overlays)
+    layout = plan.layout
 
     game_map = project.load_map(map_id, refresh)
     data = game_map.get("data")
@@ -417,8 +543,17 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
             "tool writes. Lower tile_size or narrow the window."
             % (out_w, out_h, out_w * out_h, MAX_OUTPUT_PIXELS))
 
-    tileset_id, tileset = _tileset_of(ctx, game_map, refresh)
-    flags_table = tileset.get("flags")
+    if plan.engine == "vx":
+        # VX has one global tileset: no row to read, and its flag table is
+        # (as far as is remembered) the System file's `passages`.
+        tileset_id, tileset = None, RubyObject("RPG::Tileset")
+        system = project.load_data("system", refresh)
+        flags_table = system.get("passages") if isinstance(
+            system, RubyObject) else None
+    else:
+        tileset_id, tileset = _tileset_of(ctx, game_map, refresh)
+        flags_table = tileset.get("priorities" if plan.engine == "xp"
+                                  else "flags")
     flags = flags_table.data if isinstance(flags_table, Table) else ()
     grid = TileGrid(data.xsize, data.ysize, data.zsize, data.data)
     # The overlays that mark events read them even when none is drawn.
@@ -428,25 +563,24 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
 
     # Only the sheets the window actually uses are opened: a decode costs
     # more than the drawing, and most maps use five of the nine.
-    wanted = {sheet_needed(t) for t in _ids_in(grid, window)}
+    wanted = {layout.sheet_needed(t) for t in _ids_in(grid, window)}
     if events == "graphics":
         # A marker draws no graphic, so it needs no sheet; decoding one here
         # also reported sheets "not read" that nothing drew.
-        wanted.update(sheet_needed(s.tile_id) for s in sprites if s.tile_id)
+        wanted.update(layout.sheet_needed(s.tile_id) for s in sprites
+                      if s.tile_id)
     wanted.discard(None)
-    names = as_list(tileset.get("tileset_names"))
     sheets: dict[str, png.Image | None] = {}
     unread: dict[str, str] = {}
-    for index, sheet_name in enumerate(SHEET_NAMES):
+    for sheet_name, file_name, kind in _sheet_files(ctx, plan, tileset):
         if sheet_name not in wanted:
             continue
-        file_name = decoded(ctx, names[index]) if index < len(names) else ""
         sheets[sheet_name] = None
         if not file_name:
             unread[sheet_name] = "the tileset names no file for this sheet"
             continue
         try:
-            sheets[sheet_name] = _load_graphic(ctx, "tilesets", file_name)
+            sheets[sheet_name] = _load_graphic(ctx, kind, file_name)
         except ToolError as exc:
             unread[sheet_name] = "%s: %s" % (file_name, exc)
 
@@ -470,7 +604,7 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
         grid, flags, sheets, window, sprites=sprites, sprite_mode=events,
         load_character=character, shadows=opt_bool(args, "shadows", True),
         regions=opt_bool(args, "regions"), show_grid=opt_bool(args, "grid"),
-        overlays=overlays, tile_size=tile_size)
+        overlays=overlays, tile_size=tile_size, layout=layout)
     picture = resize_nearest(result.image, out_w, out_h)
     encoded = png.encode(out_w, out_h, to_rgb(picture), 3)
     path = _write_picture(ctx, encoded, map_id)
@@ -482,14 +616,20 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
                   "bytes": path.stat().st_size, "inline": inline},
         "window": {"x": wx, "y": wy, "width": ww, "height": wh},
         "tile_size": tile_size,
-        "tileset": {"id": tileset_id,
-                    "name": decoded(ctx, tileset.get("name")),
-                    "mode": tileset.get("mode")},
+        "tileset": ({"id": tileset_id,
+                     "name": decoded(ctx, tileset.get("name")),
+                     "mode": tileset.get("mode")} if plan.engine == "vx_ace"
+                    else {"id": tileset_id,
+                          "name": decoded(ctx, tileset.get("name"))}),
         "drawn": {"tiles": result.tiles_drawn,
                   "event_graphics": result.sprites_drawn,
                   "event_markers": len(result.sprites_marked)
                   if events == "graphics" else 0},
     }
+    if plan.engine != "vx_ace":
+        reply["engine"] = project.profile.label
+        reply["unverified_formats"] = plan.unverified
+        reply["engine_warning"] = _engine_warning(plan, len(flags))
     if overlays:
         reply["overlays"] = overlays
         reply["legend"] = marks.legend(overlays)

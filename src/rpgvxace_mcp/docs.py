@@ -490,7 +490,8 @@ def workflow_document(project: Project) -> str:
     forms_note = ("\n\nOn XP only the basic forms compile -- %s -- because XP "
                   "numbers and\nlays out the rest of its commands its own way "
                   "(its Wait is 106, its Set\nMove Route 209). `map_render` "
-                  "does not draw XP maps."
+                  "draws only what is established of XP maps (its "
+                  "engine_warning says what)."
                   % ", ".join(sorted(XP_FORMS))
                   if project.profile.key == "xp" else "")
     return """\
@@ -551,7 +552,9 @@ example.%(forms)s
 
 Tiles: `map_tiles` reads and writes rectangles of tile ids per layer.%(tiles)s%(paint)s
 
-Seeing: `map_render` draws a VX Ace map to a PNG file and returns its path.
+Seeing: `map_render` draws a map to a PNG file and returns its path. VX Ace
+is drawn in full; XP and VX only as far as their formats are established,
+and the reply's engine_warning says how far.
 
 Scripts: `scripts` reads and replaces the script editor slots.
 

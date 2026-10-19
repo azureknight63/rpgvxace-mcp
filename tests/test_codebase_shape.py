@@ -365,11 +365,16 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         "png": set(),
         "canvas": {"png"},
         "tiles": {"png", "canvas"},
+        # XP's tile model is a second set of tables over the same canvas.
+        "xp_tiles": {"png", "canvas", "tiles"},
         # The engine's passage rules (pure, over ids and flags), then the
         # marks drawn from what they say, then the scene that places both.
         "passability": {"tiles"},
         "overlays": {"png", "canvas", "tiles", "passability"},
-        "scene": {"png", "canvas", "tiles", "passability", "overlays"},
+        # One engine's tile model as a value, which the scene is given.
+        "layouts": {"png", "tiles", "xp_tiles", "overlays"},
+        "scene": {"png", "canvas", "tiles", "passability", "overlays",
+                  "layouts"},
     }
 
     # And the package root, which three docstrings assert and nothing read:
