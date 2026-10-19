@@ -247,6 +247,16 @@ TEXTREPLY = _at("test_text_tools", "TestAnImportReplyIsBounded")
 TEXTSHARE = _at("test_text_tools", "TestAProjectThatSharesObjects")
 TEXTCODEC = _at("test_text_tools", "TestAnEncodingThatIsNotUtf8")
 TEXTENGINE = _at("test_text_tools", "TestVXAndXP")
+# test_render_overlays
+OVERSTACK = _at("test_render_overlays", "TestStackedLayers")
+OVERTABLE = _at("test_render_overlays", "TestIdsTheTableDoesNotHold")
+OVERTAGS = _at("test_render_overlays", "TestTerrainTags")
+OVEREVENTS = _at("test_render_overlays", "TestEventsThatBlock")
+OVERPASS = _at("test_render_overlays", "TestPassabilityIsDrawn")
+OVERDIGITS = _at("test_render_overlays", "TestTerrainTagsAreDrawn")
+OVERLABELS = _at("test_render_overlays", "TestEventIdsAreDrawn")
+OVERTOOL = _at("test_render_overlays", "TestTheToolDrawsOverlays")
+OVERARGS = _at("test_render_overlays", "TestOverlayArgumentsAreHeld")
 HOSTILEZ = _at("test_hostile_input", "TestAFloatKeepsItsSign")
 HOSTILEID = _at("test_hostile_input", "TestAnEntryIdBelowZeroIsRefused")
 CONVBYTES = _at("test_convert_input", "TestAStringThatDoesNotComeBackTravelsAsBytes")
@@ -5272,4 +5282,104 @@ GUARDS = [
         [TEXTLIES + 'test_a_document_that_is_not_ours', TEXTLIES + 'test_a_file_from_another_encoding_is_not_written_into_this_one'],
         'text exported from a Shift_JIS project was written into a UTF-8 one as different bytes',
     ),
+    Guard(
+        'passability skips a star tile', _SRC + "render/passability.py",
+        '''            if flag & STAR_FLAG:''',
+        '''            if False:''',
+        [OVERSTACK + 'test_a_star_tile_defers_to_the_one_below'],
+        'a star tile (0x10) has no effect on passage: counting it painted a wall over every cell with a tree top above its trunk',
+    ),
+    Guard(
+        'passability decides each direction on its own', _SRC + "render/passability.py",
+        '''            if flag & bit:''',
+        '''            if flag & EVERY_WAY:''',
+        [OVERSTACK + 'test_the_deciding_tile_is_chosen_per_bit'],
+        'the engine walks the layers once per direction bit: one walk for all four would block edges the player can cross',
+    ),
+    Guard(
+        'a stack no tile decides is impassable', _SRC + "render/passability.py",
+        '''            blocked |= bit      # no tile decided: the engine's final `false`''',
+        '''            pass''',
+        [OVERSTACK + 'test_a_stack_of_nothing_but_stars_is_impassable'],
+        'check_passage ends in `return false`: a cell of only star tiles is a wall, not open ground',
+    ),
+    Guard(
+        'an id past the flags table is passable, not a crash', _SRC + "render/passability.py",
+        '''    if 0 <= tile_id < len(flags):''',
+        '''    if True:''',
+        [OVERTABLE + 'test_hostile_ids_do_not_crash'],
+        'a map holding id 65535 (or -1, which indexes from the end) against a short flags table must be reported, not raise',
+    ),
+    Guard(
+        'a flag word is read as the engine reads it, signed', _SRC + "render/passability.py",
+        '''        return word - 0x10000 if word >= 0x8000 else word''',
+        '''        return word''',
+        [OVERTAGS + 'test_a_table_stores_words_unsigned_but_the_engine_reads_them_signed'],
+        'Table keeps words unsigned; bit 15 set is a negative word in RGSS, and read unsigned it showed terrain tags 8 to 15 that no cell has',
+    ),
+    Guard(
+        'a terrain tag must be above zero to count', _SRC + "render/passability.py",
+        '''        if tag > 0:''',
+        '''        if tag:''',
+        [OVERTAGS + 'test_a_negative_word_has_no_tag'],
+        'a negative shifted word is not a tag; the engine moves on to the layer below',
+    ),
+    Guard(
+        'a solid event is judged by Ruby truthiness', _SRC + "render/passability.py",
+        '''    if through is not None and through is not False:''',
+        '''    if through:''',
+        [OVEREVENTS + 'test_ruby_truthiness_decides_through'],
+        'only nil and false are false in Ruby: a damaged page holding 0 in `through` is a through page',
+    ),
+    Guard(
+        'layer 3 is not read as a tile layer for passage', _SRC + "render/scene.py",
+        '''        for z in range(min(TILE_LAYER_COUNT, grid.depth) - 1, -1, -1):''',
+        '''        for z in range(grid.depth - 1, -1, -1):''',
+        [OVERPASS + 'test_the_meta_layer_is_not_a_tile_layer'],
+        'layer 3 packs shadow bits and a region id; looking its word up as a tile made regions into walls',
+    ),
+    Guard(
+        'a tile-graphic event is asked before the layers', _SRC + "render/scene.py",
+        '''        out = list(tile_events.get((x, y), ()))''',
+        '''        out = []''',
+        [OVERPASS + 'test_a_tile_graphic_event_joins_the_walk_ahead_of_the_layers'],
+        'all_tiles is the events\' tile ids then the layers: a chest drawn from a tile changes what can be walked',
+    ),
+    Guard(
+        'digits are skipped below the readable tile size', _SRC + "render/overlays.py",
+        '''    if tile_size < MIN_DIGIT_TILE_SIZE:''',
+        '''    if False:''',
+        [OVERDIGITS + 'test_below_the_floor_no_digit_is_drawn_but_the_cell_is_counted'],
+        'the canvas is resampled by nearest pixel: a one- or two-pixel digit stroke at 4 pixels a tile is noise, not a number',
+    ),
+    Guard(
+        'a label too long for a cell is counted, not drawn', _SRC + "render/overlays.py",
+        '''    return 0 <= number < 10 ** MAX_LABEL_DIGITS''',
+        '''    return True''',
+        [OVERLABELS + 'test_a_long_or_negative_id_is_skipped_not_drawn'],
+        'an event id out of a damaged file ran to thousands of digits: str() of it and a plate wider than the picture',
+    ),
+    Guard(
+        'overlay names are held to the list', _SRC + "tools/map_render_tools.py",
+        '''    overlays = scopes_arg(args, "overlays", marks.OVERLAY_NAMES, default=())''',
+        '''    overlays = list(args.get("overlays") or ())''',
+        [OVERARGS + 'test_an_unknown_name_is_refused_and_the_choices_listed',
+         OVERARGS + 'test_hostile_entries_are_refused_without_a_crash'],
+        'a misspelled overlay was dropped and the caller told the picture had it; a repeated one ran twice',
+    ),
+    Guard(
+        'overlays has a ceiling', _SRC + "tools/map_render_tools.py",
+        '''                         maxItems=MAX_OVERLAYS),''',
+        '''                         ),''',
+        [OVERARGS + 'test_more_than_the_ceiling_is_refused'],
+        'a list of a million names was read, checked and echoed before the dedupe',
+    ),
+    Guard(
+        'events are read for overlays that mark them', _SRC + "tools/map_render_tools.py",
+        '''    wants_events = bool({marks.PASSABILITY, marks.EVENT_IDS} & set(overlays))''',
+        '''    wants_events = False''',
+        [OVERTOOL + 'test_event_ids_are_drawn_even_when_events_is_none'],
+        'events=none skipped the walk, so event_ids labelled nothing and passability never saw a solid event',
+    ),
 ]
+

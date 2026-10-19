@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..project import MAX_MAP_ID, _contained
-from ..render import png
+from ..render import overlays as marks, png
 from ..render.canvas import resize_nearest, to_rgb
 from ..render.scene import Sprite, TileGrid, render_map
 from ..render.tiles import SHEET_NAMES, TILE, sheet_needed
@@ -31,6 +31,7 @@ from ..rubytypes import RubyHash, RubyObject, Table, as_list
 from ..schema import TILE_LAYER_COUNT, on_map
 from .map_common import _check_budget
 from .registry import (
+    ARR,
     BOOL,
     Context,
     INT,
@@ -47,6 +48,7 @@ from .registry import (
     partial,
     prop,
     schema,
+    scopes_arg,
     tool,
 )
 
@@ -73,6 +75,10 @@ MAX_INLINE_IMAGE_BYTES = 1_000_000
 
 TILE_SIZES = (4, 64)
 RENDER_EVENTS = ("graphics", "markers", "none")
+
+
+# How many overlays one call may name: each of the kinds, once.
+MAX_OVERLAYS = len(marks.OVERLAY_NAMES)
 
 
 # How many events one render looks at. Events times nothing here, but the count
@@ -183,6 +189,9 @@ def _sprites(ctx: Context, game_map: RubyObject, window: tuple[int, int, int, in
         page = pages[0] if pages else None
         graphic = page.get("graphic") if isinstance(page, RubyObject) else None
         sprite = Sprite(event_id, x, y)
+        if isinstance(page, RubyObject):
+            sprite.through = page.get("through")
+            sprite.priority_type = page.get("priority_type")
         if isinstance(graphic, RubyObject):
             numbers = {}
             for field in ("character_index", "direction", "pattern", "tile_id"):
@@ -209,6 +218,36 @@ def _ids_in(grid: TileGrid, window: tuple[int, int, int, int]) -> set[int]:
             found.update(grid.cells[start:start + ww])
     found.discard(0)
     return found
+
+
+def _overlay_notes(overlays: list[str], result, flag_entries: int,
+                   tile_size: int) -> list[str]:
+    """What the overlays could not say, or say only approximately."""
+    notes = []
+    if result.overlay_labels_skipped:
+        skipped = "; ".join("%s %d" % item for item in
+                            sorted(result.overlay_labels_skipped.items()))
+        if marks.digit_scale(tile_size) is None:
+            why = ("tile_size %d is below %d, where a digit cannot be read"
+                   % (tile_size, marks.MIN_DIGIT_TILE_SIZE))
+        else:
+            why = "the number is too long to fit a cell"
+        notes.append("labels counted but not drawn (%s): %s." % (skipped, why))
+    if result.overlay_unknown_cells:
+        notes.append(
+            "cells holding a tile id the tileset's flags table (%d entries) "
+            "has no entry for, by overlay: %s; they are treated as passable "
+            "and untagged."
+            % (flag_entries, ", ".join(
+                "%s %d" % item
+                for item in sorted(result.overlay_unknown_cells.items()))))
+    if marks.PASSABILITY in overlays:
+        notes.append(
+            "passability follows Game_Map#check_passage for the player; solid "
+            "events and tile-graphic events are judged by each event's first "
+            "page, with its conditions not evaluated, and vehicles, a looping "
+            "map and cells outside the window are not shown.")
+    return notes
 
 
 # The names `_write_picture` makes: `?` in the glob matches any character, so
@@ -282,12 +321,21 @@ def _write_picture(ctx: Context, data: bytes, map_id: int) -> Path:
     "Graphics must be 8-bit PNGs without interlacing, of at most %s bytes, "
     "%d pixels on a side and %s pixels; any other is left out and named in "
     "sheets_not_read. regions overlays the region ids from layer 3, grid draws "
-    "cell lines with coordinates every fifth cell. Not drawn: animation, "
-    "parallax, weather, tint, counter-table fronts, later event pages. VX "
-    "maps are refused."
+    "cell lines with coordinates every fifth cell. overlays (at most %d, each "
+    "of passability, terrain_tags, event_ids) mark the picture for reading "
+    "rather than looking: passability tints cells the player cannot enter "
+    "and bars each blocked edge, from the tileset's passage flags as the "
+    "engine reads them, and frames cells a solid event stands on; terrain_tags "
+    "writes the tileset's tag (1-7) on tagged cells; event_ids writes each "
+    "event's id on its cell. The reply's legend says what each mark means "
+    "and overlay_cells counts them. Digits are skipped below tile_size %d "
+    "(counted, with overlays_note saying so). Not drawn: animation, "
+    "parallax, weather, tint, counter-table fronts, later event pages (the "
+    "overlays also judge events by page 1). VX maps are refused."
     % ("{:,}".format(MAX_INLINE_IMAGE_BYTES), MAX_KEPT_RENDERS, TILE, "{:,}".format(MAX_NATIVE_PIXELS),
        "{:,}".format(MAX_OUTPUT_PIXELS), "{:,}".format(png.MAX_PNG_BYTES),
-       png.MAX_PNG_SIDE, "{:,}".format(png.MAX_PNG_PIXELS)),
+       png.MAX_PNG_SIDE, "{:,}".format(png.MAX_PNG_PIXELS), MAX_OVERLAYS,
+       marks.MIN_DIGIT_TILE_SIZE),
     schema({
         "map_id": prop(INT, "Which map to draw.", minimum=1, maximum=MAX_MAP_ID),
         "x": prop(INT, "Left edge of the window, in tiles (default 0).",
@@ -312,6 +360,17 @@ def _write_picture(ctx: Context, data: bytes, map_id: int) -> Path:
         "regions": prop(BOOL, "Overlay the region ids layer 3 holds (default "
                                 "false)."),
         "grid": prop(BOOL, "Draw cell lines with coordinates (default false)."),
+        "overlays": prop(ARR, "Marks to draw over the map, any of %s (at most "
+                              "%d, each once; default none). passability: "
+                              "red tint on cells the player cannot enter, a "
+                              "yellow bar on each blocked edge, a cyan frame "
+                              "where a solid event stands. terrain_tags: the "
+                              "tag digit on tagged cells. event_ids: the "
+                              "event id on its cell. They read events even "
+                              "when events is none."
+                         % (", ".join(marks.OVERLAY_NAMES), MAX_OVERLAYS),
+                         items={"type": STR, "enum": list(marks.OVERLAY_NAMES)},
+                         maxItems=MAX_OVERLAYS),
         "refresh": REFRESH,
     }, ["map_id"]),
 )
@@ -322,6 +381,7 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
     tile_size = opt_int_default(args, "tile_size", TILE, TILE_SIZES[0],
                                 TILE_SIZES[1])
     events = one_of(args, "events", list(RENDER_EVENTS), RENDER_EVENTS[0])
+    overlays = scopes_arg(args, "overlays", marks.OVERLAY_NAMES, default=())
     project = ctx.project
     if project.profile.tileset_layout != "ace":
         raise ToolError(
@@ -361,8 +421,10 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
     flags_table = tileset.get("flags")
     flags = flags_table.data if isinstance(flags_table, Table) else ()
     grid = TileGrid(data.xsize, data.ysize, data.zsize, data.data)
-    sprites, cut_short = ([], False) if events == "none" else \
-        _sprites(ctx, game_map, window)
+    # The overlays that mark events read them even when none is drawn.
+    wants_events = bool({marks.PASSABILITY, marks.EVENT_IDS} & set(overlays))
+    sprites, cut_short = ([], False) if events == "none" and not wants_events \
+        else _sprites(ctx, game_map, window)
 
     # Only the sheets the window actually uses are opened: a decode costs
     # more than the drawing, and most maps use five of the nine.
@@ -407,7 +469,8 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
     result = render_map(
         grid, flags, sheets, window, sprites=sprites, sprite_mode=events,
         load_character=character, shadows=opt_bool(args, "shadows", True),
-        regions=opt_bool(args, "regions"), show_grid=opt_bool(args, "grid"))
+        regions=opt_bool(args, "regions"), show_grid=opt_bool(args, "grid"),
+        overlays=overlays, tile_size=tile_size)
     picture = resize_nearest(result.image, out_w, out_h)
     encoded = png.encode(out_w, out_h, to_rgb(picture), 3)
     path = _write_picture(ctx, encoded, map_id)
@@ -427,6 +490,14 @@ def map_render(ctx: Context, args: dict[str, Any]) -> "dict[str, Any] | ImageRep
                   "event_markers": len(result.sprites_marked)
                   if events == "graphics" else 0},
     }
+    if overlays:
+        reply["overlays"] = overlays
+        reply["legend"] = marks.legend(overlays)
+        reply["overlay_cells"] = {
+            key: count for counts in result.overlay_cells.values()
+            for key, count in counts.items()}
+        reply.update(partial("overlays", notes=_overlay_notes(
+            overlays, result, len(flags), tile_size)))
     reply.update(partial("render", notes=(
         "Wrote a render cache file; this is not a project edit, so it is "
         "done under --read-only too and no project data changed.",)))

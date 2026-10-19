@@ -365,7 +365,11 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         "png": set(),
         "canvas": {"png"},
         "tiles": {"png", "canvas"},
-        "scene": {"png", "canvas", "tiles"},
+        # The engine's passage rules (pure, over ids and flags), then the
+        # marks drawn from what they say, then the scene that places both.
+        "passability": {"tiles"},
+        "overlays": {"png", "canvas", "tiles", "passability"},
+        "scene": {"png", "canvas", "tiles", "passability", "overlays"},
     }
 
     # And the package root, which three docstrings assert and nothing read:

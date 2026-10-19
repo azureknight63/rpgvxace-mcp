@@ -22,15 +22,17 @@ rather than keeping a second copy of the numbers.
 from __future__ import annotations
 
 from array import array
-from typing import Callable, Sequence
+from typing import Callable, Collection, Sequence
 
 from ..schema import META_LAYER, TILE_LAYER_COUNT, region_of, shadow_of
+from . import overlays as marks
 from .canvas import (
     blend_rect,
     blit,
     draw_number,
     new_surface,
 )
+from .passability import EVERY_WAY, event_blocks, passage, terrain_tag
 from .png import Image
 from .tiles import (
     STAR_FLAG,
@@ -76,11 +78,11 @@ class Sprite:
     """One event as it looks on page 1."""
 
     __slots__ = ("event_id", "x", "y", "name", "index", "direction",
-                 "pattern", "tile_id")
+                 "pattern", "tile_id", "through", "priority_type")
 
     def __init__(self, event_id: int, x: int, y: int, name: str = "",
                  index: int = 0, direction: int = 2, pattern: int = 0,
-                 tile_id: int = 0):
+                 tile_id: int = 0, through=False, priority_type=0):
         self.event_id = event_id
         self.x = x
         self.y = y
@@ -89,13 +91,18 @@ class Sprite:
         self.direction = direction
         self.pattern = pattern
         self.tile_id = tile_id
+        # The page's own values, as stored: `event_blocks` reads them with
+        # Ruby's rules, so a damaged page cannot make them mean something else.
+        self.through = through
+        self.priority_type = priority_type
 
 
 class Rendered:
     """What a render produced, and what it could not draw."""
 
     __slots__ = ("image", "tiles_drawn", "tiles_not_drawn", "sprites_drawn",
-                 "sprites_marked", "tiles_distinct")
+                 "sprites_marked", "tiles_distinct", "overlay_cells",
+                 "overlay_unknown_cells", "overlay_labels_skipped")
 
     def __init__(self, image: Image):
         self.image = image
@@ -106,6 +113,12 @@ class Rendered:
         self.sprites_drawn = 0
         # (event id, why a marker was drawn instead of a graphic)
         self.sprites_marked: list[tuple[int, str]] = []
+        # Overlay name -> counts; only the overlays asked for have a key.
+        self.overlay_cells: dict[str, dict[str, int]] = {}
+        # Overlay name -> cells that read a tile id the flags table lacks.
+        self.overlay_unknown_cells: dict[str, int] = {}
+        # Overlay name -> labels that were counted but not drawn.
+        self.overlay_labels_skipped: dict[str, int] = {}
 
 
 class _Painter:
@@ -180,6 +193,91 @@ class _Painter:
                        PALETTE[region % len(PALETTE)], 110)
             draw_number(canvas, px + 1, py + 1, region, 2)
 
+    def stack(self, x: int, y: int,
+              tile_events: "dict[tuple[int, int], list[int]]") -> list[int]:
+        """The tile ids the engine's ``all_tiles`` walks, topmost first."""
+        grid = self.grid
+        out = list(tile_events.get((x, y), ()))
+        for z in range(min(TILE_LAYER_COUNT, grid.depth) - 1, -1, -1):
+            out.append(grid.at(x, y, z))
+        return out
+
+    def paint_passability(self, canvas: Image, sprites: Sequence[Sprite]) -> None:
+        """Tint blocked cells, bar blocked edges, frame solid events."""
+        result = self.result
+        # Tile-graphic events join the walk ahead of the layers, in id order.
+        # Page 1 stands in for the current page, as everywhere in this render.
+        tile_events: dict[tuple[int, int], list[int]] = {}
+        solid: set[tuple[int, int]] = set()
+        for sprite in sorted(sprites, key=lambda s: s.event_id):
+            if sprite.tile_id:
+                tile_events.setdefault((sprite.x, sprite.y), []).append(
+                    sprite.tile_id)
+            if event_blocks(sprite.through, sprite.priority_type):
+                solid.add((sprite.x, sprite.y))
+        counts = {"blocked": 0, "edge_blocked": 0, "event_blocked": 0}
+        unknown_cells = 0
+        seen: dict[tuple[int, ...], tuple[int, bool]] = {}
+        for x, y, px, py in self.cells():
+            stack = self.stack(x, y, tile_events)
+            key = tuple(stack)
+            if key not in seen:
+                found = passage(stack, self.flags)
+                seen[key] = (found.blocked, found.unknown)
+            blocked, unknown = seen[key]
+            if unknown:
+                unknown_cells += 1
+            if blocked == EVERY_WAY:
+                counts["blocked"] += 1
+                marks.draw_blocked_cell(canvas, px, py)
+            elif blocked:
+                counts["edge_blocked"] += 1
+                marks.draw_blocked_edges(canvas, px, py, blocked)
+            if (x, y) in solid:
+                counts["event_blocked"] += 1
+                marks.draw_event_frame(canvas, px, py)
+        result.overlay_cells[marks.PASSABILITY] = counts
+        if unknown_cells:
+            result.overlay_unknown_cells[marks.PASSABILITY] = unknown_cells
+
+    def paint_terrain_tags(self, canvas: Image, scale: "int | None") -> None:
+        result = self.result
+        tagged = skipped = unknown_cells = 0
+        for x, y, px, py in self.cells():
+            tag, unknown = terrain_tag(self.stack(x, y, {}), self.flags)
+            if unknown:
+                unknown_cells += 1
+            if not tag:
+                continue
+            tagged += 1
+            if scale is None or not marks.draw_terrain_tag(canvas, px, py,
+                                                           tag, scale):
+                skipped += 1
+        result.overlay_cells[marks.TERRAIN_TAGS] = {"tagged": tagged}
+        if unknown_cells:
+            result.overlay_unknown_cells[marks.TERRAIN_TAGS] = unknown_cells
+        if skipped:
+            result.overlay_labels_skipped[marks.TERRAIN_TAGS] = skipped
+
+    def paint_event_ids(self, canvas: Image, sprites: Sequence[Sprite],
+                        scale: "int | None") -> None:
+        result = self.result
+        labelled = skipped = 0
+        # Lowest id last, so where two events share a cell the label shown
+        # is the first the engine would have found there.
+        for sprite in sorted(sprites, key=lambda s: -s.event_id):
+            if not (self.wx <= sprite.x < self.wx + self.ww
+                    and self.wy <= sprite.y < self.wy + self.wh):
+                continue
+            labelled += 1
+            if scale is None or not marks.draw_event_label(
+                    canvas, (sprite.x - self.wx) * TILE,
+                    (sprite.y - self.wy) * TILE, sprite.event_id, scale):
+                skipped += 1
+        result.overlay_cells[marks.EVENT_IDS] = {"event_labels": labelled}
+        if skipped:
+            result.overlay_labels_skipped[marks.EVENT_IDS] = skipped
+
     def paint_grid(self, canvas: Image) -> None:
         for column in range(self.ww + 1):
             blend_rect(canvas, column * TILE, 0, 1, self.wh * TILE,
@@ -236,7 +334,8 @@ def render_map(grid: TileGrid, flags: Sequence[int],
                sprites: Sequence[Sprite] = (), sprite_mode: str = "graphics",
                load_character: "Callable[[str], Image | None] | None" = None,
                shadows: bool = True, regions: bool = False,
-               show_grid: bool = False, background=(24, 24, 32, 255)
+               show_grid: bool = False, background=(24, 24, 32, 255),
+               overlays: Collection[str] = (), tile_size: int = TILE
                ) -> Rendered:
     """A native-size (32 pixels a tile) picture of one window of a map.
 
@@ -245,7 +344,16 @@ def render_map(grid: TileGrid, flags: Sequence[int],
     ``sprite_mode`` is "graphics" (each event as its page-1 picture, with a
     marker where the picture is missing), "markers" (every event as a marker)
     or "none".
+
+    ``overlays`` names the marks of `overlays.OVERLAY_NAMES` to draw over the
+    map; they read ``sprites`` whatever ``sprite_mode`` is, so a caller that
+    wants an event's id but not its graphic passes the sprites with "none".
+    ``tile_size`` is the size the picture will be scaled to, which decides
+    whether a digit would survive the scaling.
     """
+    unknown = sorted(set(overlays) - set(marks.OVERLAY_NAMES))
+    if unknown:
+        raise ValueError("unknown overlay %s" % ", ".join(unknown))
     wx, wy, ww, wh = window
     canvas = new_surface(ww * TILE, wh * TILE, background)
     result = Rendered(canvas)
@@ -265,12 +373,19 @@ def render_map(grid: TileGrid, flags: Sequence[int],
                                   result):
                 markers.append(sprite)
     painter.paint_tiles(canvas, above=True)
+    if marks.PASSABILITY in overlays:
+        painter.paint_passability(canvas, sprites)
     if regions:
         painter.paint_regions(canvas)
     if show_grid:
         painter.paint_grid(canvas)
     for sprite in markers:
         _marker(canvas, sprite, (sprite.x - wx) * TILE, (sprite.y - wy) * TILE)
+    scale = marks.digit_scale(tile_size)
+    if marks.TERRAIN_TAGS in overlays:
+        painter.paint_terrain_tags(canvas, scale)
+    if marks.EVENT_IDS in overlays:
+        painter.paint_event_ids(canvas, sprites, scale)
     result.tiles_distinct = len(painter.composed)
     return result
 
