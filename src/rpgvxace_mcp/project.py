@@ -931,6 +931,84 @@ class Project(BackupStore):
         self._cache.pop(filename, None)
         self._forget_map_ids()
 
+    # -- several files, written as one change ----------------------------------
+    # What a write that has to land in more than one file needs beyond
+    # `save_file`: to know before the first write that none of the files is
+    # stale, to put two cached files' contents under each other's names, and
+    # to undo the files that did land when a later one does not. `renumber` is
+    # the caller; see `tools/reference_tools.py`.
+    def require_writable(self, what: str) -> None:
+        """Refuse now if nothing may be written: before a change is prepared.
+
+        `save_file` refuses too, but a multi-file change that discovers a
+        read-only server at its first save has already staged, scanned and
+        pinned everything for nothing, and says "put back" about files it
+        never touched.
+        """
+        self._assert_writable(what)
+
+    def check_fresh(self, *filenames: str) -> None:
+        """Refuse, before anything is written, if a loaded file changed on disk.
+
+        The check `save_file` makes per file, asked for all of them up front:
+        a change spread over six files that discovers the sixth is stale
+        after writing the first five has half-landed.
+        """
+        for filename in filenames:
+            cached = self._cache.get(filename)
+            if cached is not None:
+                self._assert_not_stale(filename, self.path_for(filename), cached)
+
+    def exchange_cached(self, first: str, second: str) -> None:
+        """Swap what two loaded files hold, keeping each file's own bookkeeping.
+
+        Saving ``first`` then writes the value that was loaded from
+        ``second``, and the staleness check still compares ``first``'s path
+        against what ``first`` read from it. Mutates the cache only.
+        """
+        one, other = self._cache.get(first), self._cache.get(second)
+        if one is None or other is None:
+            raise ProjectError("both %s and %s must be loaded to exchange them"
+                               % (first, second))
+        one.value, other.value = other.value, one.value
+
+    def disk_bytes(self, filename: str) -> "bytes | None":
+        """What a data file holds on disk right now, or None if it is absent."""
+        path = self.path_for(filename)
+        return path.read_bytes() if path.is_file() else None
+
+    def restore_bytes(self, filename: str, data: "bytes | None") -> None:
+        """Put a data file back exactly as ``data`` (None: not there at all).
+
+        The undo for a multi-file write that failed part-way, so it writes
+        no backup and no log line: it is returning the project to a state it
+        was in, not making a change. The cached copy is dropped, since it
+        describes the write being undone.
+        """
+        path = self.path_for(filename)
+        try:
+            if data is None:
+                path.unlink(missing_ok=True)
+            else:
+                handle, temp_name = tempfile.mkstemp(
+                    dir=str(path.parent), prefix=path.name + ".",
+                    suffix=TMP_SUFFIX)
+                temp_path = Path(temp_name)
+                try:
+                    with os.fdopen(handle, "wb") as stream:
+                        stream.write(data)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temp_path, path)
+                except OSError:
+                    temp_path.unlink(missing_ok=True)
+                    raise
+        except OSError as exc:
+            raise ProjectError("could not restore %s: %s" % (filename, exc)) from exc
+        finally:
+            self._cache.pop(filename, None)
+            self._forget_map_ids()
+
     def delete_file(self, filename: str, dry_run: bool = False,
                     tool: str = "") -> dict[str, Any]:
         if not dry_run:

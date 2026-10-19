@@ -916,6 +916,13 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
             ("backups op=prune", "backups", dict(op="prune", dry_run=True)),
             ("backups op=restore", "backups",
              dict(op="restore", backup=self.backup, dry_run=True)),
+            ("refactor op=renumber", "refactor",
+             dict(op="renumber", table="items", from_id=2, to_id=5,
+                  dry_run=True)),
+            ("refactor op=rename_switch", "refactor",
+             dict(op="rename_switch", id=1, name="Gate", dry_run=True)),
+            ("refactor op=rename_variable", "refactor",
+             dict(op="rename_variable", id=1, name="Coins", dry_run=True)),
         ]
 
     # Words that mean "this happened". A preview must not use them at the top

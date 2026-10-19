@@ -32,6 +32,7 @@ from .tools import (  # noqa: F401
     map_tile_tools,
     misc_tools,
     raw_tools,
+    reference_tools,
     search_tools,
     undo_tools,
 )

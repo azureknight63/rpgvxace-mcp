@@ -26,8 +26,8 @@ from ..commands import (
     command_name,
     summarize,
 )
-from ..project import Project
-from ..rubytypes import RubyObject
+from ..project import Project, ProjectError
+from ..rubytypes import RubyObject, named
 from .walk import (
     WalkBudget,
     _int,
@@ -318,7 +318,7 @@ def reference_preview(project: Project, table: str, entry_id: int,
     # happens to be exactly full.
     found = find_references(project, table, entry_id, budget,
                             limit=REFERENCE_PREVIEW + 1)
-    return _as_preview(found, budget.note(what))
+    return _as_preview(found, scan_note(project, budget, what))
 
 
 def reference_previews(project: Project, table: str, entry_ids: "set[int]",
@@ -335,9 +335,49 @@ def reference_previews(project: Project, table: str, entry_ids: "set[int]",
     budget = WalkBudget() if budget is None else budget
     found = find_references_for(project, table, entry_ids, budget,
                                 limit=REFERENCE_PREVIEW + 1)
-    note = budget.note(what)
+    note = scan_note(project, budget, what)
     return {entry_id: _as_preview(rows, note)
             for entry_id, rows in found.items()}
+
+
+def unreadable_sources(project: Project) -> list[str]:
+    """The maps and tables a reference scan cannot read, by name.
+
+    `iter_command_lists` skips a map or table that will not load -- once,
+    silently, because `validate` is where that is reported -- which is right
+    for a walk that only collects. A scan that decides whether something may
+    be deleted cannot take that silence for "nothing there": an unparseable
+    map is a map nobody looked in.
+    """
+    found: list[str] = []
+    for map_id in project.map_ids_on_disk():
+        try:
+            project.load_map(map_id)
+        except (ProjectError, ValueError, OSError):
+            found.append("map %d" % map_id)
+    for table in ("common_events", "troops"):
+        try:
+            project.entries(table)
+        except (ProjectError, ValueError, OSError):
+            found.append(table)
+    return found
+
+
+def scan_note(project: Project, budget: WalkBudget, what: str
+              ) -> "str | None":
+    """Why a reference scan is not the whole project's, or None if it is.
+
+    The budget's account of a walk that ran out, plus any file the walk had
+    to skip. Both mean the same to the caller: the rows are what was found,
+    not what there is.
+    """
+    parts = [budget.note(what)]
+    unread = unreadable_sources(project)
+    if unread:
+        parts.append("%s could not be read, so any command in %s was not "
+                     "looked at and the answer is incomplete."
+                     % (named(unread), "it" if len(unread) == 1 else "them"))
+    return " ".join(part for part in parts if part) or None
 
 
 def _as_preview(found: list[dict[str, Any]],
