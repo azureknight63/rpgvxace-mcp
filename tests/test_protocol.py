@@ -234,7 +234,14 @@ class TestToolsOverProtocol(ProtocolTest):
     def test_list_advertises_every_tool_with_a_schema(self):
         tools = self.server.request("tools/list")["result"]["tools"]
         names = {t["name"] for t in tools}
-        self.assertEqual(len(tools), 20)
+        # What the registry holds, read from it: a count typed here was
+        # bumped by hand by every change that added a tool, and said nothing
+        # about which tool was missing when it was wrong.
+        import rpgvxace_mcp.server  # noqa: F401  (registers every tool)
+        from rpgvxace_mcp.tools.registry import REGISTRY
+        self.assertEqual(names, set(REGISTRY))
+        self.assertEqual(len(tools), len(REGISTRY))
+        self.assertGreaterEqual(len(tools), 20)
         self.assertIn("project_info", names)
         self.assertIn("event_edit", names)
         for tool in tools:
