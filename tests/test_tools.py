@@ -2520,9 +2520,11 @@ class TestXPProject(ToolTest):
         self.assertNotIn("Set Vehicle Location", script)
 
     def test_ace_only_tools_refuse_xp_and_say_why(self):
-        with self.assertRaises(ToolError) as caught:
-            self.call("map_render", map_id=1)
-        self.assertIn("RPG Maker XP", str(caught.exception))
+        # map_render draws XP as far as it is established and says so in
+        # engine_warning; `test_engine_parity` holds the rest of it.
+        reply = self.call("map_render", map_id=1)
+        self.assertIn("RPG Maker XP",
+                      getattr(reply, "body", reply)["engine_warning"])
         with self.assertRaises(ToolError) as caught:
             self.call("map_tiles", map_id=1, view="region")
         self.assertIn("RPG Maker XP", str(caught.exception))

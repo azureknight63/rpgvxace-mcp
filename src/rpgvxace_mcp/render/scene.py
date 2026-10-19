@@ -32,14 +32,12 @@ from .canvas import (
     draw_number,
     new_surface,
 )
+from .layouts import ACE_LAYOUT, Layout
 from .passability import EVERY_WAY, event_blocks, passage, terrain_tag
 from .png import Image
 from .tiles import (
-    STAR_FLAG,
     TILE,
-    compose_tile,
     draw_tile,
-    sheet_needed,
 )
 
 
@@ -126,7 +124,8 @@ class _Painter:
 
     def __init__(self, grid: TileGrid, flags: Sequence[int],
                  sheets: "dict[str, Image | None]", window: tuple[int, int, int, int],
-                 result: Rendered):
+                 result: Rendered, layout: Layout = ACE_LAYOUT):
+        self.layout = layout
         self.grid = grid
         self.flags = flags
         self.sheets = sheets
@@ -137,7 +136,7 @@ class _Painter:
     def tile(self, tile_id: int) -> Image | None:
         if tile_id in self.composed:
             return self.composed[tile_id]
-        image = compose_tile(tile_id, self.sheets)
+        image = self.layout.compose(tile_id, self.sheets)
         if len(self.composed) < MAX_COMPOSED_TILES:
             self.composed[tile_id] = image
         return image
@@ -156,11 +155,11 @@ class _Painter:
         for z in range(min(TILE_LAYER_COUNT, grid.depth)):
             for x, y, px, py in self.cells():
                 tile_id = grid.at(x, y, z)
-                if tile_id == 0 or (self.flag(tile_id) & STAR_FLAG != 0) != above:
+                if tile_id == 0 or self.layout.above(self.flag(tile_id)) != above:
                     continue
                 image = self.tile(tile_id)
                 if image is None:
-                    name = sheet_needed(tile_id) or "unused ids"
+                    name = self.layout.sheet_needed(tile_id) or "unused ids"
                     not_drawn = self.result.tiles_not_drawn
                     not_drawn[name] = not_drawn.get(name, 0) + 1
                     continue
@@ -335,8 +334,8 @@ def render_map(grid: TileGrid, flags: Sequence[int],
                load_character: "Callable[[str], Image | None] | None" = None,
                shadows: bool = True, regions: bool = False,
                show_grid: bool = False, background=(24, 24, 32, 255),
-               overlays: Collection[str] = (), tile_size: int = TILE
-               ) -> Rendered:
+               overlays: Collection[str] = (), tile_size: int = TILE,
+               layout: Layout = ACE_LAYOUT) -> Rendered:
     """A native-size (32 pixels a tile) picture of one window of a map.
 
     ``window`` is ``(x, y, width, height)`` in tiles and must lie inside the
@@ -350,14 +349,23 @@ def render_map(grid: TileGrid, flags: Sequence[int],
     wants an event's id but not its graphic passes the sprites with "none".
     ``tile_size`` is the size the picture will be scaled to, which decides
     whether a digit would survive the scaling.
+
+    ``layout`` is the engine's tile model (`layouts`); the default is VX Ace's,
+    and for it nothing here differs from before layouts existed. ``flags`` is
+    whatever table the layout's ``above`` reads: Ace's flag words, or XP's
+    priorities.
     """
     unknown = sorted(set(overlays) - set(marks.OVERLAY_NAMES))
     if unknown:
         raise ValueError("unknown overlay %s" % ", ".join(unknown))
+    unsupported = sorted(set(overlays) - set(layout.overlays))
+    if unsupported:
+        raise ValueError("the %s layout cannot draw the overlay %s"
+                         % (layout.key, ", ".join(unsupported)))
     wx, wy, ww, wh = window
     canvas = new_surface(ww * TILE, wh * TILE, background)
     result = Rendered(canvas)
-    painter = _Painter(grid, flags, sheets, window, result)
+    painter = _Painter(grid, flags, sheets, window, result, layout)
     painter.paint_tiles(canvas, above=False)
     if shadows:
         painter.paint_shadows(canvas)
@@ -407,13 +415,17 @@ def _draw_sprite(canvas: Image, painter: _Painter, sprite: Sprite,
         return True
     if not sprite.name:
         return True      # an event with no graphic is invisible, as in the game
+    if not painter.layout.draws_characters:
+        result.sprites_marked.append((sprite.event_id,
+                                      painter.layout.characters_note))
+        return False
     sheet = load_character(sprite.name) if load_character else None
     if sheet is None:
         result.sprites_marked.append(
             (sprite.event_id, "graphic \"%s\" could not be loaded" % sprite.name))
         return False
-    sx, sy, w, h, lifted = _sprite_rect(sheet, sprite.name, sprite.index,
-                                        sprite.direction, sprite.pattern)
+    sx, sy, w, h, lifted = (painter.layout.sprite_rect or _sprite_rect)(
+        sheet, sprite.name, sprite.index, sprite.direction, sprite.pattern)
     if w <= 0 or h <= 0 or sx + w > sheet.width or sy + h > sheet.height:
         result.sprites_marked.append(
             (sprite.event_id, "graphic \"%s\" is the wrong size" % sprite.name))

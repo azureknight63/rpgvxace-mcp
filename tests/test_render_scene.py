@@ -13,7 +13,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 
-from rpgvxace_mcp.render import canvas, scene  # noqa: E402
+from rpgvxace_mcp.render import canvas, scene, tiles  # noqa: E402
 from rpgvxace_mcp.render.scene import Sprite, TileGrid  # noqa: E402
 
 
@@ -111,7 +111,7 @@ class TestTheTileLayers(unittest.TestCase):
         sprites = [Sprite(1, 0, 0, "$Hero")]
         grid = grid_of(2, 1, {(0, 0, 0): 1, (1, 0, 0): 1, (0, 0, 1): 256})
         flags = [0] * 1024
-        flags[256] = scene.STAR_FLAG
+        flags[256] = tiles.STAR_FLAG
         hero = solid(96, 128, GREEN)
         result = draw(grid, flags=flags, sheets=sheets, sprites=sprites,
                       load_character=lambda name: hero)

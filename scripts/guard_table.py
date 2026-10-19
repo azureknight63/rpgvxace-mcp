@@ -195,6 +195,15 @@ OVERDIGITS = _at("test_render_overlays", "TestTerrainTagsAreDrawn")
 OVERLABELS = _at("test_render_overlays", "TestEventIdsAreDrawn")
 OVERTOOL = _at("test_render_overlays", "TestTheToolDrawsOverlays")
 OVERARGS = _at("test_render_overlays", "TestOverlayArgumentsAreHeld")
+# test_engine_parity
+PARXTABLE = _at("test_engine_parity", "TestTheXpAutotileTable")
+PARXIDS = _at("test_engine_parity", "TestXpTileIds")
+PARXSCENE = _at("test_engine_parity", "TestTheSceneWithAnXpLayout")
+PARXDEFAULT = _at("test_engine_parity", "TestAnXpRenderByDefault")
+PARXFLAG = _at("test_engine_parity", "TestAnXpRenderThatTrustsRememberedFormats")
+PARVDEFAULT = _at("test_engine_parity", "TestAVxRenderByDefault")
+PARVFLAG = _at("test_engine_parity", "TestAVxRenderThatTrustsRememberedFormats")
+PARACE = _at("test_engine_parity", "TestAceIsByteIdentical")
 HOSTILEZ = _at("test_hostile_input", "TestAFloatKeepsItsSign")
 HOSTILEID = _at("test_hostile_input", "TestAnEntryIdBelowZeroIsRefused")
 CONVBYTES = _at("test_convert_input", "TestAStringThatDoesNotComeBackTravelsAsBytes")
@@ -2683,9 +2692,9 @@ GUARDS = [
         'A4 rows are three tiles tall for a roof top and two for the wall under it, so a wall row starts half a tile later than 2.5 a row says -- one row off puts every building front on the wrong tiles',
     ),
     Guard(
-        'a flagged tile is drawn over characters, not under', RENDER_SCENE,
-        '                if tile_id == 0 or (self.flag(tile_id) & STAR_FLAG != 0) != above:',
-        '                if tile_id == 0 or False != above:',
+        'a flagged tile is drawn over characters, not under', _SRC + "render/layouts.py",
+        '    return flag & STAR_FLAG != 0',
+        '    return False',
         [SCENELAYERS + "test_a_flagged_tile_goes_over_a_character"],
         'the star flag is how a roof, a treetop or an archway hides what walks behind it; without it the map shows a character standing on top of the building',
     ),
@@ -2719,9 +2728,11 @@ GUARDS = [
     ),
     Guard(
         'VX is refused rather than drawn from the wrong layout', MAP_RENDER,
-        '    if project.profile.tileset_layout != "ace":',
+        '    if engine == "vx" and not unverified:',
         '    if False:',
-        [RENDERVX + "test_a_vx_project_is_refused_with_the_reason"],
+        [RENDERVX + "test_a_vx_project_is_refused_with_the_reason",
+         PARVDEFAULT + 'test_it_is_refused_and_the_message_says_what_is_missing',
+         PARVDEFAULT + 'test_nothing_is_written_when_it_is_refused'],
         'VX keeps one global tileset in Graphics/System with another autotile layout, and drawing it with Ace\'s tables gives a confident picture of the wrong tiles',
     ),
     Guard(
@@ -4142,5 +4153,83 @@ GUARDS = [
         [OVERTOOL + 'test_event_ids_are_drawn_even_when_events_is_none'],
         'events=none skipped the walk, so event_ids labelled nothing and passability never saw a solid event',
     ),
+    Guard(
+        'overlays whose rules are not established are refused for XP and VX', _SRC + "tools/map_render_tools.py",
+        '''    missing = [name for name in overlays if name not in layout.overlays]''',
+        '''    missing = []''',
+        [PARXDEFAULT + 'test_passability_is_refused_with_what_is_missing',
+         PARXDEFAULT + 'test_terrain_tags_are_refused_too',
+         PARXFLAG + 'test_passability_stays_refused_even_so',
+         PARVFLAG + 'test_the_overlays_that_need_vxs_flag_table_are_refused'],
+        'XP has three tables where Ace has one flag word and VX has an unmodelled one: Ace\'s passage rules over them would mark cells confidently and wrongly',
+    ),
+    Guard(
+        'regions are refused where the engine has none', _SRC + "tools/map_render_tools.py",
+        '''    if opt_bool(args, "regions"):''',
+        '''    if False:''',
+        [PARXDEFAULT + 'test_regions_are_refused_because_xp_has_none',
+         PARVFLAG + 'test_regions_are_refused_because_vx_has_none'],
+        'regions=true on a project with no layer 3 returned a picture with no regions and no word about why',
+    ),
+    Guard(
+        'VX Ace keeps its own layout whatever the flag says', _SRC + "tools/map_render_tools.py",
+        '''        return _Plan(ACE_LAYOUT, engine, unverified)''',
+        '''        return _Plan(VX_LAYOUT, engine, unverified)''',
+        [PARACE + 'test_the_picture_with_every_overlay_is_pinned',
+         PARACE + 'test_the_flag_changes_nothing_for_ace'],
+        'the engine-parity work touches the scene every Ace render goes through; the pinned bytes are the proof it did not change them',
+    ),
+    Guard(
+        'XP autotiles are drawn only when the remembered table is asked for', _SRC + "render/xp_tiles.py",
+        '''    if not autotiles:''',
+        '''    if False:''',
+        [PARXIDS + 'test_autotiles_are_not_drawn_unless_asked_for',
+         PARXDEFAULT + 'test_autotile_cells_are_not_drawn_and_say_so'],
+        'the 48-pattern table is the engine\'s and was remembered, not read: drawing it by default would present a guess as the picture',
+    ),
+    Guard(
+        'XP autotile graphic must be whole 96 x 128 frames', _SRC + "render/xp_tiles.py",
+        '''    if sheet.height != FRAME_HEIGHT or sheet.width % FRAME_WIDTH:''',
+        '''    if False:''',
+        [PARXIDS + 'test_an_autotile_graphic_of_the_wrong_size_is_not_drawn'],
+        'a graphic of another size cut at the remembered piece positions reads outside it or draws the wrong pixels',
+    ),
+    Guard(
+        'an XP tileset cell outside its graphic draws nothing', _SRC + "render/xp_tiles.py",
+        '''        if x + TILE > sheet.width or y + TILE > sheet.height:''',
+        '''        if False:''',
+        [PARXIDS + 'test_a_missing_or_narrow_sheet_draws_nothing_rather_than_failing',
+         PARXDEFAULT + 'test_ids_the_data_cannot_hold_are_counted_not_crashed_on'],
+        'a 16-bit id puts the cell 8,000 rows down a graphic that is a few rows tall; clipped it drew a blank tile and counted it as drawn',
+    ),
+    Guard(
+        'the autotile table follows the Ace numbering', _SRC + "render/xp_tiles.py",
+        '''        column = _slice_index("L" in absent, "R" in absent, bool(qx))''',
+        '''        column = 1''',
+        [PARXTABLE + 'test_it_is_the_remembered_table_entry_for_entry',
+         PARXTABLE + 'test_it_follows_the_ace_numbering_group_for_group'],
+        'the table is built from FLOOR_PATTERNS and the 9-slice; a slip in the slice rule is a picture that is wrong in every edge tile',
+    ),
+    Guard(
+        'XP draws a tile over characters by its priority', _SRC + "render/layouts.py",
+        '''    return priority != 0''',
+        '''    return False''',
+        [PARXSCENE + 'test_a_tile_with_a_priority_is_drawn_over_a_tile_event_not_under_it'],
+        'trees and roofs have a priority: drawn under characters they hide nothing, and a character walks over the canopy',
+    ),
+    Guard(
+        'XP characters are markers unless the remembered sheet layout is asked for', _SRC + "render/scene.py",
+        '''    if not painter.layout.draws_characters:''',
+        '''    if False:''',
+        [PARXSCENE + 'test_characters_are_markers_unless_the_layout_draws_them',
+         PARXDEFAULT + 'test_characters_are_markers_with_the_reason'],
+        'the 4 x 4 sheet cut was remembered, not read: by default an XP event is a numbered marker that says why',
+    ),
+    Guard(
+        'a layout is held to the overlays it can draw', _SRC + "render/scene.py",
+        '''    if unsupported:''',
+        '''    if False:''',
+        [PARXSCENE + 'test_a_layout_that_cannot_judge_passability_refuses_the_overlay'],
+        'the scene is also called by code that is not the tool: Ace\'s passage rules over XP\'s priorities would draw a plausible wrong picture',
+    ),
 ]
-

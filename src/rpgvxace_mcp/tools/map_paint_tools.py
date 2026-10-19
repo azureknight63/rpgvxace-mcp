@@ -376,15 +376,22 @@ def _refuse_engine(ctx: Context) -> None:
         return
     if engine == "vx":
         raise ToolError(
-            "map_paint paints VX Ace maps. A VX (RGSS2) project has one "
-            "global tileset in Graphics/System and a different autotile "
-            "layout, which this tool does not model, so the shapes it wrote "
-            "would be a guess. Use map_tiles to write tile ids directly.")
+            "map_paint paints VX Ace maps. For a VX (RGSS2) project it would "
+            "have to write the autotile shape numbers VX's own editor "
+            "writes, and no VX project or map exists here to check them "
+            "against (VX Ace's were read off a real Ace game), so a shape "
+            "could be wrong and be stored in the map for the editor to "
+            "show. VX's one global tileset is known (Graphics/System/TileA1 "
+            "and on); its shape numbering is not. Use map_tiles to write "
+            "tile ids directly. See docs/engine_parity.md.")
     raise ToolError(
-        "map_paint paints VX Ace maps, and this is a %s project. RPG Maker XP "
-        "keeps seven autotiles per tileset with their own 48-id layout, which "
-        "this tool does not model, so the shapes it wrote would be a guess. "
-        "Use map_tiles to write tile ids directly." % _engine_label(engine))
+        "map_paint paints VX Ace maps, and this is a %s project. XP's seven "
+        "autotiles have 48 ids each, and which pattern an id selects is its "
+        "built-in Tilemap's: the numbering this server remembers matches "
+        "Ace's but was never checked against XP data, and a wrong shape "
+        "would be stored in the map for the editor to show. Use map_tiles "
+        "to write tile ids directly. See docs/engine_parity.md."
+        % _engine_label(engine))
 
 
 @tool(

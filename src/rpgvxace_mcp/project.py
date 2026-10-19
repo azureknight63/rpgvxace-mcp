@@ -135,6 +135,7 @@ ASSET_DIRS = {
     "system": "Graphics/System",
     "animations": "Graphics/Animations",
     "tilesets": "Graphics/Tilesets",
+    "autotiles": "Graphics/Autotiles",
     "battlebacks1": "Graphics/Battlebacks1",
     "battlebacks2": "Graphics/Battlebacks2",
     "titles1": "Graphics/Titles1",
