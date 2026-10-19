@@ -90,6 +90,33 @@ class ReferenceCase(ToolTest):
         return [site["where"] for site in reply["sites"]]
 
 
+class RefactorCase(ReferenceCase):
+    """Helpers for the tests that move things."""
+
+    def data_files(self):
+        """Every file under Data/, by name, as bytes."""
+        folder = self.project.data_dir
+        return {path.name: path.read_bytes() for path in sorted(folder.iterdir())
+                if path.is_file()}
+
+    def renumber(self, table, from_id, to_id, **more):
+        return self.call("refactor", op="renumber", table=table,
+                         from_id=from_id, to_id=to_id, **more)
+
+    def fresh(self):
+        """A new project object on the same folder, to read what is on disk."""
+        self.ctx = self.reopen()
+        self.project = self.ctx.project
+
+    def findings(self):
+        return self.call("validate")["findings"]
+
+    def changed_files(self, before):
+        after = self.data_files()
+        return sorted(name for name in set(before) | set(after)
+                      if before.get(name) != after.get(name))
+
+
 class TestTheToolIsAdvertisedHonestly(ReferenceCase):
     def test_the_kinds_are_the_rule_index_plus_the_rest(self):
         enum = REGISTRY["references"].schema["properties"]["kind"]["enum"]
@@ -312,6 +339,18 @@ class TestTheArgumentsAreStrictlyRead(ReferenceCase):
         with self.assertRaisesRegex(ToolError, "id must be at most"):
             self.call("references", kind="maps", id=10000)
 
+    def test_the_ceilings_are_the_advertised_numbers(self):
+        # Literals, not the constants: a constant compared with itself cannot
+        # notice that someone raised it.
+        with self.assertRaisesRegex(ToolError, "limit must be at most 200, "
+                                               "got 201"):
+            self.call("references", kind="items", id=1, limit=201)
+        with self.assertRaisesRegex(ToolError, "offset must be at most "
+                                               "100000, got 100001"):
+            self.call("references", kind="items", id=1, offset=100001)
+        self.assertEqual(self.call("references", kind="items", id=1,
+                                   limit=200)["limit"], 200)
+
     def test_limit_and_offset_are_bounded(self):
         for name, value, message in (
                 ("limit", 0, "limit must be at least 1"),
@@ -405,6 +444,64 @@ class TestAnUnreadableFileIsNotAnEmptyAnswerOnTheDeletePaths(ReferenceCase):
         self.assertNotIn("references_scan_stopped", row)
 
 
+class TestAHostileProjectCannotHurtEitherTool(RefactorCase):
+    def test_a_parameter_that_is_not_a_small_integer_names_nothing(self):
+        self.add_event([self.command(126, True, 0, 0, 1),
+                        self.command(126, 10 ** 5000, 0, 0, 1),
+                        self.command(126, 1.0, 0, 0, 1),
+                        self.command(126, [1], 0, 0, 1)])
+        # Only the chest's own command and the two drops count.
+        self.assertEqual(self.refs("items", 1)["total"], 3)
+        self.assertEqual(self.refs("items", 5)["total"], 0)
+
+    def test_a_command_whose_parameters_are_not_a_list_is_skipped(self):
+        game_map = self.project.load_map(1)
+        event = game_map.get("events").get(1)
+        event.get("pages")[0].get("list")[3].set("parameters", RubyHash())
+        self.write_map(1, game_map)
+        self.fresh()
+        self.assertEqual(self.refs("switches", 1)["total"], 0)
+
+    def test_a_map_tree_key_that_is_a_bignum_is_not_formatted(self):
+        def poison(infos):
+            infos.set(10 ** 5000, infos.get(2))
+        self.edit_data("MapInfos", poison)
+        reply = self.refs("maps", 1)
+        self.assertEqual(reply["total"], 3)
+        self.assertEqual(self.renumber("maps", 2, 5, dry_run=True)["blocked"],
+                         [])
+
+    def test_an_event_name_with_an_escape_is_not_echoed_raw(self):
+        self.add_event([self.command(117, 1)], name="\x1b[31mred\x07" * 40)
+        where = self.refs("common_events", 1)["sites"][0]["where"]
+        self.assertNotIn("\x1b", where)
+        self.assertNotIn("\x07", where)
+        self.assertLess(len(where), 2000)
+
+    def test_a_list_of_a_million_links_is_stopped_not_walked(self):
+        import time
+
+        def crowd(classes):
+            learning = classes[1].get("learnings")[0]
+            classes[1].set("learnings", [learning] * 300_000)
+        self.edit_data("Classes", crowd)
+        start = time.perf_counter()
+        reply = self.refs("skills", 1)
+        self.assertLess(time.perf_counter() - start, 20)
+        self.assertIn("references_stopped", reply)
+        # And a renumber built on a scan that stopped will not run.
+        self.call("db_edit", table="skills",
+                  ops=[{"op": "create", "id": 3, "clone_from": 2}])
+        preview = self.renumber("skills", 3, 9, dry_run=True)
+        self.assertTrue(any("did not finish" in line
+                            for line in preview["blocked"]))
+
+    def test_a_script_mention_scan_ignores_a_run_of_digits_past_the_limit(self):
+        self.add_event([self.command(355, "$game_switches[%s]" % ("9" * 5000))])
+        self.assertEqual(self.refs("switches", 9)["script_mentions"]["count"],
+                         0)
+
+
 class TestAgainstSwitchUsage(ReferenceCase):
     """`switch_usage` and `references` read the same project two ways."""
 
@@ -417,33 +514,6 @@ class TestAgainstSwitchUsage(ReferenceCase):
             for ident in seen:
                 with self.subTest(kind=kind, ident=ident):
                     self.assertGreaterEqual(self.refs(kind, ident)["total"], 1)
-
-
-class RefactorCase(ReferenceCase):
-    """Helpers for the tests that move things."""
-
-    def data_files(self):
-        """Every file under Data/, by name, as bytes."""
-        folder = self.project.data_dir
-        return {path.name: path.read_bytes() for path in sorted(folder.iterdir())
-                if path.is_file()}
-
-    def renumber(self, table, from_id, to_id, **more):
-        return self.call("refactor", op="renumber", table=table,
-                         from_id=from_id, to_id=to_id, **more)
-
-    def fresh(self):
-        """A new project object on the same folder, to read what is on disk."""
-        self.ctx = self.reopen()
-        self.project = self.ctx.project
-
-    def findings(self):
-        return self.call("validate")["findings"]
-
-    def changed_files(self, before):
-        after = self.data_files()
-        return sorted(name for name in set(before) | set(after)
-                      if before.get(name) != after.get(name))
 
 
 class TestRenumberingAnEntry(RefactorCase):
@@ -812,6 +882,12 @@ class TestRenumberingAMap(RefactorCase):
         # Riverbend (now 2) was the parent of the cave (now 1): the cave's
         # parent_id follows Riverbend to 2.
         self.assertEqual(infos.get(1).get("parent_id"), 2)
+        # And the files traded places: map 1 is now the cave, which holds the
+        # chest, and map 2 the town with the elder.
+        self.assertEqual(self.project.load_map(1).get("events").get(1)
+                         .get("name").data, b"Chest")
+        self.assertEqual(self.project.load_map(2).get("events").get(1)
+                         .get("name").data, b"Elder")
         self.assertEqual(self.findings(), [])
         self.call("refactor", op="renumber", table="maps", from_id=1,
                   to_id=2, swap=True)
@@ -1044,6 +1120,97 @@ class TestThePreviewAndTheAnswerAgree(RefactorCase):
                 self.assertEqual(
                     sorted(site["where"] for site in preview["sites"]),
                     listed)
+
+
+class TestTheProjectHelpersAMultiFileWriteUses(ToolTest):
+    def test_restore_bytes_puts_a_file_back_and_removes_one(self):
+        name = "Items" + self.extension
+        original = self.project.disk_bytes(name)
+        self.assertEqual(original, self.data_bytes("Items"))
+        self.project.load_data("items")[1].set("price", 99999)
+        self.project.save_file(name, tool="test")
+        self.assertNotEqual(self.project.disk_bytes(name), original)
+        self.project.restore_bytes(name, original)
+        self.assertEqual(self.project.disk_bytes(name), original)
+        # The cached copy described the write being undone, so it is gone.
+        self.assertEqual(self.project.load_data("items")[1].get("price"), 50)
+        self.project.restore_bytes("Extra" + self.extension, b"abc")
+        self.assertEqual(self.project.disk_bytes("Extra" + self.extension),
+                         b"abc")
+        self.project.restore_bytes("Extra" + self.extension, None)
+        self.assertIsNone(self.project.disk_bytes("Extra" + self.extension))
+
+    def test_restore_bytes_leaves_no_backup_and_no_log_line(self):
+        name = "Items" + self.extension
+        before = sorted(p.name for p in (self.project.root / ".rpgvxace-mcp")
+                        .rglob("*")) if (self.project.root
+                                         / ".rpgvxace-mcp").exists() else []
+        self.project.restore_bytes(name, self.project.disk_bytes(name))
+        after = sorted(p.name for p in (self.project.root / ".rpgvxace-mcp")
+                       .rglob("*")) if (self.project.root
+                                        / ".rpgvxace-mcp").exists() else []
+        self.assertEqual(after, before)
+
+    def test_check_fresh_refuses_a_file_that_changed_on_disk(self):
+        from rpgvxace_mcp.project import StaleFileError
+        name = "Items" + self.extension
+        self.project.load_data("items")
+        self.project.check_fresh(name)          # unchanged: fine
+        path = self.project.path_for(name)
+        path.write_bytes(path.read_bytes() + b"\x00")
+        with self.assertRaises(StaleFileError):
+            self.project.check_fresh(name)
+
+    def test_check_fresh_ignores_a_file_that_is_not_loaded(self):
+        self.project.check_fresh("NeverLoaded" + self.extension)
+
+    def test_exchange_cached_needs_both_files_loaded(self):
+        from rpgvxace_mcp.project import ProjectError
+        self.project.load_map(1)
+        with self.assertRaisesRegex(ProjectError, "both .* must be loaded"):
+            self.project.exchange_cached(self.project.map_file(1),
+                                         self.project.map_file(2))
+        self.project.load_map(2)
+        first, second = self.project.load_map(1), self.project.load_map(2)
+        self.project.exchange_cached(self.project.map_file(1),
+                                     self.project.map_file(2))
+        self.assertIs(self.project.load_map(1), second)
+        self.assertIs(self.project.load_map(2), first)
+
+
+class TestOtherEnginesCannotRenumber(ToolTest):
+    engine = "xp"
+
+    def test_xp_is_refused_with_the_reason(self):
+        before = self.data_bytes("Items")
+        with self.assertRaisesRegex(ToolError, "only offered on VX Ace"):
+            self.call("refactor", op="renumber", table="items", from_id=1,
+                      to_id=7)
+        self.assertEqual(self.data_bytes("Items"), before)
+
+    def test_naming_a_switch_still_works_there(self):
+        self.call("refactor", op="rename_switch", id=1, name="Gate")
+        self.assertEqual(self.reopen().project.load_data("system")
+                         .get("switches")[1].data, b"Gate")
+
+
+class TestAReadOnlyServer(ToolTest):
+    read_only = True
+
+    def test_a_renumber_is_refused_before_anything_is_prepared(self):
+        from rpgvxace_mcp.project import ReadOnlyError
+        with self.assertRaisesRegex(ReadOnlyError, "read-only"):
+            self.call("refactor", op="renumber", table="items", from_id=1,
+                      to_id=7)
+
+    def test_a_preview_still_works(self):
+        reply = self.call("refactor", op="renumber", table="items",
+                          from_id=1, to_id=7, dry_run=True)
+        self.assertEqual(reply["sites_total"], 3)
+
+    def test_references_still_works(self):
+        self.assertEqual(self.call("references", kind="items", id=1)["total"],
+                         3)
 
 
 class TestReferencesOnAnotherEngine(ToolTest):

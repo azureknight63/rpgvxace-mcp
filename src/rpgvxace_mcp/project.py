@@ -929,6 +929,16 @@ class Project(BackupStore):
     # stale, to put two cached files' contents under each other's names, and
     # to undo the files that did land when a later one does not. `renumber` is
     # the caller; see `tools/reference_tools.py`.
+    def require_writable(self, what: str) -> None:
+        """Refuse now if nothing may be written: before a change is prepared.
+
+        `save_file` refuses too, but a multi-file change that discovers a
+        read-only server at its first save has already staged, scanned and
+        pinned everything for nothing, and says "put back" about files it
+        never touched.
+        """
+        self._assert_writable(what)
+
     def check_fresh(self, *filenames: str) -> None:
         """Refuse, before anything is written, if a loaded file changed on disk.
 

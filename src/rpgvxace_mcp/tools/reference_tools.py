@@ -566,6 +566,7 @@ def _apply(ctx: Context, plan: _Plan, limit: int, offset: int,
            allow_scripts: bool) -> dict[str, Any]:
     """Stage every file, rewrite, and save all of them or none."""
     project = ctx.project
+    project.require_writable("renumbering %s %d" % (plan.table, plan.from_id))
     names = set(plan.files) | set(plan.moves)
     with ctx.staged(*sorted(names)) as landed:
         # Scanned again with the files pinned: the first scan only learned
