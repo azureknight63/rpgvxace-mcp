@@ -67,6 +67,7 @@ MAIN = _SRC + "__main__.py"
 
 LIVE_BRIDGE = _SRC + "live/bridge.py"
 LIVE_SESSION = _SRC + "live/session.py"
+PLAYTEST = _SRC + "live/playtest.py"
 
 
 COMMAND_DOCS = _SRC + "tools/command_docs_tools.py"
@@ -185,6 +186,20 @@ HOSTILEINFO = _at("test_hostile_input", "TestProjectInfoRefreshRereadsTheScripts
 HOSTILERAW = _at("test_hostile_input", "TestRawDataRefusesBeforeItLoadsAndKeepsItsShapeGuard")
 VOCABTILES = _at("test_guards_replies", "TestOneVocabularyForAPartialAnswer")
 HOSTILERE = _at("test_hostile_input", "TestTheRereviewOfTheScrubFixes")
+# test_playtest
+PTBRIDGE = _at("test_playtest", "TestTheBridgeTextForWalking")
+PTWALK = _at("test_playtest", "TestWalkingToATile")
+PTSTOP = _at("test_playtest", "TestWhyAWalkStops")
+PTBIG = _at("test_playtest", "TestWalkingOnABigMap")
+PTARGS = _at("test_playtest", "TestArgumentsAreCheckedBeforeTheGameSeesThem")
+PTEXPECT = _at("test_playtest", "TestExpectations")
+PTEVAL = _at("test_playtest", "TestAScenarioCannotReachEval")
+PTBOUND = _at("test_playtest", "TestAScenarioIsBounded")
+PTGRID = _at("test_playtest", "TestTheGridAndTheSearch")
+PTDIFF = _at("test_playtest", "TestWhatChangedBetweenTwoLooks")
+PTINTERACT = _at("test_playtest", "TestInteracting")
+
+
 HOSTILEZ = _at("test_hostile_input", "TestAFloatKeepsItsSign")
 HOSTILEID = _at("test_hostile_input", "TestAnEntryIdBelowZeroIsRefused")
 CONVBYTES = _at("test_convert_input", "TestAStringThatDoesNotComeBackTravelsAsBytes")
@@ -4032,5 +4047,216 @@ GUARDS = [
         '''                   if p.is_file()),''',
         [HOSTILERENDER + 'test_only_its_own_pictures_are_trimmed'],
         'the glob wildcard ? matches any character: a map-0001-holidaypic.png kept in a shared --render-dir counted as ours and was trimmed',
+    ),
+    Guard(
+        'a scenario runs only ops from its own list', LIVE_TOOLS,
+        ['''            if isinstance(op, str) and op in _NOT_IN_A_SCENARIO:''',
+         '''            op = one_of(step, "op", list(SCENARIO_OPS))'''],
+        ['''            if False:''',
+         '''            op = step.get("op")'''],
+        [PTEVAL + 'test_eval_is_refused_even_with_both_keys_turned',
+         PTEVAL + 'test_start_stop_and_scenario_are_refused_by_name',
+         PTEVAL + 'test_the_refusal_happens_before_any_step_runs'],
+        'a scenario step named eval would have reached the eval handler, behind a gate whose operator half the model cannot turn',
+    ),
+    Guard(
+        'a scenario holds a step ceiling in the handler and the schema', LIVE_TOOLS,
+        ['''    if len(raw) > playtest.MAX_SCENARIO_STEPS:''',
+         '''            maxItems=playtest.MAX_SCENARIO_STEPS),'''],
+        ['''    if False:''',
+         '''            maxItems=10 ** 6),'''],
+        [PTBOUND + 'test_too_many_steps_are_refused_before_any_runs',
+         PTBOUND + 'test_the_step_ceiling_holds_when_the_handler_is_called_directly'],
+        'a scenario of any length ran, each step a bounded wait: the total was unbounded',
+    ),
+    Guard(
+        'a scenario stops when its seconds are spent', LIVE_TOOLS,
+        '''        if elapsed >= max_seconds:''',
+        '''        if False:''',
+        [PTBOUND + 'test_the_total_time_is_bounded'],
+        'a scenario ran every step whatever the wall clock said',
+    ),
+    Guard(
+        'a scenario stops a step that would spend its frames', LIVE_TOOLS,
+        '''                    step_args, "frames", 1, 1, MAX_STEP_FRAMES) > max_frames:''',
+        '''                    step_args, "frames", 1, 1, MAX_STEP_FRAMES) > 10 ** 9:''',
+        [PTBOUND + 'test_the_total_frames_are_bounded'],
+        'three steps of six frames ran under a ten-frame scenario budget',
+    ),
+    Guard(
+        'a walk inside a scenario gets only what is left of the budget', LIVE_TOOLS,
+        '''    args[key] = max(1, min(given, int(remaining)))''',
+        '''    args[key] = given''',
+        [PTBOUND + 'test_a_step_cannot_raise_the_scenarios_ceiling',
+         PTBOUND + 'test_frames_spent_by_a_walk_count_against_the_scenario',
+         PTBOUND + 'test_a_walk_inside_is_held_to_what_time_is_left'],
+        'a walk_to step could name its own ceiling and spend more than the whole scenario was given',
+    ),
+    Guard(
+        'an expect that checks nothing is refused', LIVE_TOOLS,
+        '''    if not checks:''',
+        '''    if False:''',
+        [PTEXPECT + 'test_a_bad_expect_is_refused_with_a_reason'],
+        'expect: {} passed: a test that asserts nothing reported success',
+    ),
+    Guard(
+        'one step makes a bounded number of comparisons in all', LIVE_TOOLS,
+        '''    if len(checks) > playtest.MAX_EXPECT_CHECKS:''',
+        '''    if False:''',
+        [PTEXPECT + 'test_too_many_comparisons_are_refused'],
+        'the per-key id limit let switches and variables each take the whole allowance',
+    ),
+    Guard(
+        'a quoted number is quoted, not formatted', REGISTRY,
+        ['''        raise ToolError("%s must be at least %d, got %s"
+                        % (what, minimum, echo(value)))''',
+         '''        raise ToolError("%s must be at most %d, got %s"
+                        % (what, maximum, echo(value)))'''],
+        ['''        raise ToolError("%s must be at least %d, got %d"
+                        % (what, minimum, value))''',
+         '''        raise ToolError("%s must be at most %d, got %d"
+                        % (what, maximum, value))'''],
+        [PTARGS + 'test_an_enormous_coordinate_is_a_refusal_not_a_crash'],
+        'x=10**5000 raised ValueError (CPython will not render 4,300+ digits) out of as_int instead of a ToolError',
+    ),
+    Guard(
+        'a route is bounded before the player moves', PLAYTEST,
+        '''    if len(route) > MAX_WALK_PATH:''',
+        '''    if False:''',
+        [PTWALK + 'test_a_route_over_the_ceiling_is_refused_before_moving'],
+        'a route of any length was walked',
+    ),
+    Guard(
+        'a walk stops when its frames are spent', PLAYTEST,
+        '''            if run.frames_left < run.limits.frames_per_step:''',
+        '''            if False:''',
+        [PTSTOP + 'test_the_frame_budget_stops_the_walk',
+         PTSTOP + 'test_a_budget_smaller_than_one_step_does_nothing'],
+        'max_frames was read and never checked',
+    ),
+    Guard(
+        'a walk stops when its seconds are spent', PLAYTEST,
+        '''            if run.out_of_time():''',
+        '''            if False:''',
+        [PTSTOP + 'test_the_wall_clock_stops_the_walk'],
+        'max_seconds was read and never checked',
+    ),
+    Guard(
+        'a press that moves nothing is blocked after two tries', PLAYTEST,
+        '''            if attempts >= _ATTEMPTS:''',
+        '''            if attempts >= 2 ** 20:''',
+        [PTSTOP + 'test_blocked_when_the_game_will_not_let_the_player_in'],
+        'a character in the way made the walk press into it until the frame budget ended',
+    ),
+    Guard(
+        'a read too large for one window is refused in Python too', PLAYTEST,
+        '''        if cells > bridge.MAX_PASS_CELLS:''',
+        '''        if False:''',
+        [PTBIG + 'test_a_target_too_far_to_plan_in_one_window_is_refused'],
+        'the window was sent to the game, which would run thousands of passable? calls in one frame',
+    ),
+    Guard(
+        'a message outranks blocked but not arrival', PLAYTEST,
+        '''    if spot == target:
+        return "arrived"
+    if message_of(state):''',
+        '''    if message_of(state):
+        return "message_open"
+    if spot == target:
+        return "arrived"
+    if False:''',
+        [PTSTOP + 'test_arriving_on_a_message_is_still_an_arrival'],
+        'a walk that ended on an event tile reported message_open instead of arrived',
+    ),
+    Guard(
+        'a transfer is not an arrival at the same coordinates', PLAYTEST,
+        '''    if (found.get("transferring") or found["map_id"] != start_map''',
+        '''    if (False or found["map_id"] != start_map''',
+        [PTSTOP + 'test_moved_elsewhere_by_a_transfer_in_progress'],
+        'a player mid-transfer was classified by its stale position',
+    ),
+    Guard(
+        'a switch the bridge turned off is a change', PLAYTEST,
+        '''            before_value, after_value = old.get(key, off), new.get(key, off)''',
+        '''            before_value, after_value = old.get(key, None), new.get(key, None)''',
+        [PTDIFF + 'test_a_variable_back_to_zero_leaves_the_listing_and_is_a_change',
+         PTDIFF + 'test_a_switch_that_went_off_is_a_change_too'],
+        'the diff compared a missing id against a missing id and a listed False',
+    ),
+    Guard(
+        'a cut-off section is not reported as unchanged', PLAYTEST,
+        '''        if any(name in (state.get("truncated") or ())''',
+        '''        if any(False and name in (state.get("truncated") or ())''',
+        [PTDIFF + 'test_a_section_the_bridge_cut_off_is_not_reported_as_unchanged'],
+        'a diff of half a list said nothing changed',
+    ),
+    Guard(
+        'an id past a cut-off listing is unknown, not off', PLAYTEST,
+        '''        if key > max([i for i in ids if i is not None] or [0]):''',
+        '''        if False:''',
+        [PTEXPECT + 'test_a_listing_cut_at_the_ceiling_cannot_vouch_for_a_later_id'],
+        'expect switches {9: false} passed because the listing stopped before 9',
+    ),
+    Guard(
+        'a passability grid is checked against what it described', PLAYTEST,
+        '''        if (not isinstance(rows, list) or len(rows) != high''',
+        '''        if (False or len(rows) != high''',
+        [PTGRID + 'test_a_malformed_grid_is_refused'],
+        'a rows value that was not a list was indexed as one',
+    ),
+    Guard(
+        'a route is planned over the cells the game reported', PLAYTEST,
+        '''            if bits & _BIT[direction] and self.holds(x + dx, y + dy):''',
+        '''            if self.holds(x + dx, y + dy):''',
+        [PTGRID + 'test_a_cells_bits_are_down_left_right_up',
+         PTGRID + 'test_a_one_way_cell_is_one_way'],
+        'every neighbour was a step, so walls were planned through',
+    ),
+    Guard(
+        'an interaction names a direction or an event, not both', LIVE_TOOLS,
+        '''    if direction is not None and event_id is not None:''',
+        '''    if False:''',
+        [PTARGS + 'test_interact_takes_a_direction_or_an_event_not_both'],
+        'direction was silently overridden by the side an event is approached from',
+    ),
+    Guard(
+        'an erased event is not walked to', PLAYTEST,
+        '''        if located.get("erased"):''',
+        '''        if False:''',
+        [PTINTERACT + 'test_an_erased_event_is_refused'],
+        'the walk went to the place an erased event used to stand',
+    ),
+    Guard(
+        'the bridge reads cells in a bounded window', LIVE_BRIDGE,
+        '''    if cells > MAX_PASS_CELLS''',
+        '''    if false''',
+        [PTBRIDGE + 'test_the_read_is_bounded_before_it_loops'],
+        'one passability request could ask the game thousands of passable? calls in a single frame',
+    ),
+    Guard(
+        'a cell that raises is blocked, and an exit is not swallowed', LIVE_BRIDGE,
+        '''      rescue StandardError
+        bits |= 0''',
+        '''      rescue Exception
+        bits |= 0''',
+        [PTBRIDGE + 'test_a_cell_that_raises_is_left_unpassable_not_fatal'],
+        'rescue Exception around the per-cell call would swallow RGSSReset and SystemExit',
+    ),
+    Guard(
+        'the player is not turned while it is moving', LIVE_BRIDGE,
+        '''    if $game_player.moving?
+      raise ArgumentError, "the player is moving; step until it stops"
+    end
+''',
+        '''''',
+        [PTBRIDGE + 'test_face_will_not_turn_a_moving_player'],
+        'face turned a player mid-step, which the engine then drew facing backwards',
+    ),
+    Guard(
+        'an event id is a whole number before it indexes the map', LIVE_BRIDGE,
+        '''    unless id.is_a?(Integer) && id >= 1''',
+        '''    unless true''',
+        [PTBRIDGE + 'test_locate_checks_the_id_before_it_indexes'],
+        'a hand-written locate request with a non-number reached $game_map.events[]',
     ),
 ]

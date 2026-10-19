@@ -43,7 +43,7 @@ BRIDGE_SLOT_NAME = "rpgvxace-mcp live bridge"
 # Every op the Ruby side answers. `live_tools` forwards a subset of these;
 # `quit` is sent by `stop` and `ping` by `status`.
 BRIDGE_OPS = ("ping", "state", "pause", "resume", "step", "input", "set",
-              "teleport", "eval", "quit")
+              "teleport", "eval", "quit", "passability", "locate", "face")
 
 
 # The ops the bridge still answers after the game has raised.
@@ -72,6 +72,13 @@ MAX_BRIDGE_TEXT = 4000
 TELEPORT_FRAMES = 600
 
 
+# The most cells one `passability` read asks the game about. Each cell is
+# four calls to the game's own `passable?`, and each of those looks at every
+# event on the map, all inside one frame: a bounded read keeps that frame
+# short. A larger map is read in a window around the walk.
+MAX_PASS_CELLS = 4096
+
+
 _RUBY = r'''#==============================================================================
 # ** rpgvxace-mcp live bridge
 #------------------------------------------------------------------------------
@@ -97,6 +104,8 @@ module MCPBridge
   MAX_ENTRIES = __MAX_ENTRIES__
   MAX_TEXT = __MAX_TEXT__
   TELEPORT_FRAMES = __TELEPORT_FRAMES__
+  MAX_PASS_CELLS = __MAX_PASS_CELLS__
+  PASS_BITS = [[2, 1], [4, 2], [6, 4], [8, 8]]
 
   @config = {}
   @frame = 0
@@ -238,6 +247,12 @@ module MCPBridge
       teleport(seq, args)
     when "eval"
       respond(seq, true, evaluate(args))
+    when "passability"
+      respond(seq, true, passability(args))
+    when "locate"
+      respond(seq, true, locate(args))
+    when "face"
+      respond(seq, true, face(args))
     when "quit"
       respond(seq, true, status)
       exit
@@ -540,6 +555,85 @@ module MCPBridge
   end
 
   #--------------------------------------------------------------------------
+  # * Walking: what the game itself says the player can do
+  #--------------------------------------------------------------------------
+  def self.clip(value, size)
+    [[value.to_i, 0].max, size - 1].min
+  end
+
+  # One hex digit per cell: bit 1 is down, 2 left, 4 right, 8 up, set when
+  # the player could step that way from the cell. Asked of the game's own
+  # passable?, so events that block and the vehicle rules are included.
+  def self.passability(args)
+    unless $game_player && $game_map && $game_map.map_id > 0
+      raise ArgumentError, "there is no map to read"
+    end
+    width = $game_map.width
+    height = $game_map.height
+    x0 = clip(args["x0"] || 0, width)
+    y0 = clip(args["y0"] || 0, height)
+    x1 = clip(args["x1"] || width - 1, width)
+    y1 = clip(args["y1"] || height - 1, height)
+    if x1 < x0 || y1 < y0
+      raise ArgumentError, "the window is empty (#{x0},#{y0} to #{x1},#{y1})"
+    end
+    cells = (x1 - x0 + 1) * (y1 - y0 + 1)
+    if cells > MAX_PASS_CELLS
+      raise ArgumentError, "a window of #{cells} cells is more than the " +
+                           "#{MAX_PASS_CELLS} one read allows"
+    end
+    rows = []
+    (y0..y1).each do |y|
+      line = ""
+      (x0..x1).each do |x|
+        line << pass_bits(x, y).to_s(16)
+      end
+      rows.push(line)
+    end
+    {"map_id" => $game_map.map_id, "width" => width, "height" => height,
+     "x0" => x0, "y0" => y0, "x1" => x1, "y1" => y1, "rows" => rows}
+  end
+
+  def self.pass_bits(x, y)
+    bits = 0
+    PASS_BITS.each do |direction, bit|
+      begin
+        bits |= bit if $game_player.passable?(x, y, direction)
+      rescue StandardError
+        bits |= 0
+      end
+    end
+    bits
+  end
+
+  def self.locate(args)
+    id = args["event_id"]
+    unless id.is_a?(Integer) && id >= 1
+      raise ArgumentError, "event_id must be a whole number from 1"
+    end
+    event = $game_map.events[id]
+    raise ArgumentError, "map #{$game_map.map_id} has no event #{id}" unless event
+    {"map_id" => $game_map.map_id, "event_id" => id, "x" => event.x,
+     "y" => event.y, "direction" => event.direction,
+     "through" => event.through ? true : false,
+     "erased" => event.instance_variable_get(:@erased) ? true : false}
+  end
+
+  def self.face(args)
+    direction = args["direction"]
+    unless NUMERIC_KEYS.key?(direction)
+      raise ArgumentError, "direction must be 2, 4, 6 or 8"
+    end
+    if $game_player.moving?
+      raise ArgumentError, "the player is moving; step until it stops"
+    end
+    $game_player.set_direction(direction)
+    result = status
+    result["direction"] = $game_player.direction
+    result
+  end
+
+  #--------------------------------------------------------------------------
   # * The escape hatch, if this session allowed it
   #--------------------------------------------------------------------------
   def self.evaluate(args)
@@ -680,6 +774,7 @@ def ruby_source() -> str:
         "__MAX_ENTRIES__": str(MAX_STATE_ENTRIES),
         "__MAX_TEXT__": str(MAX_BRIDGE_TEXT),
         "__TELEPORT_FRAMES__": str(TELEPORT_FRAMES),
+        "__MAX_PASS_CELLS__": str(MAX_PASS_CELLS),
     }
     text = _RUBY
     for placeholder, value in filled.items():
