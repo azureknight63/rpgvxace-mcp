@@ -144,7 +144,7 @@ the server at the folder.
 
 ## Tools
 
-Twenty tools, grouped by what they touch. The ones that write are marked ✏️;
+Twenty-six tools, grouped by what they touch. The ones that write are marked ✏️;
 each of those takes `dry_run` and backs the file up before changing it.
 
 | Tool | What it does |
@@ -159,7 +159,7 @@ each of those takes `dry_run` and backs the file up before changing it.
 | `map_tiles` ✏️ | Read, write or flood-fill a rectangle of tile ids on any of the three tile layers, or of Ace's fourth layer — raw, or just its region ids (`view=region`) or shadow bits (`view=shadow`), keeping the other part. |
 | `map_paint` ✏️ | Build a VX Ace map without computing tile ids: paint an autotile *kind* (`A2:0`, `A4:8`, or a plain `A5:3`) over a rectangle, a cell list or an outline, and every cell gets the edge/corner shape its neighbours call for while the cells around the edit are re-shaped to join it, as the editor does. `room`, `corridor` and a seeded, repeatable `dungeon` lay out floor, A4/A3 wall faces and wall tops in the VX Ace dungeon style, with the editor's wall shadows; `region` paints region ids. Bounded per call (cells, rooms, re-shaped cells). VX and XP are refused. |
 | `map_stamp` ✏️ | Copy a rectangle of a map (its tile layers, shadows and regions, and the events standing in it) under a name, and paste it back later onto the same map or another, optionally mirrored or rotated. A turned stamp's autotile shapes are re-derived for the new orientation and the cells around the paste are re-shaped to join it; events get new ids and moved positions, never overwrite another event, and the commands that cannot move with them (Set Event Location, transfers to the same map, references to other events by number) are reported as `position_dependent`. A paste past the map edge is clipped and says so. Bounded per stamp (cells, events, bytes, stamps kept); a stamp file is checked field by field before it is used. See [docs/map_stamp.md](docs/map_stamp.md). |
-| `map_render` | Draw a VX Ace map as a PNG you can look at: autotiles, the three tile layers, shadows, event graphics from the project and RTP, optional regions and grid, crop and scale. Returned as an image (up to 1,000,000 bytes of PNG) and always written to a file whose path is returned, for clients that show no images. VX maps are refused. |
+| `map_render` | Draw a VX Ace map as a PNG you can look at: autotiles, the three tile layers, shadows, event graphics from the project and RTP, optional regions and grid, crop and scale, and `overlays` that mark passability, terrain tags, region and event ids. Returned as an image (up to 1,000,000 bytes of PNG) and always written to a file whose path is returned, for clients that show no images. XP draws its tileset tiles and VX is refused unless `unverified_formats` is set; see [docs/engine_parity.md](docs/engine_parity.md). |
 | `event_get` | Events and their command lists, rendered as readable indented script. Lists at most 2000 events per call; `events_truncated` says there are more and `offset` pages to them. |
 | `event_edit` ✏️ | Author events and command lists from a compact DSL (see below). |
 | `event_template` ✏️ | Build a whole event from a built-in template — treasure chest, door (and both sides of a doorway on two maps), sign, NPC, shop, save point, inn, lever — from a few parameters. `describe` shows a template's parameters and command table, `preview` the exact pages it would write, `create` writes them the way `event_edit` would. See [docs/event_template.md](docs/event_template.md). |
@@ -521,8 +521,9 @@ the script slots, for VX Ace, VX and XP projects.
 
 **Not included:**
 
-* **A live connection to a running game.** There is no runtime state, screenshot
-  or playtest control. Editing files is the whole of it.
+* **Live play-testing without Windows and VX Ace.** `live` drives a scratch
+  copy of a running VX Ace game (see [docs/live.md](docs/live.md)); there is
+  no equivalent for VX or XP.
 * **Editing an encrypted archive** (`Game.rgss3a`, `Game.rgss2a`). A folder
   that ships only the archive, with no `Data` folder beside it, opens
   **read-only**: `Data` is unpacked to a temporary cache (removed on exit) and
@@ -539,8 +540,8 @@ the script slots, for VX Ace, VX and XP projects.
   `Game.rxproj`) is modelled and opens without a flag: its data files, its
   RGSS1 classes, its own command table, its three-layer maps and its tilesets
   are read and written, and new maps, events and pages are built in XP's
-  shape. What XP does not get: `map_render` (XP's autotile patterns are its
-  built-in Tilemap's), regions and shadows (XP has neither), the `event_edit`
+  shape. What XP does not get: autotiles and characters in `map_render` unless
+  `unverified_formats` is set (see [docs/engine_parity.md](docs/engine_parity.md)), regions and shadows (XP has neither), the `event_edit`
   forms whose XP layout differs or was not checked (`wait`, `move_route`,
   the audio forms and the rest of the layout forms -- write those with `raw`),
   and `validate`'s rules that read graphics and audio out of command
