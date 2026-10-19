@@ -69,7 +69,7 @@ MAX_OFFSET = 100_000
 # above it, so nothing above it exists to be named.
 MAX_SWITCH_ID = 5000
 # The highest database id the tools address (db_edit's own ceiling).
-MAX_ENTRY_ID = 9999
+MAX_REFERENCE_ID = 9999
 # How far past the end of a table a renumber may reach, so one call cannot
 # pad a table with a thousand empty slots. db_edit's create allows the same.
 ARRAY_GROWTH_HEADROOM = 1000
@@ -118,14 +118,14 @@ _TOOL = "refactor"
     "both mean `total` is a lower bound. Does not change anything -- "
     "`refactor` renumbers and renames. Command layouts are VX Ace's and VX's "
     "shared ones; database fields are modelled for VX Ace only."
-    % (", ".join(REFERENCE_KIND_NAMES), MAX_SWITCH_ID, MAX_ENTRY_ID, MAX_SITES,
+    % (", ".join(REFERENCE_KIND_NAMES), MAX_SWITCH_ID, MAX_REFERENCE_ID, MAX_SITES,
        DEFAULT_SITES, MAX_OFFSET),
     schema({
         "kind": prop(STR, "What kind of thing: " + ", ".join(
             REFERENCE_KIND_NAMES) + ".", enum=list(REFERENCE_KIND_NAMES)),
         "id": prop(INT, "Its number: the id in its table, the map id, or the "
                         "switch or variable number.",
-                   minimum=1, maximum=MAX_ENTRY_ID),
+                   minimum=1, maximum=MAX_REFERENCE_ID),
         "limit": prop(INT, "How many sites to list (default %d, at most %d)."
                       % (DEFAULT_SITES, MAX_SITES),
                       minimum=1, maximum=MAX_SITES),
@@ -140,7 +140,7 @@ def references(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     from ..analysis import coverage_for, scan_sites
 
     kind = one_of(args, "kind", list(REFERENCE_KIND_NAMES))
-    ident = need_int(args, "id", minimum=1, maximum=MAX_ENTRY_ID)
+    ident = need_int(args, "id", minimum=1, maximum=MAX_REFERENCE_ID)
     if kind in ("switches", "variables") and ident > MAX_SWITCH_ID:
         raise ToolError("%s are numbered 1 to %d, got %d"
                         % (kind, MAX_SWITCH_ID, ident))
@@ -161,7 +161,7 @@ def references(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     reply["script_mentions"] = _mentions(scan)
     reply.update(partial(
         "references", stopped=budget.note("references"),
-        not_read=scan.not_read))
+        not_read=scan.unread))
     return reply
 
 
@@ -212,9 +212,9 @@ def _mentions(scan: Any) -> dict[str, Any]:
         "table": prop(STR, "For renumber: the table, or maps.",
                       enum=list(RENUMBER_TABLES)),
         "from_id": prop(INT, "For renumber: the entry or map to move.",
-                        minimum=1, maximum=MAX_ENTRY_ID),
+                        minimum=1, maximum=MAX_REFERENCE_ID),
         "to_id": prop(INT, "For renumber: where it goes. Must be free unless "
-                           "swap is true.", minimum=1, maximum=MAX_ENTRY_ID),
+                           "swap is true.", minimum=1, maximum=MAX_REFERENCE_ID),
         "swap": prop(BOOL, "For renumber: exchange two existing entries "
                            "(from_id and to_id) instead of moving one into a "
                            "free id."),
@@ -320,8 +320,8 @@ def _renumber(ctx: Context, args: dict[str, Any],
 
     project = ctx.project
     table = one_of(args, "table", list(RENUMBER_TABLES))
-    from_id = need_int(args, "from_id", minimum=1, maximum=MAX_ENTRY_ID)
-    to_id = need_int(args, "to_id", minimum=1, maximum=MAX_ENTRY_ID)
+    from_id = need_int(args, "from_id", minimum=1, maximum=MAX_REFERENCE_ID)
+    to_id = need_int(args, "to_id", minimum=1, maximum=MAX_REFERENCE_ID)
     swap = opt_bool(args, "swap")
     limit = opt_int_default(args, "limit", DEFAULT_SITES, 1, MAX_SITES)
     offset = opt_int_default(args, "offset", 0, 0, MAX_OFFSET)
@@ -388,12 +388,12 @@ def _plan(ctx: Context, table: str, from_id: int, to_id: int, swap: bool,
         plan.blockers.append(
             "the scan did not finish, so references may have been missed: %s"
             % budget.note("renumber's reference scan"))
-    if scan.not_read:
+    if scan.unread:
         plan.blockers.append(
             "these could not be read, so a reference in them would be "
             "missed: %s" % ", ".join("%s (%s)" % (name, why)
                                      for name, why in sorted(
-                                         scan.not_read.items())))
+                                         scan.unread.items())))
     if scan.mention_total and not allow_scripts:
         shown = "; ".join("%s: %s" % (m.where, m.text)
                           for m in scan.mentions[:3])
@@ -451,7 +451,7 @@ def _check_entries(ctx: Context, plan: _Plan) -> None:
             raise ToolError(
                 "%s %d is already taken. Pick a free id, or pass swap true "
                 "to exchange the two" % (table, plan.to_id))
-        ceiling = min(MAX_ENTRY_ID, len(container) + ARRAY_GROWTH_HEADROOM)
+        ceiling = min(MAX_REFERENCE_ID, len(container) + ARRAY_GROWTH_HEADROOM)
         if plan.to_id > ceiling:
             raise ToolError(
                 "to_id %d is too high: %s has %d slots, so ids up to %d are "

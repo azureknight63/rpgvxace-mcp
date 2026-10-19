@@ -368,6 +368,43 @@ class TestTheAnswerIsBoundedAndSaysSo(ReferenceCase):
         self.assertIn("map 2", reply["references_not_read"])
 
 
+class TestAnUnreadableFileIsNotAnEmptyAnswerOnTheDeletePaths(ReferenceCase):
+    """A defect in the existing scan, found while building this one.
+
+    `iter_command_lists` skips a map or table it cannot read, silently, and
+    the two delete previews are built on it: with one map unparseable, "no
+    event points at this" was reported as a finished scan, and the delete it
+    gates went ahead on the strength of a map nobody had looked in.
+    """
+
+    def corrupt(self, map_id):
+        path = self.project.path_for(self.project.map_file(map_id))
+        path.write_bytes(b"\x04\x08 not marshal")
+        self.ctx = self.reopen()
+        self.project = self.ctx.project
+
+    def test_a_db_delete_preview_says_a_map_was_not_read(self):
+        self.corrupt(1)
+        reply = self.call("db_edit", table="items", dry_run=True,
+                          ops=[{"op": "delete", "id": 2}])
+        row = reply["would_apply"][0]
+        self.assertIs(row["references_checked"], False)
+        self.assertIn("map 1", row["references_scan_stopped"])
+        self.assertIn("could not be read", row["references_scan_stopped"])
+
+    def test_a_map_delete_preview_says_so_too(self):
+        self.corrupt(1)
+        reply = self.call("map_edit", op="delete", map_id=2, dry_run=True)
+        self.assertIn("map 1", reply["incoming_transfers_scan_stopped"])
+
+    def test_a_readable_project_still_reports_a_finished_scan(self):
+        reply = self.call("db_edit", table="items", dry_run=True,
+                          ops=[{"op": "delete", "id": 2}])
+        row = reply["would_apply"][0]
+        self.assertIs(row["references_checked"], True)
+        self.assertNotIn("references_scan_stopped", row)
+
+
 class TestAgainstSwitchUsage(ReferenceCase):
     """`switch_usage` and `references` read the same project two ways."""
 

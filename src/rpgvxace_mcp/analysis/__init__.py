@@ -86,6 +86,8 @@ from .references import (  # noqa: F401
     reference_preview,
     reference_previews,
     rule_index,
+    scan_note,
+    unreadable_sources,
 )
 # Every name `lint` re-exports, and the same set: this list and the one
 # in `lint/__init__` were written by hand and had drifted eleven names

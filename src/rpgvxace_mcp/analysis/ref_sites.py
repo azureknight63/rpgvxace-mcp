@@ -515,7 +515,7 @@ class SiteScan:
         # Files and tables the scan could not read, by name. A reference in
         # one of these would be invisible, so an unreadable file makes the
         # scan incomplete for anything that acts on it.
-        self.not_read: dict[str, str] = {}
+        self.unread: dict[str, str] = {}
         self._limit = store_limit
 
     def note(self, build: Callable[[], Hit]) -> None:
@@ -602,7 +602,7 @@ class _Scanner:
         try:
             return self.project.entries(table)
         except (ProjectError, ValueError, OSError) as exc:
-            self.scan.not_read[table] = brief(str(exc), 160)
+            self.scan.unread[table] = brief(str(exc), 160)
             return []
 
     def _readable(self) -> None:
@@ -616,7 +616,8 @@ class _Scanner:
             try:
                 self.project.load_map(map_id)
             except (ProjectError, ValueError, OSError) as exc:
-                self.scan.not_read["map %d" % map_id] = brief(str(exc), 160)
+                name = "map %d" % map_id
+                self.scan.unread[name] = brief(str(exc), 160)
         for table in ("common_events", "troops"):
             self._rows(table)
 
@@ -827,7 +828,7 @@ class _Scanner:
         try:
             slots = self.project.load_scripts()
         except (ProjectError, ValueError, OSError) as exc:
-            self.scan.not_read["scripts"] = brief(str(exc), 160)
+            self.scan.unread["scripts"] = brief(str(exc), 160)
             return
         for slot in slots:
             if not self.budget.spend(1):
@@ -1042,7 +1043,7 @@ def scan_sites(project: Project, kind: str, wanted: "set[int]",
     ``store_limit`` bounds how many `Hit` rows are kept (all are counted);
     ``None`` keeps every one, which a rewrite needs. A scan that ran out of
     budget says so on ``budget`` -- the caller reads `budget.note` -- and an
-    unreadable file is in `SiteScan.not_read`: either means the answer is
+    unreadable file is in `SiteScan.unread`: either means the answer is
     not the whole project's.
     """
     scan = SiteScan(store_limit)
