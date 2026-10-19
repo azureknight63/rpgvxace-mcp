@@ -19,6 +19,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+
 LOG = Path(".rpgvxace-mcp") / "changes.jsonl"
 
 

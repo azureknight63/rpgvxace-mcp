@@ -65,11 +65,12 @@ MARKER_FILE = "rpgvxace-live-session.json"
 # `BOOT_SECONDS` and `REPLY_SECONDS` are in `limits`, read back above, so the
 # tool can quote them without loading this module. They are still names here,
 # which is what a test shortens.
-# Folders a scratch copy leaves out, at any depth.
-_NOT_COPIED = frozenset({".rpgvxace-mcp", ".git", ".hg", ".svn"})
-
 QUIT_SECONDS = 3.0
 POLL_SECONDS = 0.01
+
+
+# Folders a scratch copy leaves out, at any depth.
+_NOT_COPIED = frozenset({".rpgvxace-mcp", ".git", ".hg", ".svn"})
 
 
 # How often a wait reminds the game it is active. RGSS3 stops the moment
