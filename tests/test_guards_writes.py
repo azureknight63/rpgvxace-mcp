@@ -815,6 +815,9 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
         "live op=resume": "lets the scratch game run",
         "live op=set": "changes the running game's switches and variables",
         "live op=teleport": "moves the player in the running game",
+        "live op=walk_to": "walks the player to a tile in the running game",
+        "live op=interact": "presses the action key in the running game",
+        "live op=scenario": "runs a list of live steps and checks the game",
         "live op=screenshot": "captures the scratch game's window",
         "live op=eval": "runs Ruby in the scratch game",
         # `event_template` writes only through op=create, which has its own
