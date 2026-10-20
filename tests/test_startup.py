@@ -30,6 +30,7 @@ HEAVY = (
     "rpgvxace_mcp.live.session",
     "rpgvxace_mcp.live.winapi",
     "rpgvxace_mcp.analysis.dead_ends",
+    "rpgvxace_mcp.analysis.lore_baseline",
     "rpgvxace_mcp.analysis.map_shape",
     "rpgvxace_mcp.analysis.reachability",
     "rpgvxace_mcp.analysis.stat_outliers",

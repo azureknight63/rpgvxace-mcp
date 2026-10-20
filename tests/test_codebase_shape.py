@@ -322,6 +322,9 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         # than keeping a second copy of the transfer parsing.
         "dead_ends": {"walk", "reachability"},
         "map_shape": {"walk"},
+        # The lore scan: walks the text (budgeted by `walk`) and reads the
+        # per-map shapes rather than measuring blankness a second time.
+        "lore_baseline": {"walk", "map_shape"},
         "tile_variety": {"walk"},
         "stat_outliers": {"walk"},
         # Fences a project's maps with `stat_outliers`' rule, and walks
@@ -413,8 +416,8 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
     # is held by `test_live_reaches_render_only_through_its_bottom_layer`.
     ROOT_UNORDERED = {
         "analysis", "autotile", "commands", "convert", "docs", "live",
-        "marshal_rb", "render", "rubytypes", "schema", "server", "tools",
-        "__main__",
+        "lore_export", "lore_guidance", "lore_store", "marshal_rb", "render",
+        "rubytypes", "schema", "server", "tools", "__main__",
     }
 
     def tables(self):
@@ -644,7 +647,8 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         # `annotations` is the future import.
         modules = {"walk", "references", "reachability", "dead_ends",
                    "map_shape", "tile_variety", "stat_outliers",
-                   "summary", "switch_usage", "ref_sites", "lint"}
+                   "summary", "switch_usage", "ref_sites", "lint",
+                   "lore_baseline"}
         exported = {name for name in vars(analysis)
                     if not name.startswith("__")}
         dangling = sorted(exported - self.defined_below() - modules

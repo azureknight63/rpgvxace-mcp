@@ -1704,6 +1704,12 @@ class TestOneVocabularyForAPartialAnswer(ToolTest):
         # serving a count under the boolean suffix.
         "dead_ends.py": "the analysis layer; builds `dead_ends_stopped` and "
                         "`dead_ends_note`",
+        # The lore scan, for the same reason: it builds its own answer's
+        # keys (`walk_stopped`, `proper_nouns_truncated`, `files_not_read`
+        # and the review's `findings_truncated`) and nothing else.
+        "lore_baseline.py": "the analysis layer; builds `walk_stopped`, "
+                            "`files_not_read` and the `_truncated` keys of "
+                            "the baseline and the review",
         "map_shape.py": "the analysis layer; builds `dead_space_stopped`",
         "reachability.py": "the analysis layer; builds `reachability_stopped` "
                            "and `reachability_note`",

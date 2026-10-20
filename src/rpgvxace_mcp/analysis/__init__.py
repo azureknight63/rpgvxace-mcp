@@ -159,6 +159,8 @@ def __getattr__(name: str):
 
     lazy = {
         "dead_ends": ("map_dead_ends",),
+        "lore_baseline": ("LoreCorpus", "baseline_of", "lore_review",
+                          "lore_scan", "question_hooks", "suggest_tier"),
         "map_shape": ("map_shapes",),
         "ref_sites": ("ACE_EXTRA_COMMAND_RULES", "FIELD_RULES", "FieldRule",
                       "Hit", "MAX_MENTIONS_LISTED", "MAX_MENTION_TEXT",
