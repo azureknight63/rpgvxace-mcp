@@ -113,7 +113,7 @@ class ServerPool:
 
     def _launch(self, key: tuple):
         engine, extra_args = key
-        tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-proto-"))
+        tmp = Path(tempfile.mkdtemp(prefix="rpgvxace-proto-")).resolve()
         self.dirs.append(tmp)
         project = tmp / "project"
         build(project, engine)

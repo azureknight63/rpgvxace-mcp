@@ -854,6 +854,7 @@ class _BoundedList(list):
 # by the same name: under its own name the wrapper put `<_BoundedList>` in a
 # line and truncated a long list a second time with a different marker.
 _BoundedList.__name__ = "list"
+_BoundedList.__qualname__ = "list"
 
 
 def _display_safe(value: Any) -> Any:

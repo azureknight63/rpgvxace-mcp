@@ -811,7 +811,10 @@ class TestAHandEditedJournalIsNotTrusted(UndoCase):
             self.skipTest("this account cannot create symlinks")
         with self.assertRaises(ProjectError) as caught:
             self.call("undo", op="revert")
-        self.assertIn("link", str(caught.exception))
+        # The refusal is the project's containment check: where the name
+        # really leads is outside the data folder. It does not say "link".
+        self.assertIn("resolves to", str(caught.exception))
+        self.assertIn(str(keep), str(caught.exception))
         self.assertEqual(keep.read_bytes(), self.edited)
 
     def pretend_these_are_links(self, *names):

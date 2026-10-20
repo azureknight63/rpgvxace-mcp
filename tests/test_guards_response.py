@@ -824,7 +824,11 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
         plain = list(range(1000))
         wrapped = command_module._display_safe(list(plain))
         self.assertIsInstance(wrapped, list)
-        self.assertEqual(brief(wrapped), brief(plain))
+        self.assertEqual(
+            brief(wrapped), brief(plain),
+            "the wrapper is called %r / %r; reprlib picks its list renderer "
+            "by the type's name" % (type(wrapped).__name__,
+                                     type(wrapped).__qualname__))
         self.assertEqual(str(wrapped), brief(plain))
 
     def test_two_different_huge_integers_stay_different(self):

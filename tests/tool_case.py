@@ -107,7 +107,9 @@ class _Workspace:
     def __init__(self, engine):
         self.engine = engine
         self.owner = None
-        self.root = Path(tempfile.mkdtemp(prefix="rpgvxace-test-"))
+        # Resolved: a CI runner's temp folder is spelled with a short name
+        # (RUNNER~1) that the server, which resolves its paths, never reports.
+        self.root = Path(tempfile.mkdtemp(prefix="rpgvxace-test-")).resolve()
         _Workspace._created.append(self.root)
         self._materialise()
 
