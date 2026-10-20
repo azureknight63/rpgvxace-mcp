@@ -855,6 +855,11 @@ class _BoundedList(list):
 # line and truncated a long list a second time with a different marker.
 _BoundedList.__name__ = "list"
 _BoundedList.__qualname__ = "list"
+# Python 3.12's `reprlib` also asks the module: it dispatches on a type's name
+# only when the type claims to come from `builtins`, as a subclass that
+# defined its own `__repr__` would not. Measured on CI (3.12.10): with the
+# name alone, `brief` fell through to `<list instance at 0x...>`.
+_BoundedList.__module__ = "builtins"
 
 
 def _display_safe(value: Any) -> Any:
