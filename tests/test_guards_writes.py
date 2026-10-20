@@ -8,6 +8,7 @@ changed underneath us; containment keeps every path inside the project; and
 """
 
 import ast
+import json
 import shutil
 import sys
 import tempfile
@@ -791,6 +792,16 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
         "raw_data op=get": "reads one value by path",
         "scripts op=list": "lists the script slots",
         "scripts op=get": "reads one slot's code",
+        "undo op=list": "lists the journal of previous file contents",
+        # A revert preview needs a journal to preview, which this table's
+        # one-call-per-op shape cannot set up (an empty journal is a
+        # refusal). `TestAnEditCanBeTakenBack` in test_undo_tools makes
+        # real edits first and checks the preview leads with `dry_run`.
+        "undo op=revert": "previewed in test_undo_tools, after real edits",
+        "map_stamp op=list": "lists the stamps kept in the work folder",
+        # Writes one file under .rpgvxace-mcp/exports, which is a cache
+        # like a render and no project data; op=import is the write.
+        "text op=export": "writes a cache file, not project data",
         # `live` changes a running scratch copy of the game, never a project
         # file, so there is no write to preview. Each op still needs its own
         # line: an excuse names one op, so a new op is not excused by these.
@@ -804,8 +815,18 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
         "live op=resume": "lets the scratch game run",
         "live op=set": "changes the running game's switches and variables",
         "live op=teleport": "moves the player in the running game",
+        "live op=walk_to": "walks the player to a tile in the running game",
+        "live op=interact": "presses the action key in the running game",
+        "live op=scenario": "runs a list of live steps and checks the game",
         "live op=screenshot": "captures the scratch game's window",
         "live op=eval": "runs Ruby in the scratch game",
+        # `event_template` writes only through op=create, which has its own
+        # preview below. The other three never reach a file: list and
+        # describe read the built-in table, and preview is create with the
+        # write switched off.
+        "event_template op=list": "lists the built-in templates",
+        "event_template op=describe": "describes one built-in template",
+        "event_template op=preview": "shows what create would write",
     }
 
     def setUp(self):
@@ -815,6 +836,18 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
         self.slot = self.call("scripts", op="list")["scripts"][0]["index"]
         self.backup = self.call("backups", op="create",
                                 label="fixture")["backup"]
+        # A stamp to paste and to delete.
+        self.call("map_stamp", op="copy", name="fixture", map_id=1, x=0, y=0,
+                  width=2, height=2)
+        # An edited export for the text import's preview: one item renamed.
+        exported = self.call("text", op="export", scopes=["database"],
+                             preview=0)
+        document = json.loads(Path(exported["path"]).read_text("utf-8"))
+        for entry in document["entries"]:
+            if entry["key"] == "items:1/name":
+                entry["text"] = "Zap"
+        self.text_file = Path(exported["path"]).with_name("edited.json")
+        self.text_file.write_text(json.dumps(document), "utf-8")
 
     def previews(self):
         """One dry-run call per writing op, as (label, tool, arguments).
@@ -833,6 +866,9 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
             ("db_edit op=delete", "db_edit",
              dict(table="items", dry_run=True,
                   ops=[{"op": "delete", "id": 1}])),
+            ("event_template op=create", "event_template",
+             dict(op="create", template="sign", map_id=1, x=1, y=1,
+                  parameters={"lines": ["Hi"]}, dry_run=True)),
             ("event_edit op=update", "event_edit",
              dict(map_id=1, dry_run=True,
                   ops=[{"op": "update", "event_id": 1, "name": "Renamed"}])),
@@ -900,6 +936,14 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
             ("map_paint op=dungeon", "map_paint",
              dict(op="dungeon", map_id=2, floor="A2:0", wall="A4:8",
                   room_min=2, room_max=3, rooms=2, dry_run=True)),
+            ("map_stamp op=copy", "map_stamp",
+             dict(op="copy", name="preview", map_id=1, x=4, y=3, width=4,
+                  height=3, dry_run=True)),
+            ("map_stamp op=paste", "map_stamp",
+             dict(op="paste", name="fixture", map_id=2, x=2, y=2,
+                  dry_run=True)),
+            ("map_stamp op=delete", "map_stamp",
+             dict(op="delete", name="fixture", dry_run=True)),
             ("scripts op=set", "scripts",
              dict(op="set", index=self.slot, name="Renamed", dry_run=True)),
             ("raw_data op=set", "raw_data",
@@ -910,6 +954,15 @@ class TestEveryPreviewReadsAsAPreview(ToolTest):
             ("backups op=prune", "backups", dict(op="prune", dry_run=True)),
             ("backups op=restore", "backups",
              dict(op="restore", backup=self.backup, dry_run=True)),
+            ("refactor op=renumber", "refactor",
+             dict(op="renumber", table="items", from_id=2, to_id=5,
+                  dry_run=True)),
+            ("refactor op=rename_switch", "refactor",
+             dict(op="rename_switch", id=1, name="Gate", dry_run=True)),
+            ("refactor op=rename_variable", "refactor",
+             dict(op="rename_variable", id=1, name="Coins", dry_run=True)),
+            ("text op=import", "text",
+             dict(op="import", path=str(self.text_file), dry_run=True)),
         ]
 
     # Words that mean "this happened". A preview must not use them at the top

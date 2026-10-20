@@ -86,6 +86,8 @@ from .references import (  # noqa: F401
     reference_preview,
     reference_previews,
     rule_index,
+    scan_note,
+    unreadable_sources,
 )
 # Every name `lint` re-exports, and the same set: this list and the one
 # in `lint/__init__` were written by hand and had drifted eleven names
@@ -158,6 +160,16 @@ def __getattr__(name: str):
     lazy = {
         "dead_ends": ("map_dead_ends",),
         "map_shape": ("map_shapes",),
+        "ref_sites": ("ACE_EXTRA_COMMAND_RULES", "FIELD_RULES", "FieldRule",
+                      "Hit", "MAX_MENTIONS_LISTED", "MAX_MENTION_TEXT",
+                      "Mention", "NOT_SCANNED_EVERYWHERE",
+                      "PAGE_CONDITIONS", "REFERENCE_KINDS",
+                      "RENUMBER_COMPLETE", "RENUMBER_UNCOVERED",
+                      "RESERVED_IDS", "SWITCH_KINDS", "SiteScan",
+                      "TROOP_PAGE_CONDITIONS", "command_rule_tables",
+                      "coverage_for", "declaration_matches_scanner",
+                      "renumber_support", "rewrite_hits", "scan_sites",
+                      "scanned_labels", "site_rule_index", "unique_hits"),
         "reachability": ("map_reachability",),
         "stat_outliers": ("stat_outlier_report", "tukey_fences"),
         "summary": ("SUMMARY_NOTE", "critique_summary"),

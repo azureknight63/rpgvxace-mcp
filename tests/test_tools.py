@@ -2520,9 +2520,11 @@ class TestXPProject(ToolTest):
         self.assertNotIn("Set Vehicle Location", script)
 
     def test_ace_only_tools_refuse_xp_and_say_why(self):
-        with self.assertRaises(ToolError) as caught:
-            self.call("map_render", map_id=1)
-        self.assertIn("RPG Maker XP", str(caught.exception))
+        # map_render draws XP as far as it is established and says so in
+        # engine_warning; `test_engine_parity` holds the rest of it.
+        reply = self.call("map_render", map_id=1)
+        self.assertIn("RPG Maker XP",
+                      getattr(reply, "body", reply)["engine_warning"])
         with self.assertRaises(ToolError) as caught:
             self.call("map_tiles", map_id=1, view="region")
         self.assertIn("RPG Maker XP", str(caught.exception))
@@ -2886,7 +2888,12 @@ class TestRealProject(unittest.TestCase):
         thorny = detail[39]
         self.assertFalse(thorny["blank"])
         self.assertEqual((thorny["width"], thorny["height"]), (38, 30))
-        self.assertEqual(thorny["nonzero_cells"], 1359)
+        # Counted from the file, not a figure copied out of it: the author keeps
+        # painting this map, and a pinned count failed the day they did.
+        table = self.project.load_map(39).get("data")
+        tile_cells = 3 * table.xsize * table.ysize
+        self.assertEqual(thorny["nonzero_cells"],
+                         sum(1 for tile in table.data[:tile_cells] if tile))
         self.assertEqual(thorny["event_count"], 0)
 
     def test_the_default_critique_of_the_fixture_game_is_a_short_summary(self):

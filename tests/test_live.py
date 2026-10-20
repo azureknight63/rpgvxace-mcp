@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import struct
 import sys
 import tempfile
@@ -370,6 +371,32 @@ class TestASessionStartsAndStops(LiveTest):
         (Path(self.project.root) / "Save01.rvdata2").write_bytes(b"save")
         out = self.live("start")
         self.assertFalse((Path(out["scratch_dir"]) / "Save01.rvdata2").exists())
+
+    def test_a_version_control_folder_is_not_copied(self):
+        """A game kept in git has a .git folder: history, not game data.
+
+        It is also the folder whose objects are read-only, which kept the
+        copy from being deleted at all (see the next test).
+        """
+        objects = Path(self.project.root) / ".git" / "objects" / "ab"
+        objects.mkdir(parents=True)
+        (objects / "cdef").write_bytes(b"blob")
+        out = self.live("start")
+        self.assertFalse((Path(out["scratch_dir"]) / ".git").exists())
+        self.assertTrue((Path(out["scratch_dir"]) / "Data").is_dir())
+
+    def test_a_read_only_file_does_not_keep_the_copy_from_being_deleted(self):
+        """Windows will not delete a read-only file, and copy2 keeps the flag."""
+        locked = Path(self.project.root) / "Data" / "Notes.txt"
+        locked.write_bytes(b"read-only in the project")
+        os.chmod(locked, stat.S_IREAD)
+        self.addCleanup(os.chmod, locked, stat.S_IWRITE | stat.S_IREAD)
+        out = self.live("start")
+        copy = Path(out["scratch_dir"]) / "Data" / "Notes.txt"
+        self.assertTrue(copy.exists())
+        stopped = self.live("stop")
+        self.assertTrue(stopped["scratch_removed"])
+        self.assertFalse(Path(out["scratch_dir"]).exists())
 
     def test_the_copy_carries_the_bridge(self):
         out = self.live("start")

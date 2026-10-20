@@ -92,6 +92,15 @@ def server_instructions(project: Project) -> str:
         "the project itself) under your control: start it, pause and step "
         "frames so a test is deterministic, press virtual keys, read state, "
         "and stop it when done -- one session at a time.",
+        "",
+        "For larger jobs: references finds everything that names an id before "
+        "you change it, and refactor renumbers or renames with every site "
+        "updated (dry_run lists them); event_template builds a whole chest, "
+        "door, shop or NPC from a few parameters; map_stamp copies a map area "
+        "and pastes it elsewhere; text exports every player-visible string for "
+        "editing and imports only what changed; undo takes back recent edits "
+        "one change at a time; map_render can mark passability and ids with "
+        "its overlays.",
     ]
     return "\n".join(lines)
 
@@ -490,7 +499,8 @@ def workflow_document(project: Project) -> str:
     forms_note = ("\n\nOn XP only the basic forms compile -- %s -- because XP "
                   "numbers and\nlays out the rest of its commands its own way "
                   "(its Wait is 106, its Set\nMove Route 209). `map_render` "
-                  "does not draw XP maps."
+                  "draws only what is established of XP maps (its "
+                  "engine_warning says what)."
                   % ", ".join(sorted(XP_FORMS))
                   if project.profile.key == "xp" else "")
     return """\
@@ -551,7 +561,9 @@ example.%(forms)s
 
 Tiles: `map_tiles` reads and writes rectangles of tile ids per layer.%(tiles)s%(paint)s
 
-Seeing: `map_render` draws a VX Ace map to a PNG file and returns its path.
+Seeing: `map_render` draws a map to a PNG file and returns its path. VX Ace
+is drawn in full; XP and VX only as far as their formats are established,
+and the reply's engine_warning says how far.
 
 Scripts: `scripts` reads and replaces the script editor slots.
 

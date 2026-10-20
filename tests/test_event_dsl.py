@@ -32,6 +32,7 @@ sys.path.insert(0, str(HERE.parent / "src"))
 sys.path.insert(0, str(HERE / "fixtures"))
 sys.path.insert(0, str(HERE))  # tool_case: bare-name import must work from the repo root
 
+import real_project  # noqa: E402
 from rpgvxace_mcp import marshal_rb  # noqa: E402
 from rpgvxace_mcp.commands import (  # noqa: E402
     CommandError,
@@ -1014,14 +1015,17 @@ class TestEveryRealCommandRebuilds(unittest.TestCase):
             self.skipTest("the real-data comparison is for VX Ace projects")
 
     def lists(self):
-        for map_id in self.project.map_ids_on_disk():
+        for map_id in real_project.editor_written_map_ids(self.project):
             for _, event in self.project.load_map(map_id).get("events").items():
                 for page in event.get("pages"):
                     yield page.get("list")
-        for _, common in self.project.entries("common_events"):
-            if common is not None:
-                yield common.get("list")
-        for _, troop in self.project.entries("troops"):
+        extension = self.project.profile.extension
+        if real_project.editor_written(self.project, "CommonEvents" + extension):
+            for _, common in self.project.entries("common_events"):
+                if common is not None:
+                    yield common.get("list")
+        for _, troop in (self.project.entries("troops") if real_project.editor_written(
+                self.project, "Troops" + extension) else ()):
             if troop is not None:
                 for page in troop.get("pages"):
                     yield page.get("list")

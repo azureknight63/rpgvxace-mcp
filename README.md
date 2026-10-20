@@ -144,7 +144,7 @@ the server at the folder.
 
 ## Tools
 
-Twenty tools, grouped by what they touch. The ones that write are marked ✏️;
+Twenty-six tools, grouped by what they touch. The ones that write are marked ✏️;
 each of those takes `dry_run` and backs the file up before changing it.
 
 | Tool | What it does |
@@ -158,16 +158,22 @@ each of those takes `dry_run` and backs the file up before changing it.
 | `map_edit` ✏️ | Change properties, create a map (file + tree entry together), delete one, or resize it keeping the tiles that still fit. |
 | `map_tiles` ✏️ | Read, write or flood-fill a rectangle of tile ids on any of the three tile layers, or of Ace's fourth layer — raw, or just its region ids (`view=region`) or shadow bits (`view=shadow`), keeping the other part. |
 | `map_paint` ✏️ | Build a VX Ace map without computing tile ids: paint an autotile *kind* (`A2:0`, `A4:8`, or a plain `A5:3`) over a rectangle, a cell list or an outline, and every cell gets the edge/corner shape its neighbours call for while the cells around the edit are re-shaped to join it, as the editor does. `room`, `corridor` and a seeded, repeatable `dungeon` lay out floor, A4/A3 wall faces and wall tops in the VX Ace dungeon style, with the editor's wall shadows; `region` paints region ids. Bounded per call (cells, rooms, re-shaped cells). VX and XP are refused. |
-| `map_render` | Draw a VX Ace map as a PNG you can look at: autotiles, the three tile layers, shadows, event graphics from the project and RTP, optional regions and grid, crop and scale. Returned as an image (up to 1,000,000 bytes of PNG) and always written to a file whose path is returned, for clients that show no images. VX maps are refused. |
+| `map_stamp` ✏️ | Copy a rectangle of a map (its tile layers, shadows and regions, and the events standing in it) under a name, and paste it back later onto the same map or another, optionally mirrored or rotated. A turned stamp's autotile shapes are re-derived for the new orientation and the cells around the paste are re-shaped to join it; events get new ids and moved positions, never overwrite another event, and the commands that cannot move with them (Set Event Location, transfers to the same map, references to other events by number) are reported as `position_dependent`. A paste past the map edge is clipped and says so. Bounded per stamp (cells, events, bytes, stamps kept); a stamp file is checked field by field before it is used. See [docs/map_stamp.md](docs/map_stamp.md). |
+| `map_render` | Draw a VX Ace map as a PNG you can look at: autotiles, the three tile layers, shadows, event graphics from the project and RTP, optional regions and grid, crop and scale, and `overlays` that mark passability, terrain tags, region and event ids. Returned as an image (up to 1,000,000 bytes of PNG) and always written to a file whose path is returned, for clients that show no images. XP draws its tileset tiles and VX is refused unless `unverified_formats` is set; see [docs/engine_parity.md](docs/engine_parity.md). |
 | `event_get` | Events and their command lists, rendered as readable indented script. Lists at most 2000 events per call; `events_truncated` says there are more and `offset` pages to them. |
 | `event_edit` ✏️ | Author events and command lists from a compact DSL (see below). |
+| `event_template` ✏️ | Build a whole event from a built-in template — treasure chest, door (and both sides of a doorway on two maps), sign, NPC, shop, save point, inn, lever — from a few parameters. `describe` shows a template's parameters and command table, `preview` the exact pages it would write, `create` writes them the way `event_edit` would. See [docs/event_template.md](docs/event_template.md). |
 | `command_reference` | The event command codes this engine dispatches, and their confirmed parameter layouts. |
 | `search` | Find text or a command code anywhere: dialogue, comments, entry names, map names, scripts. |
 | `validate` | Lint the project for broken references and event-logic traps. |
+| `references` | Where is item 12, skill 5, switch 40, variable 3, common event 7 or map 4 used? Every event command, page condition, troop page, database field and System start position that names it, each with a readable `where` and `what`, a `coverage` object saying which kinds of site were and were not scanned, and Ruby-script text matches counted apart (never as references). Read-only; at most 200 sites a call, paged with `offset`. See [docs/references.md](docs/references.md). |
+| `refactor` ✏️ | Renumber a map or a database entry and everything that names it, atomically (`swap` exchanges two), or name a switch or variable. **Fails closed**: only tables whose reference sites are declared complete (maps, common events, items, skills, troops, on VX Ace) can be renumbered; `dry_run` lists every site with before and after. See [docs/references.md](docs/references.md). |
 | `map_critique` | Design-quality analysis validate does not run — reachability (which maps nobody can reach, and which of those are just blank), dead_ends (reachable maps the party cannot leave), switch_usage (switches and variables read but never set, or set but never read) and a ranked summary of everything worth a look by default; dead_space (how much of each map's ground layer is empty), tile_variety (Shannon entropy of each tile layer's ids; Ace's region and shadow layer counted apart) and stat_outliers (database entries that are statistical outliers within their own table) return their full tables when named. |
 | `scripts` ✏️ | Read and replace script editor slots. |
 | `backups` ✏️ | Snapshot, list, restore, prune. |
+| `undo` ✏️ | Take back recent edits one change at a time: a bounded journal keeps each file's previous bytes (200 entries / 256 MB), `list` shows it, `revert` undoes the last N changes or everything after an entry id, `dry_run` previews, and a file the editor saved since is refused unless `force`. See [docs/undo.md](docs/undo.md). |
 | `raw_data` ✏️ | Escape hatch: get or set any field by path. |
+| `text` ✏️ | Export every player-visible string (dialogue, choices, scrolling text, names, descriptions, terms, titles) to a JSON file, edit it, and import it back: only edited entries are written, each only if its hash still matches; dialogue is re-wrapped as the editor writes it. Unedited entries leave the files byte-identical. VX Ace and VX; see [docs/text.md](docs/text.md). |
 | `live` | Run a scratch copy of the game and drive it: state, virtual keys, frame stepping, test setup, screenshots, crash capture. See [Live play-testing](#live-play-testing). |
 
 Three reference documents are served as MCP resources — the data format, the
@@ -515,8 +521,9 @@ the script slots, for VX Ace, VX and XP projects.
 
 **Not included:**
 
-* **A live connection to a running game.** There is no runtime state, screenshot
-  or playtest control. Editing files is the whole of it.
+* **Live play-testing without Windows and VX Ace.** `live` drives a scratch
+  copy of a running VX Ace game (see [docs/live.md](docs/live.md)); there is
+  no equivalent for VX or XP.
 * **Editing an encrypted archive** (`Game.rgss3a`, `Game.rgss2a`). A folder
   that ships only the archive, with no `Data` folder beside it, opens
   **read-only**: `Data` is unpacked to a temporary cache (removed on exit) and
@@ -533,8 +540,8 @@ the script slots, for VX Ace, VX and XP projects.
   `Game.rxproj`) is modelled and opens without a flag: its data files, its
   RGSS1 classes, its own command table, its three-layer maps and its tilesets
   are read and written, and new maps, events and pages are built in XP's
-  shape. What XP does not get: `map_render` (XP's autotile patterns are its
-  built-in Tilemap's), regions and shadows (XP has neither), the `event_edit`
+  shape. What XP does not get: autotiles and characters in `map_render` unless
+  `unverified_formats` is set (see [docs/engine_parity.md](docs/engine_parity.md)), regions and shadows (XP has neither), the `event_edit`
   forms whose XP layout differs or was not checked (`wait`, `move_route`,
   the audio forms and the rest of the layout forms -- write those with `raw`),
   and `validate`'s rules that read graphics and audio out of command

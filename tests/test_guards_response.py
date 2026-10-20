@@ -824,6 +824,10 @@ class TestARenderedCommandLineIsBoundedInBytes(ToolTest):
         plain = list(range(1000))
         wrapped = command_module._display_safe(list(plain))
         self.assertIsInstance(wrapped, list)
+        # What reprlib looks at: Python 3.12's also asks the module.
+        self.assertEqual((type(wrapped).__name__, type(wrapped).__qualname__,
+                          type(wrapped).__module__),
+                         ("list", "list", "builtins"))
         self.assertEqual(brief(wrapped), brief(plain))
         self.assertEqual(str(wrapped), brief(plain))
 

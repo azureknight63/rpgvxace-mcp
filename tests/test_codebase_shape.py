@@ -328,6 +328,10 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         # nothing: it reads the replies the other scopes built.
         "summary": {"stat_outliers"},
         "switch_usage": {"walk"},
+        # The wider reference scan behind `references` and `refactor`: it
+        # reuses `references`' command rules and `switch_usage`' operand
+        # tables rather than keeping a second copy of either.
+        "ref_sites": {"walk", "references", "switch_usage"},
         "lint": {"walk", "references"},
     }
     LINT = {
@@ -361,7 +365,16 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         "png": set(),
         "canvas": {"png"},
         "tiles": {"png", "canvas"},
-        "scene": {"png", "canvas", "tiles"},
+        # XP's tile model is a second set of tables over the same canvas.
+        "xp_tiles": {"png", "canvas", "tiles"},
+        # The engine's passage rules (pure, over ids and flags), then the
+        # marks drawn from what they say, then the scene that places both.
+        "passability": {"tiles"},
+        "overlays": {"png", "canvas", "tiles", "passability"},
+        # One engine's tile model as a value, which the scene is given.
+        "layouts": {"png", "tiles", "xp_tiles", "overlays"},
+        "scene": {"png", "canvas", "tiles", "passability", "overlays",
+                  "layouts"},
     }
 
     # And the package root, which three docstrings assert and nothing read:
@@ -373,10 +386,14 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
     ROOT_MODULES = {
         "paths": set(),
         "backups": {"paths"},
+        # The journal of previous file contents: reads `paths` for the
+        # error type, the name rules and the link check, and is held by
+        # `Project` and `backups` (which names it in its contract).
+        "undo_journal": {"paths"},
         # Reads `paths` for its error type and containment check, and
         # nothing else: it is a format reader, not a project.
         "rgss_archive": {"paths"},
-        "project": {"paths", "backups", "rgss_archive"},
+        "project": {"paths", "backups", "rgss_archive", "undo_journal"},
     }
 
     # The rest of the package root, listed rather than passed over. These
@@ -627,7 +644,7 @@ class TestTheAnalysisLayeringIsAcyclic(unittest.TestCase):
         # `annotations` is the future import.
         modules = {"walk", "references", "reachability", "dead_ends",
                    "map_shape", "tile_variety", "stat_outliers",
-                   "summary", "switch_usage", "lint"}
+                   "summary", "switch_usage", "ref_sites", "lint"}
         exported = {name for name in vars(analysis)
                     if not name.startswith("__")}
         dangling = sorted(exported - self.defined_below() - modules

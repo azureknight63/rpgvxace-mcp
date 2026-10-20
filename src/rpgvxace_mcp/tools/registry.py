@@ -169,7 +169,10 @@ class Tool:
         of seven" comes from.
         """
         check_args(self.schema, args)
-        reply = self.handler(ctx, args)
+        # One tool call is one undoable change, even when it writes several
+        # files (`map_edit create` writes the map and MapInfos).
+        with ctx.project.journal.step():
+            reply = self.handler(ctx, args)
         if isinstance(reply, ImageReply):
             return ImageReply(led_by_op(reply.body, args.get("op")), reply.png)
         return led_by_op(reply, args.get("op"))
@@ -755,10 +758,15 @@ def as_int(value: Any, what: str, minimum: int | None = None,
         value = int(value)
     if not isinstance(value, int):
         raise ToolError("%s must be a whole number, got %s" % (what, echo(value)))
+    # `echo`, not `%d`: formatting a 5,000-digit integer raises a bare
+    # ValueError ("Exceeds the limit (4300 digits)") instead of the refusal
+    # this is, and the refusal is the one place a huge value is expected.
     if minimum is not None and value < minimum:
-        raise ToolError("%s must be at least %d, got %d" % (what, minimum, value))
+        raise ToolError("%s must be at least %d, got %s"
+                        % (what, minimum, echo(value)))
     if maximum is not None and value > maximum:
-        raise ToolError("%s must be at most %d, got %d" % (what, maximum, value))
+        raise ToolError("%s must be at most %d, got %s"
+                        % (what, maximum, echo(value)))
     return value
 
 

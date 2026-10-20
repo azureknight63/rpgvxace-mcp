@@ -16,7 +16,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
+sys.path.insert(0, str(HERE))
 
+import real_project  # noqa: E402
 from rpgvxace_mcp import autotile  # noqa: E402
 from rpgvxace_mcp.render import canvas, tiles  # noqa: E402
 from rpgvxace_mcp.render.png import Image  # noqa: E402
@@ -353,7 +355,7 @@ class TestAgainstARealProject(unittest.TestCase):
         from rpgvxace_mcp.project import Project
         project = Project(os.environ["RPGVXACE_TEST_PROJECT"])
         agree = differ = 0
-        for map_id in project.map_ids_on_disk():
+        for map_id in real_project.editor_written_map_ids(project):
             data = project.load_map(map_id).get("data")
             w, h = data.xsize, data.ysize
             for z in range(3):

@@ -94,7 +94,9 @@ All by aliasing, never by replacing a method body.
 ## Ops
 
 `start`, `stop`, `status`, `state`, `pause`, `resume`, `step`, `input`,
-`set`, `teleport`, `screenshot`, `eval`. The tool description carries the
+`set`, `teleport`, `walk_to`, `interact`, `scenario`, `screenshot`, `eval`
+(the last three before `screenshot` are described under
+[Play-test automation](#play-test-automation)). The tool description carries the
 limits; every argument is checked in Python before the game sees it, and
 the bridge checks again against the running game's own data (switch and
 variable ranges, item ids, map ids and sizes).
@@ -178,6 +180,106 @@ maps, 169 script slots) with `tests/test_live_game.py`:
 - **Save files** are not copied, so Continue on the title screen is
   disabled. Loading a save for a test is not supported yet.
 
+## Play-test automation
+
+`walk_to`, `interact` and `scenario` are made of the primitives above and add
+no new power over the game: they press the same virtual keys and read the
+same state. Logic is in `live/playtest.py`; the tool surface is in
+`tools/live_tools.py`; three small read-only bridge ops serve them.
+
+**Bridge ops (Ruby, not user-facing).**
+
+- `passability {x0,y0,x1,y1}` -- one hex digit per cell (bit 1 down, 2 left,
+  4 right, 8 up), each bit from the game's own
+  `$game_player.passable?(x, y, d)`. Events that block, vehicles and the
+  boat rules are therefore in the answer; nothing is recomputed from tile
+  flags. At most `MAX_PASS_CELLS` (4096) cells per read; each cell is
+  rescued on its own, so one that raises reads as blocked.
+- `locate {event_id}` -- an event's x, y, direction, `through`, `erased`.
+- `face {direction}` -- `set_direction` on the player, refused while it is
+  moving. Used instead of a direction key because a key into open floor
+  would walk.
+
+A message window is detected from the `message` state section that already
+existed; a battle from the scene name carried by every reply.
+
+**`walk_to`.** Reads the player, asks for passability (the whole map when it
+has at most 4096 cells, else a window around player and target with a
+16-tile margin; a target needing a larger window is refused with advice to
+walk to a waypoint), plans a breadth-first route, refuses one over 200
+tiles, then loops: press the direction for one frame, step
+`frames_per_step` (default 20, at most 60), read the player, let a step in
+progress finish, classify. A press that moved nothing is repeated once.
+Stop reasons: `arrived`, `blocked`, `moved_elsewhere` (a transfer, or an
+event moved the player; the walk does not re-plan), `message_open`,
+`battle`, `scene_changed`, `frame_budget`, `time_budget`, `no_path`. The
+reply carries the planned `path`, `steps_taken`, the final `player`, the
+scene, `frames_used` (the game's own frame counter), `seconds`, and the
+open `message` if there is one. Bounds: `max_frames` (default 2400, at most
+6000), `max_seconds` (default 60, at most 120). The clock is read between
+requests, and every request has its own bounded wait (a step waits
+`10 + 2 * frames / 60` seconds), so a call can overrun `max_seconds` by one
+request. The game is left paused, as `step` leaves it.
+
+**`interact`.** `direction` (turn in place, then press C), or `event_id`
+(walk to the nearest tile beside the event, face it, press C), or neither
+(press C facing the current way). Steps `frames` (default 12) and replies
+with whether a message opened (and its text), whether the player moved, the
+event the interpreter is running, and `changes`: switches, variables and
+gold before against after (at most 100 entries each, with
+`changes_truncated` and `changes_note` when a section was cut off or could
+not be read). It refuses to act under an open message or a battle; advance
+a message with `input` C. An event behind a counter is not reached (only the
+four adjacent tiles are tried).
+
+**`scenario`.** `steps` (at most 50), each `{op, args, expect}`. Allowed ops:
+`status state pause resume step input set teleport walk_to interact
+screenshot` (a screenshot step reports the file, not the image). `start`,
+`stop`, `eval` and `scenario` are refused by name before anything runs, so
+a scenario cannot reach the eval gate. Every step is checked up front with
+the same schema bounds and per-op argument table as the op called alone. A
+step fails when its op is refused by the game, reports it did not do the
+thing (a walk that did not arrive; an interaction not made), or its `expect`
+does not hold. `expect` keys: `map_id x y direction gold party_size` (a
+number, or `{eq|ne|gt|ge|lt|le: n}`), `switches {id: bool}`, `variables
+{id: n | {op: n}}`, at most 40 comparisons. A switch the bridge does not list
+is off and a variable not listed is 0; a section cut at its entry ceiling
+cannot vouch for an id past the cut. The reply: `passed`, `stop_reason`
+(`completed`, `expectation_failed`, `step_failed`, `frame_budget`,
+`time_budget`), `failed_step`, `failed_expect` {check, compare, expected,
+actual}, and `results` for every step run (cut at 120,000 characters in total,
+with `results_truncated`). `max_frames` (default 3000) and `max_seconds`
+(default 90) bound the whole scenario; a walk inside gets what is left.
+
+**Checked against a real game.** All seven checks below were run on a scratch
+copy of a real VX Ace game (the project and its saves were byte-identical
+afterwards):
+
+1. `walk_to` two tiles away: `arrived`, `steps_taken` 2, `state` agrees.
+2. `walk_to` onto a tile the game's passability blocks: `no_path`, nothing
+   pressed.
+3. A chest standing in a column: walking from two tiles below it to two
+   tiles above took the 6-step route around it, not the 4-step one through.
+4. `interact` with a chest (`event_id`): walked 2 tiles, faced it, the
+   message opened with its text; further `input` C presses closed it. One C
+   does not always close a message (the text may still be printing).
+5. `walk_to` onto an exit tile: `moved_elsewhere` with `transfer_pending`
+   true. The transfer happens on the frames after the step, so the player
+   is still on the old map in that reply; `step` a few frames and read
+   `state` for the new one.
+6. A `scenario` with `expect` on position, a switch and a variable: passed,
+   and with a wrong value gave `expectation_failed` with `failed_expect`.
+7. An `eval` step in a scenario is refused before the game moves.
+
+Two things came out of the real run. `interact` reports `interacted: true`
+when the key was pressed, which is not the same as the target having run:
+walking 24 tiles across a field, an enemy event touched the player, and the C
+went to its balloon wait. The reply now carries a `note` naming the event
+that was running when it was not the target. And a game kept in git copied
+its `.git` folder into the scratch copy; the read-only objects then stopped
+the copy being deleted, so version-control folders are no longer copied and a
+read-only file no longer blocks the cleanup.
+
 ## Tests
 
 - `tests/test_live.py` -- the Python side against
@@ -192,3 +294,7 @@ maps, 169 script slots) with `tests/test_live_game.py`:
         python -m pytest tests/test_live_game.py
 
   Set `RPGVXACE_LIVE_SHOTS=<folder>` to keep the screenshots.
+- `tests/test_playtest.py` -- walk_to, interact and scenario against the
+  fake game's tiny map model (grid, walls, a stale-blocked cell, an event
+  that opens a message / flips a switch / adds gold, a teleport tile, a
+  battle tile), plus the pure search and expectation logic.

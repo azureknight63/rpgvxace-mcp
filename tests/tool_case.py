@@ -60,6 +60,7 @@ from rpgvxace_mcp.tools.registry import (  # noqa: E402
 from rpgvxace_mcp.tools import (  # noqa: E402,F401
     command_docs_tools,
     db_tools,
+    event_template_tools,
     event_tools,
     live_tools,
     map_common,
@@ -68,10 +69,14 @@ from rpgvxace_mcp.tools import (  # noqa: E402,F401
     map_paint_tools,
     map_read_tools,
     map_render_tools,
+    map_stamp_tools,
     map_tile_tools,
     misc_tools,
     raw_tools,
+    reference_tools,
     search_tools,
+    text_tools,
+    undo_tools,
 )
 
 
@@ -102,7 +107,9 @@ class _Workspace:
     def __init__(self, engine):
         self.engine = engine
         self.owner = None
-        self.root = Path(tempfile.mkdtemp(prefix="rpgvxace-test-"))
+        # Resolved: a CI runner's temp folder is spelled with a short name
+        # (RUNNER~1) that the server, which resolves its paths, never reports.
+        self.root = Path(tempfile.mkdtemp(prefix="rpgvxace-test-")).resolve()
         _Workspace._created.append(self.root)
         self._materialise()
 

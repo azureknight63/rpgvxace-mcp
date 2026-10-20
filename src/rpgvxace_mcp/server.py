@@ -21,6 +21,7 @@ from .project import Project, ProjectError, ReadOnlyError, StaleFileError
 from .tools import (  # noqa: F401
     command_docs_tools,
     db_tools,
+    event_template_tools,
     event_tools,
     live_tools,
     map_common,
@@ -29,10 +30,14 @@ from .tools import (  # noqa: F401
     map_paint_tools,
     map_read_tools,
     map_render_tools,
+    map_stamp_tools,
     map_tile_tools,
     misc_tools,
     raw_tools,
+    reference_tools,
     search_tools,
+    text_tools,
+    undo_tools,
 )
 # Imported for the side effect: each module's @tool decorators register its
 # tools in REGISTRY, which all_tools() then reads. Removing these as unused

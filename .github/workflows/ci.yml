@@ -1,0 +1,52 @@
+# The checks every change has to pass, on the platform the server targets.
+#
+# Deliberately light: one Windows job (every test has been run there; the
+# server's live-control half is Windows-only and a few tests build NTFS
+# junctions), no matrix, no dependencies beyond pytest. Two things are left
+# out on purpose:
+#
+#   * the opt-in suites -- the real-project tests (RPGVXACE_TEST_PROJECT) and
+#     the live-game tests (RPGVXACE_LIVE_TESTS) need a game and a window and
+#     skip themselves here;
+#   * `scripts/prove_guards.py` in full, which reverts each of the ~400
+#     guards in turn and takes tens of minutes. Run it locally after touching
+#     scripts/guard_table.py; CI runs its `--check`, which fails when an
+#     anchor no longer matches the file it watches.
+#
+# And two tests are deselected because each re-runs the whole suite in
+# subprocesses (every file alone, and once more in reverse order), which
+# doubles the job for a property that does not change between pushes.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install the test runner
+        run: python -m pip install -r requirements-dev.txt
+      - name: Every guard anchor still matches its file
+        run: python scripts/prove_guards.py --check
+      - name: Tests
+        run: >-
+          python -m pytest -q -p no:cacheprovider
+          --deselect tests/test_prove_guards.py::SuiteFilesRunAloneTest
+          --deselect tests/test_prove_guards.py::ProcessStateIsRestoredTest
