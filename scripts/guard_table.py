@@ -555,6 +555,33 @@ DETECT = _at("test_tools", "TestEngineDetection")
 EVENTSXP = _at("test_tools", "TestEventsXP")
 MAPSXP = _at("test_tools", "TestMapsXP")
 XPTOOL = _at("test_tools", "TestXPProject")
+# test_lore_bible
+LORE_BASELINE = _SRC + "analysis/lore_baseline.py"
+LORE_EXPORT = _SRC + "lore_export.py"
+LORE_GUIDANCE = _SRC + "lore_guidance.py"
+LORE_STORE = _SRC + "lore_store.py"
+LORE_TOOLS = _SRC + "tools/lore_bible_tools.py"
+LOREGUIDE = _at("test_lore_bible", "TestTheGuidanceIsWhole")
+LORESTORE = _at("test_lore_bible", "TestTheBibleFile")
+LOREUNTRUSTED = _at("test_lore_bible", "TestTheBibleFileIsUntrusted")
+LORELINKS = _at("test_lore_bible", "TestALinkInTheLoreFolderIsRefused")
+LOREFOLDER = _at("test_lore_bible", "TestTheLoreFolderIsJudgedBeforeItIsMade")
+LOREDEMO = _at("test_lore_bible", "TestTheBaselineOfTheDemoProject")
+LORESTORY = _at("test_lore_bible", "TestTheBaselineOfAProjectWithAStory")
+LORENOUNS = _at("test_lore_bible", "TestWhichWordsAreNames")
+LORECAPS = _at("test_lore_bible", "TestTheTablesThatGrowAreCapped")
+LOREBOUNDED = _at("test_lore_bible", "TestTheScanIsBoundedWhateverTheProjectHolds")
+LOREVARIANTS = _at("test_lore_bible", "TestSpellingVariants")
+LORESUGGEST = _at("test_lore_bible", "TestTheTierTheScanSuggests")
+LOREREVIEW = _at("test_lore_bible", "TestReviewAgainstTheGameText")
+LOREHOOKS = _at("test_lore_bible", "TestTheQuestionsQuoteTheGame")
+LOREEXPORTS = _at("test_lore_bible", "TestTheExports")
+LORESCAN = _at("test_lore_bible", "TestScan")
+LOREXP = _at("test_lore_bible", "TestScanOnXP")
+LORECHOOSE = _at("test_lore_bible", "TestChoose")
+LORENEXT = _at("test_lore_bible", "TestNext")
+LORESAVE = _at("test_lore_bible", "TestSave")
+LOREEXPORT = _at("test_lore_bible", "TestExportThroughTheTool")
 
 
 GUARDS = [
@@ -5712,5 +5739,524 @@ GUARDS = [
         '''                and other not in (0, event_id, other)):''',
         [PTINTERACT + 'test_another_event_running_is_said_not_taken_for_the_target'],
         'an enemy touched the player on the walk and the key press went to its balloon wait: the reply said interacted, and nothing said the chest never opened',
+    ),
+    # lore_bible: the bible file, the scan, the review, the exports.
+    Guard(
+        'a bible with a field it does not have is refused', LORE_STORE,
+        '''        if key not in _TOP_KEYS:''',
+        '''        if False:''',
+        [LOREUNTRUSTED + 'test_an_unknown_or_missing_top_level_key'],
+        'a hand-edited bible with a stray key was read as a sound one, so what the file said and what the tool kept came apart without a word',
+    ),
+    Guard(
+        'a bible over its ceiling is not opened', LORE_STORE,
+        '''    if size > MAX_BIBLE_BYTES:''',
+        '''    if False:''',
+        [LOREUNTRUSTED + 'test_the_file_size_is_checked_before_it_is_read'],
+        'the work folder sits in the project, which is hostile: a gigabyte bible.json was read whole before anything judged it',
+    ),
+    Guard(
+        'a link is not followed where the bible lives', LORE_STORE,
+        '''    if os.path.lexists(path) and _is_reparse_point(path):''',
+        '''    if False:''',
+        [LORELINKS + 'test_the_work_folder_the_lore_folder_and_the_file',
+         LORELINKS + 'test_an_export_file_that_is_a_link_is_not_written_through'],
+        'a junction planted as the work folder, the lore folder or a file carried a write out of the project, or read a file from anywhere',
+    ),
+    Guard(
+        'the lore folder is judged inside the work folder before it is made', LORE_STORE,
+        '''    _contained(folder, work, "the lore folder")''',
+        '''    pass''',
+        [LOREFOLDER + 'test_the_work_folder_and_the_lore_folder_are_each_contained'],
+        'a lore folder that resolves elsewhere took the mkdir and then the bible with it',
+    ),
+    Guard(
+        'the work folder is judged inside the project before the lore folder is made', LORE_STORE,
+        '''    _contained(work, project.root, "the work folder")''',
+        '''    pass''',
+        [LOREFOLDER + 'test_the_work_folder_and_the_lore_folder_are_each_contained'],
+        'a work folder that resolves elsewhere took the lore folder and the bible out of the project',
+    ),
+    Guard(
+        'a failed bible write leaves the old bible', LORE_STORE,
+        '''    _refuse_link(path, "file")
+    write_bytes_atomic(path, body)
+    return path''',
+        '''    _refuse_link(path, "file")
+    path.write_bytes(body)
+    return path''',
+        [LORESTORE + 'test_a_failed_write_leaves_the_old_bible_and_no_litter'],
+        'a write that failed half way left a truncated bible.json, and the next read refused it: the author lost every answer',
+    ),
+    Guard(
+        'the whole bible is capped before it is written', LORE_STORE,
+        '''    if len(body) > MAX_BIBLE_BYTES:''',
+        '''    if False:''',
+        [LORESTORE + 'test_a_bible_over_the_ceiling_is_refused_and_the_old_one_stands',
+         LORESAVE + 'test_the_whole_bible_is_capped_and_the_old_one_stands'],
+        'a bible saved past the ceiling could not be read back, because load refuses a file that size',
+    ),
+    Guard(
+        'a read-only server does not save the bible', LORE_STORE,
+        '''    project._assert_writable("saving the lore bible")''',
+        '''    pass''',
+        [LORESTORE + 'test_a_read_only_server_will_not_save',
+         LORECHOOSE + 'test_a_read_only_server_will_not_choose',
+         LORESAVE + 'test_a_read_only_server_will_not_save'],
+        'choose and save wrote under --read-only, where the operator asked for nothing to be written',
+    ),
+    Guard(
+        'a stored text holds no control character or lone surrogate', LORE_STORE,
+        '''    bad = (_BAD_LONG if multiline else _BAD_SHORT).search(value)''',
+        '''    bad = None''',
+        [LOREUNTRUSTED + 'test_answers',
+         LORESAVE + 'test_bad_answers_are_refused_whole'],
+        'a lone surrogate JSON permits and UTF-8 cannot hold ended the session when the bible was written; a control character reached a terminal',
+    ),
+    Guard(
+        'a stored text is held to its length', LORE_STORE,
+        '''    if len(value) > limit:''',
+        '''    if False:''',
+        [LOREUNTRUSTED + 'test_answers',
+         LOREUNTRUSTED + 'test_entries'],
+        'an answer or entry of any length was kept, until the bible no longer fit its own ceiling',
+    ),
+    Guard(
+        'an entry is listed once per kind and name', LORE_STORE,
+        '''        if key in seen:''',
+        '''        if False:''',
+        [LOREUNTRUSTED + 'test_entries'],
+        'two entries of one name made a save and a review disagree about which one the bible meant',
+    ),
+    Guard(
+        'a baseline over its byte ceiling is refused', LORE_STORE,
+        '''    if size > MAX_BASELINE_BYTES:''',
+        '''    if False:''',
+        [LOREUNTRUSTED + 'test_a_baseline_over_its_byte_ceiling_is_refused'],
+        'a baseline of many valid strings was kept whole in a file read on every call',
+    ),
+    Guard(
+        'a baseline holds at most so many values', LORE_STORE,
+        '''        if nodes[0] > _BASELINE_NODES_UPPER:''',
+        '''        if False:''',
+        [LOREUNTRUSTED + 'test_a_baseline_with_too_many_values_is_refused'],
+        'a baseline of thousands of tiny values cost work on every read without ever being large in bytes',
+    ),
+    Guard(
+        'a baseline is no deeper than the one this server writes', LORE_STORE,
+        '''        if depth > BASELINE_DEPTH:''',
+        '''        if False:''',
+        [LOREUNTRUSTED + 'test_a_baseline_is_checked_too'],
+        'a deeply nested baseline was kept and then walked by every op that reads it',
+    ),
+    Guard(
+        'a baseline number is a count', LORE_STORE,
+        '''            if abs(item) > _BASELINE_NUMBER_UPPER:''',
+        '''            if False:''',
+        [LOREUNTRUSTED + 'test_a_baseline_is_checked_too'],
+        'a thirty-digit integer in a hand-edited baseline went into a reply, where formatting it past 4,300 digits raises',
+    ),
+    Guard(
+        'a baseline number is finite', LORE_STORE,
+        '''            if not math.isfinite(item) or abs(item) > _BASELINE_NUMBER_UPPER:''',
+        '''            if False:''',
+        [LOREUNTRUSTED + 'test_a_baseline_number_that_is_not_finite_is_refused'],
+        'a number written as 1e999 read back as infinity and went into arithmetic and into a reply',
+    ),
+    Guard(
+        'a baseline string is bounded', LORE_STORE,
+        '''            if len(item) > _BASELINE_STRING_UPPER:''',
+        '''            if False:''',
+        [LOREUNTRUSTED + 'test_a_baseline_is_checked_too'],
+        'a megabyte string in the baseline was quoted into the questions the model is asked to put to the author',
+    ),
+    Guard(
+        'a baseline list is bounded', LORE_STORE,
+        '''            if len(item) > _BASELINE_LIST_UPPER:''',
+        '''            if False:''',
+        [LOREUNTRUSTED + 'test_a_baseline_is_checked_too'],
+        'a baseline list of any length was walked by every consumer',
+    ),
+    Guard(
+        'a baseline key is bounded', LORE_STORE,
+        '''                        or len(key) > _BASELINE_KEY_UPPER):''',
+        '''                        or False):''',
+        [LOREUNTRUSTED + 'test_a_baseline_is_checked_too'],
+        'a megabyte key in the baseline was kept and carried into every reply that copies the baseline',
+    ),
+    Guard(
+        'an export file is one of the two this tool writes', LORE_STORE,
+        '''        if name not in EXPORT_FILES:''',
+        '''        if False:''',
+        [LORELINKS + 'test_export_names_are_a_fixed_set'],
+        'a name with a separator in it wrote an export anywhere under the work folder',
+    ),
+    Guard(
+        'a link where an export goes refuses the whole export', LORE_STORE,
+        '''        _refuse_link(folder / name, "file")''',
+        '''        pass''',
+        [LOREEXPORT + 'test_a_link_where_a_file_goes_refuses_the_whole_export'],
+        'the page was rewritten and the markdown was not, so the pair no longer agreed',
+    ),
+    Guard(
+        'a tier asks the questions of every lower tier', LORE_GUIDANCE,
+        '''    return [q for q in QUESTIONS if TIER_ORDER.index(q["tier"]) <= reach]''',
+        '''    return [q for q in QUESTIONS if TIER_ORDER.index(q["tier"]) == reach]''',
+        [LOREGUIDE + 'test_a_tier_includes_every_lower_tier',
+         LOREGUIDE + 'test_each_tier_asks_more_than_the_one_below'],
+        'a richer tier dropped the premise and the cast, so the interview began in the middle',
+    ),
+    Guard(
+        'the lore scan is bounded by the walk budget', LORE_BASELINE,
+        ['''        if not self.budget.spend(count):''',
+         '''        affordable = self.budget.take(len(commands))'''],
+        ['''        if False:''',
+         '''        affordable = len(commands)'''],
+        [LOREBOUNDED + 'test_a_walk_that_runs_out_says_so'],
+        'Marshal links let seven kilobytes describe five million command visits: the scan walked all of them, silently',
+    ),
+    Guard(
+        'the stored text a scan reads is bounded in bytes', LORE_BASELINE,
+        '''        self.bytes_left -= size''',
+        '''        self.bytes_left -= 0''',
+        [LOREBOUNDED + 'test_a_walk_is_cut_by_the_byte_budget_too'],
+        'a million links to one large string cost a million decodes, and the answer did not say it was cut',
+    ),
+    Guard(
+        'a string is analysed only up to a length', LORE_BASELINE,
+        '''        text = self.codec.decode(raw[:_LINE_CHARS * 4])[:_LINE_CHARS]''',
+        '''        text = self.codec.decode(raw)''',
+        [LOREBOUNDED + 'test_a_huge_map_name_with_an_escape_is_clipped_and_clean'],
+        'a megabyte map name became a megabyte word kept in the vocabulary',
+    ),
+    Guard(
+        'the scan vocabulary is capped and says so', LORE_BASELINE,
+        '''        if len(corpus.token_set) + len(corpus.pair_set) >= _VOCABULARY_UPPER:''',
+        '''        if False:''',
+        [LOREBOUNDED + 'test_a_vocabulary_past_the_ceiling_says_so',
+         LOREREVIEW + 'test_a_vocabulary_past_the_ceiling_is_said'],
+        'a game with a very large vocabulary grew the word sets without limit, and a review reported names missing that were there',
+    ),
+    Guard(
+        'the distinct words a scan counts are capped and say so', LORE_BASELINE,
+        '''                if len(corpus.nouns) >= _DISTINCT_WORDS_UPPER:''',
+        '''                if False:''',
+        [LORECAPS + 'test_distinct_words_are_capped_and_say_so'],
+        'every distinct word of a crafted project was counted, without limit',
+    ),
+    Guard(
+        'the distinct speakers a scan counts are capped and say so', LORE_BASELINE,
+        '''            if len(corpus.speakers) >= _SPEAKERS_UPPER:''',
+        '''            if False:''',
+        [LORECAPS + 'test_distinct_speakers_are_capped_and_say_so'],
+        'a project with a face name per event grew the speaker table without limit',
+    ),
+    Guard(
+        'a comment is counted apart and never read as prose', LORE_BASELINE,
+        r'''                self._count("comments", "\n".join([first] + lines))''',
+        r'''                self._prose("\n".join([first] + lines), where)
+                self._count("comments", "\n".join([first] + lines))''',
+        [LOREDEMO + 'test_comments_are_counted_apart_and_are_not_prose'],
+        'a developer note naming a character was counted as a name the player meets, and a TODO as a line of dialogue',
+    ),
+    Guard(
+        'a database entry with no name is not an entry', LORE_BASELINE,
+        '''                if not name.strip():''',
+        '''                if False:''',
+        [LOREDEMO + 'test_a_placeholder_entry_with_no_name_is_not_an_entry'],
+        'the editor leaves unnamed placeholder entries, and each counted as a missing description',
+    ),
+    Guard(
+        'a name is a capitalised word in mid-sentence, more often than not', LORE_BASELINE,
+        '''    return noun.mid >= 1 and noun.mid > noun.lower and key not in _NOT_NAMES''',
+        '''    return noun.mid >= 1''',
+        [LORENOUNS + 'test_a_word_mostly_written_in_lower_case_is_not_a_name',
+         LORENOUNS + 'test_the_pronoun_I_is_not_a_name',
+         LORENOUNS + 'test_a_word_that_only_ever_starts_a_sentence_is_not_a_name'],
+        'every sentence-initial word, every capitalised common noun and the pronoun I were listed as names, and the real ones were buried',
+    ),
+    Guard(
+        'a word in capitals is not a name', LORE_BASELINE,
+        '''            shouting = len(surface) > 1 and surface.isupper()''',
+        '''            shouting = False''',
+        [LORENOUNS + 'test_a_word_in_capitals_is_not_a_name'],
+        'HP, MP and every other stat abbreviation were listed as recurring names that nothing explains',
+    ),
+    Guard(
+        'a possessive is the name it belongs to', LORE_BASELINE,
+        '''_POSSESSIVE = re.compile("['\\u2019][sS]\\\\Z")''',
+        '''_POSSESSIVE = re.compile("(?!)")''',
+        [LORENOUNS + 'test_a_possessive_is_counted_as_the_name'],
+        "Brindle's and Brindle were two words, so a name that recurs looked like two that did not",
+    ),
+    Guard(
+        'a text code is not a word', LORE_BASELINE,
+        '''        return printable_text(_CODE.sub(" ", text))''',
+        '''        return printable_text(text)''',
+        [LORENOUNS + 'test_text_codes_are_not_words'],
+        r'\C[2] and \N[1] became the names "C" and "N", and glued themselves to the word beside them',
+    ),
+    Guard(
+        'only a name that recurs is called a gap', LORE_BASELINE,
+        '''                 if n["count"] >= _RECURRING and not n["explained"]]''',
+        '''                 if n["count"] >= 0 and not n["explained"]]''',
+        [LORENOUNS + 'test_two_mentions_are_not_yet_a_recurring_name',
+         LORESTORY + 'test_the_gaps_are_ranked_and_say_what_they_found'],
+        'every name seen once was reported as a hole in the lore',
+    ),
+    Guard(
+        'a name a description mentions is explained', LORE_BASELINE,
+        '''              "explained": key in corpus.described,''',
+        '''              "explained": False,''',
+        [LORESTORY + 'test_a_name_in_a_description_is_explained'],
+        'a name the database already explains was offered to the author as a mystery',
+    ),
+    Guard(
+        'a speaking event with the default name is flagged', LORE_BASELINE,
+        '''            default = bool(_DEFAULT_EVENT.match(name)) or not name''',
+        '''            default = not name''',
+        [LORESTORY + 'test_a_speaker_with_a_default_name_and_no_face_is_flagged'],
+        'EV002 was read as a character called EV002, so its lines were attributed to a speaker nobody wrote',
+    ),
+    Guard(
+        'text is sorted by how the player reaches it', LORE_BASELINE,
+        '''_TRIGGER_BUCKET = {0: "action", 1: "touch", 2: "touch", 3: "scene",
+                   4: "scene"}''',
+        '''_TRIGGER_BUCKET = {0: "action", 1: "action", 2: "action", 3: "action",
+                   4: "action"}''',
+        [LORESTORY + 'test_text_is_sorted_by_how_the_player_reaches_it'],
+        'cutscene text counted as optional chat, so a game of autorun scenes read as one full of things to find',
+    ),
+    Guard(
+        'a cycle in the map tree ends the depth count', LORE_BASELINE,
+        '''            while parent in parents and parent not in seen \\''',
+        '''            while parent in parents \\''',
+        [LOREDEMO + 'test_a_cycle_in_the_map_tree_ends_the_depth_count'],
+        'two maps that are each other\'s parent counted as a tree of 64 levels',
+    ),
+    Guard(
+        'names one letter apart are noticed', LORE_BASELINE,
+        '''    if left == right or abs(len(left) - len(right)) > 1:''',
+        '''    if True:''',
+        [LOREVARIANTS + 'test_one_letter_apart'],
+        'a name spelled two ways was never offered to the author as one',
+    ),
+    Guard(
+        'short names one letter apart are different names', LORE_BASELINE,
+        ['''        if len(left_key) < 5:''',
+         '''            if len(right_key) >= 5 and _one_edit(left_key, right_key):'''],
+        ['''        if False:''',
+         '''            if _one_edit(left_key, right_key):'''],
+        [LOREVARIANTS + 'test_short_names_one_letter_apart_are_not_variants'],
+        'Tom, Tim and Tam were offered as one name spelled three ways',
+    ),
+    Guard(
+        'names differing only in case or accents are noticed', LORE_BASELINE,
+        '''        for left, right in zip(forms, forms[1:]):''',
+        '''        for left, right in []:''',
+        [LOREVARIANTS + 'test_differing_only_in_diacritics_or_case'],
+        'Cafe and Café shared a key, so the two spellings were counted as one and never compared',
+    ),
+    Guard(
+        'names differing only in spacing are noticed', LORE_BASELINE,
+        '''            for single in noun.forms:''',
+        '''            for single in ():''',
+        [LOREVARIANTS + 'test_differing_only_in_spacing'],
+        'Silver Gate and Silvergate were two names that nothing connected',
+    ),
+    Guard(
+        'the tier a scan suggests follows the thresholds', LORE_BASELINE,
+        ['''    if words < 2000:''',
+         '''    elif words < 15000:''',
+         '''    elif words < 60000:'''],
+        ['''    if words < 0:''',
+         '''    elif words < 0:''',
+         '''    elif words < 0:'''],
+        [LORESUGGEST + 'test_the_thresholds'],
+        'every game was suggested the deepest tier, whatever it already held',
+    ),
+    Guard(
+        'a name is quoted into a question only when it recurs', LORE_BASELINE,
+        '''                   and _whole(row.get("count")) >= 2]''',
+        '''                   and _whole(row.get("count")) >= 0]''',
+        [LOREHOOKS + 'test_an_unexplained_name_is_offered_once_and_only_when_it_recurs'],
+        'the interview asked the author about every word the game happened to capitalise once',
+    ),
+    Guard(
+        'a name from a stored baseline is clipped before it is quoted', LORE_BASELINE,
+        '''            out.append(_clip(item))''',
+        '''            out.append(item)''',
+        [LOREHOOKS + 'test_a_hostile_name_in_a_stored_baseline_is_clipped'],
+        'a hand-edited baseline put a five-thousand-character name, and an escape sequence, into the line the model reads aloud',
+    ),
+    Guard(
+        'the review reports a name the game never says', LORE_BASELINE,
+        '''        if not whole:''',
+        '''        if False:''',
+        [LOREREVIEW + 'test_a_name_the_game_never_says'],
+        'lore the game never says passed the review as present',
+    ),
+    Guard(
+        'a different spelling is not reported as a missing name', LORE_BASELINE,
+        '''            if spaced or close:''',
+        '''            if False:''',
+        [LOREREVIEW + 'test_a_name_spelled_one_letter_differently',
+         LOREREVIEW + 'test_a_name_spelled_with_different_spacing'],
+        'Brindley in the bible and Brindle in the game were reported as a name the game never says, and the typo went unseen',
+    ),
+    Guard(
+        'a recurring game name the bible lacks is reported', LORE_BASELINE,
+        '''        if count >= _RECURRING and key not in in_bible:''',
+        '''        if count >= _RECURRING and False:''',
+        [LOREREVIEW + 'test_a_recurring_game_name_the_bible_does_not_have'],
+        'a name the game says again and again, and the bible never mentions, passed the review',
+    ),
+    Guard(
+        'a review returns at most its ceiling and says how many there were', LORE_BASELINE,
+        '''    reply["findings"] = findings[:limit]''',
+        '''    reply["findings"] = findings''',
+        [LOREREVIEW + 'test_the_findings_are_capped_and_say_how_many_there_were'],
+        'a bible of five hundred names that the game never says answered with five hundred findings',
+    ),
+    Guard(
+        'a review scope narrows the findings', LORE_BASELINE,
+        '''        if _FINDING_SCOPE[kind] in wanted:''',
+        '''        if True:''',
+        [LOREREVIEW + 'test_scopes_narrow_what_is_asked'],
+        'asking for spellings alone returned every comparison, and the caller believed it had narrowed the question',
+    ),
+    Guard(
+        'HTML text is escaped before it is placed', LORE_EXPORT,
+        '''    return html.escape(text, quote=True)''',
+        '''    return text''',
+        [LOREEXPORTS + 'test_hostile_text_cannot_add_a_tag_or_an_attribute',
+         LOREEXPORT + 'test_hostile_text_in_the_bible_does_not_escape_the_page'],
+        'an answer containing </script><img onerror=...> ran in the author\'s browser, from a file a model had written',
+    ),
+    Guard(
+        'the data block cannot end its own script', LORE_EXPORT,
+        '''    return (text.replace("<", "\\\\u003c").replace(">", "\\\\u003e")
+            .replace("&", "\\\\u0026"))''',
+        '''    return text''',
+        [LOREEXPORTS + 'test_the_data_block_is_json_with_nothing_that_can_close_a_script'],
+        'a string holding </script> ended the data block early and the rest of the answer ran as markup',
+    ),
+    Guard(
+        'a markdown answer is quoted', LORE_EXPORT,
+        r'''    return "\n".join("> " + line if line.strip() else ">" for line in lines)''',
+        r'''    return "\n".join(lines)''',
+        [LOREEXPORTS + 'test_markdown_cannot_be_made_to_add_headings_or_html'],
+        'an answer beginning with # added a heading to the exported document',
+    ),
+    Guard(
+        'markdown text carries no html or emphasis', LORE_EXPORT,
+        r'''    return _MD_SPECIAL.sub(r"\\\1", html.escape(text, quote=False))''',
+        r'''    return text''',
+        [LOREEXPORTS + 'test_markdown_cannot_be_made_to_add_headings_or_html'],
+        'an answer holding <script> or a link reached the exported markdown as live markup',
+    ),
+    Guard(
+        'scan and review are refused on XP', LORE_TOOLS,
+        '''    if not ctx.project.command_layouts_modelled:''',
+        '''    if False:''',
+        [LOREXP + 'test_scan_and_review_are_refused_for_the_reason_text_gives'],
+        "XP's Show Text keeps its first line in the 101, so the scan read every box one line short and said nothing",
+    ),
+    Guard(
+        'a scan under --read-only answers and does not save', LORE_TOOLS,
+        '''    if ctx.project.read_only:''',
+        '''    if False:''',
+        [LORESCAN + 'test_under_read_only_it_answers_and_saves_nothing_and_says_so'],
+        'scan was refused outright under --read-only, though reading the project is exactly what that mode allows',
+    ),
+    Guard(
+        'a custom mode needs its approach', LORE_TOOLS,
+        '''        if approach is None or not approach.strip():''',
+        '''        if False:''',
+        [LORECHOOSE + 'test_a_custom_mode_needs_its_approach'],
+        'a custom mode with no approach left the model with nothing to follow and no word about why',
+    ),
+    Guard(
+        'an approach belongs to a custom mode only', LORE_TOOLS,
+        '''    elif approach is not None:''',
+        '''    elif False:''',
+        [LORECHOOSE + 'test_an_approach_belongs_to_a_custom_mode_only'],
+        'an approach given with the qa mode was dropped and reported as kept',
+    ),
+    Guard(
+        'next serves only the questions not yet answered', LORE_TOOLS,
+        '''               if item["id"] not in bible["answers"]''',
+        '''               if True''',
+        [LORENEXT + 'test_an_answered_question_is_not_asked_again'],
+        'the author was asked the same first three questions on every call',
+    ),
+    Guard(
+        'next narrows to a group when asked', LORE_TOOLS,
+        '''               and (group is None or item["group"] == group)]''',
+        '''               and True]''',
+        [LORENEXT + 'test_a_group_narrows_the_questions'],
+        'a caller who asked for the world questions was handed the next three of everything',
+    ),
+    Guard(
+        'next serves a bounded number of questions', LORE_TOOLS,
+        ['''    count = opt_int_default(args, "count", 3, 1, MAX_QUESTIONS_PER_CALL)''',
+         '''                      minimum=1, maximum=MAX_QUESTIONS_PER_CALL),'''],
+        ['''    count = opt_int_default(args, "count", 3)''',
+         '''                      ),'''],
+        [LORENEXT + 'test_count_is_bounded_and_strict'],
+        'a count of a million, or a boolean, was served as that many questions',
+    ),
+    Guard(
+        'next needs a chosen tier', LORE_TOOLS,
+        '''    if bible["tier"] is None:
+        raise ToolError("no tier is chosen yet, so there is no interview to "
+                        "serve: op=tiers shows the tiers and op=choose picks "
+                        "one")''',
+        '''    pass''',
+        [LORENEXT + 'test_a_tier_is_needed_first'],
+        'with no tier chosen, next raised a bare ValueError from the lookup instead of saying what to do',
+    ),
+    Guard(
+        'an answer names a question this server asks', LORE_TOOLS,
+        '''        if question(key) is None:''',
+        '''        if False:''',
+        [LORESAVE + 'test_a_question_this_server_does_not_ask_is_refused'],
+        'a misspelled question id was stored as an answer nothing would ever ask for or show',
+    ),
+    Guard(
+        'a save names no more answers than there are questions', LORE_TOOLS,
+        '''    if len(raw) > len(QUESTIONS):''',
+        '''    if False:''',
+        [LORESAVE + 'test_more_answers_than_there_are_questions_is_refused_early'],
+        'a hundred thousand answers were each looked up and refused one by one, instead of the request being refused at once',
+    ),
+    Guard(
+        'an entry of the same kind and name replaces the old one', LORE_TOOLS,
+        '''            if entry_key(held) == entry_key(entry):''',
+        '''            if False:''',
+        [LORESAVE + 'test_entries_are_added_then_updated_by_kind_and_name',
+         LORESAVE + 'test_the_same_name_of_another_kind_is_another_entry'],
+        'saving a place twice listed it twice, and the second save was refused as a duplicate',
+    ),
+    Guard(
+        'the bible holds at most so many entries', LORE_TOOLS,
+        '''    if len(bible["entries"]) > MAX_BIBLE_ENTRIES:''',
+        '''    if False:''',
+        [LORESAVE + 'test_the_bible_holds_at_most_so_many_entries'],
+        'the 501st entry was refused as a corrupt file by the next read, not as a request by this one',
+    ),
+    Guard(
+        'a save with nothing in it is refused', LORE_TOOLS,
+        '''    if not answers and not entries and not deletes:''',
+        '''    if False:''',
+        [LORESAVE + 'test_a_save_with_nothing_in_it_is_refused'],
+        'an empty save rewrote the bible and reported success for nothing',
+    ),
+    Guard(
+        'an empty format list is refused', LORE_TOOLS,
+        '''    if args.get("formats") is not None and not opt_list(args, "formats"):''',
+        '''    if False:''',
+        [LOREEXPORT + 'test_formats_are_checked'],
+        'formats=[] was read as "both", which is the opposite of naming none',
     ),
 ]

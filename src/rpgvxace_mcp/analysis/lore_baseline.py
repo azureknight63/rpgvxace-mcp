@@ -47,7 +47,7 @@ from ..commands import (
     CODE_TEXT_LINE,
     MAX_CHOICES,
 )
-from ..convert import brief, decoded_text
+from ..convert import brief
 from ..lore_store import (
     MAX_BASELINE_GAPS,
     MAX_BASELINE_NOUNS,
@@ -832,6 +832,8 @@ def baseline_of(corpus: LoreCorpus) -> dict[str, Any]:
             "blank": corpus.map_blank,
             "max_depth": corpus.map_depth,
             "events_total": corpus.events_total,
+            "events_per_map": (round(corpus.events_total / corpus.map_count, 1)
+                               if corpus.map_count else None),
             "maps_without_events": corpus.map_without_events},
         "events": {
             "total": corpus.events_total,

@@ -471,7 +471,8 @@ class TestTheBibleFileIsUntrusted(StoreTest):
                 ([], "baseline"), ("x", "baseline"), (5, "baseline"),
                 ({"a": "x" * 5000}, "baseline"),
                 ({"a": 10 ** 30}, "baseline"),
-                ({"a": [1] * 5000}, "baseline"),
+                ({"a": [1] * (lore_store._BASELINE_LIST_UPPER + 1)},
+                 "baseline"),
                 ({"a" * 300: 1}, "baseline"),
                 (deep, "baseline")]:
             with self.subTest(baseline=str(baseline)[:30]):
@@ -480,6 +481,24 @@ class TestTheBibleFileIsUntrusted(StoreTest):
                 with self.assertRaises(ProjectError) as caught:
                     lore_store.load(self.project)
                 self.assertIn(word, str(caught.exception))
+
+    def test_a_baseline_over_its_byte_ceiling_is_refused(self):
+        # Each string and the count are within their own bounds; the total is not.
+        baseline = {"k%d" % i: "x" * 500 for i in range(200)}
+        self.write_raw({**self.good(), "baseline": baseline})
+        with self.assertRaises(ProjectError) as caught:
+            lore_store.load(self.project)
+        self.assertIn("%d bytes" % lore_store.MAX_BASELINE_BYTES,
+                      str(caught.exception))
+
+    def test_a_baseline_with_too_many_values_is_refused(self):
+        baseline = {"k%d" % i: 1 for i in range(
+            lore_store._BASELINE_NODES_UPPER + 1)}
+        self.write_raw({**self.good(), "baseline": baseline})
+        with self.assertRaises(ProjectError) as caught:
+            lore_store.load(self.project)
+        self.assertIn("more than %d values" % lore_store._BASELINE_NODES_UPPER,
+                      str(caught.exception))
 
     def test_a_baseline_number_that_is_not_finite_is_refused(self):
         text = json.dumps({**self.good(), "baseline": {"a": 1}}).replace(
@@ -687,6 +706,7 @@ class TestTheBaselineOfTheDemoProject(LoreProject):
         self.assertEqual(maps["blank"], 0)
         self.assertEqual(maps["max_depth"], 2)
         self.assertEqual(maps["events_total"], 3)
+        self.assertEqual(maps["events_per_map"], 1.5)
         self.assertEqual(maps["maps_without_events"], 0)
 
     def test_default_named_blank_and_nested_maps(self):
@@ -1227,7 +1247,7 @@ class TestTheQuestionsQuoteTheGame(LoreProject):
                     self.assertIsInstance(text, str)
 
     def test_a_hostile_name_in_a_stored_baseline_is_clipped(self):
-        baseline = {"names": {"actors": ["A" * 5000, "\x1b[31mred", 5, None]},
+        baseline = {"names": {"actors": ["\x1b[31mred", "A" * 5000, 5, None]},
                     "proper_nouns": [{"name": "N" * 5000, "count": 99,
                                       "explained": False}]}
         hooks = lore_baseline.question_hooks(baseline)
@@ -1299,6 +1319,7 @@ class TestTheExports(unittest.TestCase):
                     "text": "The smith."}]
         if hostile:
             answers["premise.theme"] = HOSTILE[0]
+            answers["world.traveller"] = HOSTILE[9]
             for number, text in enumerate(HOSTILE[1:], start=1):
                 entries.append({"kind": "term", "name": "t%d" % number,
                                 "text": text})
