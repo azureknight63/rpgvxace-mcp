@@ -305,7 +305,22 @@ def _op_tiers(ctx: Context, args: dict[str, Any]) -> dict[str, Any]:
     from ..analysis import lore_baseline
 
     bible = lore_store.load(ctx.project)
-    suggestion = lore_baseline.suggest_tier(bible["baseline"])
+    baseline = bible["baseline"]
+    unsaved = False
+    if not baseline and ctx.project.read_only:
+        # A read-only server can never save a scan, so "run op=scan first"
+        # would be advice nobody could follow: scan now, keep nothing.
+        try:
+            _text_engine(ctx, "tiers")
+            baseline = lore_baseline.baseline_of(
+                lore_baseline.lore_scan(ctx.project))
+            unsaved = True
+        except ToolError:
+            baseline = {}
+    suggestion = lore_baseline.suggest_tier(baseline)
+    if unsaved and suggestion["tier"] is not None:
+        suggestion = dict(suggestion, why=suggestion["why"].rstrip(".") + (
+            " (from a scan that was not saved: this server is read-only)."))
     tiers = []
     for key in TIER_ORDER:
         tier = TIERS[key]

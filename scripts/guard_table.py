@@ -569,6 +569,7 @@ LOREFOLDER = _at("test_lore_bible", "TestTheLoreFolderIsJudgedBeforeItIsMade")
 LOREDEMO = _at("test_lore_bible", "TestTheBaselineOfTheDemoProject")
 LORESTORY = _at("test_lore_bible", "TestTheBaselineOfAProjectWithAStory")
 LORENOUNS = _at("test_lore_bible", "TestWhichWordsAreNames")
+LORETIERS = _at("test_lore_bible", "TestTiers")
 LORECAPS = _at("test_lore_bible", "TestTheTablesThatGrowAreCapped")
 LOREBOUNDED = _at("test_lore_bible", "TestTheScanIsBoundedWhateverTheProjectHolds")
 LOREVARIANTS = _at("test_lore_bible", "TestSpellingVariants")
@@ -5968,8 +5969,8 @@ GUARDS = [
     ),
     Guard(
         'a name is a capitalised word in mid-sentence, more often than not', LORE_BASELINE,
-        '''    return noun.mid >= 1 and noun.mid > noun.lower and key not in _NOT_NAMES''',
-        '''    return noun.mid >= 1''',
+        '''    return (noun.mid >= 1 and noun.mid > noun.lower''',
+        '''    return (noun.mid >= 1''',
         [LORENOUNS + 'test_a_word_mostly_written_in_lower_case_is_not_a_name',
          LORENOUNS + 'test_the_pronoun_I_is_not_a_name',
          LORENOUNS + 'test_a_word_that_only_ever_starts_a_sentence_is_not_a_name'],
@@ -6258,5 +6259,19 @@ GUARDS = [
         '''    if False:''',
         [LOREEXPORT + 'test_formats_are_checked'],
         'formats=[] was read as "both", which is the opposite of naming none',
+    ),
+    Guard(
+        'a single letter is not taken for a name', LORE_BASELINE,
+        '''            and len(key) > 1 and key not in _NOT_NAMES)''',
+        '''            and len(key) > 0 and key not in _NOT_NAMES)''',
+        [LORENOUNS + 'test_a_single_letter_is_a_label_not_a_name'],
+        'Plan B, Room C and a speaker initial came out as the most-repeated names of a real game and were reported as unexplained lore',
+    ),
+    Guard(
+        'a read-only server scans for the tier suggestion', LORE_TOOLS,
+        '''    if not baseline and ctx.project.read_only:''',
+        '''    if False and ctx.project.read_only:''',
+        [LORETIERS + 'test_a_read_only_server_scans_for_the_suggestion_instead_of_asking_for_a_scan'],
+        'a read-only server can never save a scan, so tiers kept saying to run one and no suggestion was ever possible',
     ),
 ]

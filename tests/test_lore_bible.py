@@ -1679,6 +1679,16 @@ class TestTiers(ToolCase):
         self.assertIsNone(reply["suggested_tier"])
         self.assertIn("scan", reply["suggestion"])
 
+    def test_a_read_only_server_scans_for_the_suggestion_instead_of_asking_for_a_scan(self):
+        """Seen on a real game: a read-only server cannot save a scan, so
+        `tiers` told the author to run one, and the next call said the same."""
+        self.project.read_only = True
+        reply = self.lore(op="tiers")
+        self.assertEqual(reply["suggested_tier"], "light")
+        self.assertIn("23 words", reply["suggestion"])
+        self.assertIn("not saved", reply["suggestion"])
+        self.assertFalse(self.lore_folder.exists())
+
     def test_after_a_scan_the_suggestion_comes_from_the_baseline(self):
         self.lore(op="scan")
         reply = self.lore(op="tiers")
@@ -2339,6 +2349,13 @@ class TestWhichWordsAreNames(LoreProject):
     def test_the_pronoun_I_is_not_a_name(self):
         found = self.nouns("Then I left.", "Then I ran.", "Then I hid.")
         self.assertNotIn("I", found)
+
+    def test_a_single_letter_is_a_label_not_a_name(self):
+        """`Plan B`, `Room C`, an initial: seen in a real game as top names."""
+        found = self.nouns("Take Plan B now.", "Plan B failed, so B it is.",
+                           "Then go to Room C and wait in Room C.")
+        self.assertNotIn("B", found)
+        self.assertNotIn("C", found)
 
     def test_a_word_that_only_ever_starts_a_sentence_is_not_a_name(self):
         found = self.nouns("Welcome home.", "Welcome again.", "Welcome back.")

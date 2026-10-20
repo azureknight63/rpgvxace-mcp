@@ -731,7 +731,9 @@ def lore_scan(project: Project, budget: "WalkBudget | None" = None
 
 
 def _is_name(noun: _Noun, key: str) -> bool:
-    return noun.mid >= 1 and noun.mid > noun.lower and key not in _NOT_NAMES
+    # A single letter is a label (`Plan B`, `Room C`) or an initial, not a name.
+    return (noun.mid >= 1 and noun.mid > noun.lower
+            and len(key) > 1 and key not in _NOT_NAMES)
 
 
 def _surface(noun: _Noun) -> str:
