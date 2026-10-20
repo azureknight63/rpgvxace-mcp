@@ -92,6 +92,15 @@ def server_instructions(project: Project) -> str:
         "the project itself) under your control: start it, pause and step "
         "frames so a test is deterministic, press virtual keys, read state, "
         "and stop it when done -- one session at a time.",
+        "",
+        "For larger jobs: references finds everything that names an id before "
+        "you change it, and refactor renumbers or renames with every site "
+        "updated (dry_run lists them); event_template builds a whole chest, "
+        "door, shop or NPC from a few parameters; map_stamp copies a map area "
+        "and pastes it elsewhere; text exports every player-visible string for "
+        "editing and imports only what changed; undo takes back recent edits "
+        "one change at a time; map_render can mark passability and ids with "
+        "its overlays.",
     ]
     return "\n".join(lines)
 
