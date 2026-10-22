@@ -48,6 +48,7 @@ from rpgvxace_mcp.tools import (  # noqa: E402
     event_template_tools,
     event_tools,
     live_tools,
+    lore_bible_tools,
     map_edit_tools,
     map_paint_tools,
     map_stamp_tools,
@@ -581,6 +582,7 @@ class TestEveryOpSelectingToolHasATable(unittest.TestCase):
         ("scripts", None): misc_tools.SCRIPT_OP_ARGS,
         ("backups", None): misc_tools.BACKUP_OP_ARGS,
         ("live", None): live_tools.LIVE_OP_ARGS,
+        ("lore_bible", None): lore_bible_tools.LORE_OP_ARGS,
         ("undo", None): undo_tools.UNDO_OP_ARGS,
         ("text", None): text_tools.TEXT_OP_ARGS,
     }
@@ -770,6 +772,7 @@ class TestNoOpSlipsPastTheGate(ToolTest):
         ("scripts", None): misc_tools.SCRIPT_OP_ARGS,
         ("backups", None): misc_tools.BACKUP_OP_ARGS,
         ("live", None): live_tools.LIVE_OP_ARGS,
+        ("lore_bible", None): lore_bible_tools.LORE_OP_ARGS,
         ("undo", None): undo_tools.UNDO_OP_ARGS,
         ("text", None): text_tools.TEXT_OP_ARGS,
     }

@@ -100,7 +100,9 @@ def server_instructions(project: Project) -> str:
         "and pastes it elsewhere; text exports every player-visible string for "
         "editing and imports only what changed; undo takes back recent edits "
         "one change at a time; map_render can mark passability and ids with "
-        "its overlays.",
+        "its overlays; lore_bible scans what the game already says and "
+        "guides an author through building its lore, keeping the answers "
+        "outside the game's data.",
     ]
     return "\n".join(lines)
 

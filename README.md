@@ -144,7 +144,7 @@ the server at the folder.
 
 ## Tools
 
-Twenty-six tools, grouped by what they touch. The ones that write are marked ✏️;
+Twenty-seven tools, grouped by what they touch. The ones that write are marked ✏️;
 each of those takes `dry_run` and backs the file up before changing it.
 
 | Tool | What it does |
@@ -174,6 +174,7 @@ each of those takes `dry_run` and backs the file up before changing it.
 | `undo` ✏️ | Take back recent edits one change at a time: a bounded journal keeps each file's previous bytes (200 entries / 256 MB), `list` shows it, `revert` undoes the last N changes or everything after an entry id, `dry_run` previews, and a file the editor saved since is refused unless `force`. See [docs/undo.md](docs/undo.md). |
 | `raw_data` ✏️ | Escape hatch: get or set any field by path. |
 | `text` ✏️ | Export every player-visible string (dialogue, choices, scrolling text, names, descriptions, terms, titles) to a JSON file, edit it, and import it back: only edited entries are written, each only if its hash still matches; dialogue is re-wrapped as the editor writes it. Unedited entries leave the files byte-identical. VX Ace and VX; see [docs/text.md](docs/text.md). |
+| `lore_bible` | Guides an author through building the game's lore, offline. `scan` reads the dialogue, descriptions, names and map layout and reports what is thin; `tiers` offers four scope tiers (light to deep) with comparison games and labelled estimates; `choose` keeps a tier and a mode (question and answer, an HTML worksheet, or the author's own approach); `next` serves curated questions that quote the game; `save` keeps answers and named entries; `review` compares the bible with the game's real text (names the game never says, recurring names the bible lacks, spelling variants, places and characters that never appear); `export` writes a self-contained HTML bible and markdown. The bible lives in `.rpgvxace-mcp/lore/` and the game's data files are never edited. `scan` and `review` need a VX Ace or VX project. See [docs/lore_bible.md](docs/lore_bible.md). |
 | `live` | Run a scratch copy of the game and drive it: state, virtual keys, frame stepping, test setup, screenshots, crash capture. See [Live play-testing](#live-play-testing). |
 
 Three reference documents are served as MCP resources — the data format, the

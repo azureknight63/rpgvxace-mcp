@@ -24,6 +24,7 @@ from .tools import (  # noqa: F401
     event_template_tools,
     event_tools,
     live_tools,
+    lore_bible_tools,
     map_common,
     map_critique_tools,
     map_edit_tools,
